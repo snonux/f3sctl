@@ -98,9 +98,14 @@ Each host entity in `/status` carries two independent booleans:
 | `ping` | `ssh` | State | Suggested display |
 |---|---|---|---|
 | `true` | `true` | up | "up" |
-| `true` | `false` | booting | "starting…" |
+| `true` | `false` | in transition | "starting…" / "stopping…" |
 | `false` | `false` | off, **or hung** | "off" |
 | `false` | `true` | — | should not occur; show "up" |
+
+The second row is genuinely directionless: a host answering ICMP with no sshd
+is either coming up or going down, and one observation cannot tell which. If a
+job is running, `job.properties.action` says which way — use that to pick the
+wording. With no job, "in transition" is the honest label.
 
 The third row is genuinely ambiguous and a client should not pretend otherwise.
 A host that failed to shut down cleanly ends up in single-user mode: powered

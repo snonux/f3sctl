@@ -25,6 +25,18 @@ import (
 // optional config. Absent is not an error.
 const DefaultPath = "/usr/local/etc/f3sctl.json"
 
+// searchPath is where Load looks when no explicit path is given, most specific
+// first.
+//
+// The per-user file comes first so a laptop can configure --remote (an API URL
+// and a key) without root, while the packaged hosts keep their system-wide
+// file. Only the first file found is read; they are not merged, because
+// silently combining two configs makes "which setting won" unanswerable.
+var searchPath = []string{
+	"~/.config/f3sctl.json",
+	DefaultPath,
+}
+
 // Config is everything f3sctl needs beyond the host inventory.
 type Config struct {
 	Inventory inventory.Inventory `json:"inventory"`
@@ -35,10 +47,15 @@ type Config struct {
 	// ShellyPasswordFile lists candidate files whose first line is the
 	// Shelly plug's digest password.
 	ShellyPasswordFile []string `json:"shelly_password_file"`
-	// APIKeyFile holds the single API key accepted in CGI mode.
+	// APIKeyFile holds the API key: the single key accepted in CGI mode, and
+	// the key presented in --remote mode.
 	APIKeyFile string `json:"api_key_file"`
 	// StateDir holds the job lock, job state and job log.
 	StateDir string `json:"state_dir"`
+
+	// APIURL is the endpoint --remote talks to. Set on clients (earth), unset
+	// on the Pis, which serve the API rather than call it.
+	APIURL string `json:"api_url"`
 
 	// VMShutdownTimeout bounds how long a host waits for its bhyve guests to
 	// power off before resorting to SIGKILL.
@@ -84,15 +101,24 @@ func Default() Config {
 	}
 }
 
-// Load returns the default config overlaid with path, if that file exists.
-// A missing file is not an error; a malformed one is.
+// Load returns the default config overlaid with the first config file found.
+//
+// If path is given it is used exactly; otherwise searchPath is tried in order.
+// A missing file is not an error -- f3sctl is meant to work with no
+// configuration at all -- but a malformed one is, because silently ignoring a
+// config the operator wrote is worse than stopping.
 func Load(path string) (Config, error) {
 	cfg := Default()
+
 	if path == "" {
-		path = DefaultPath
+		if found, ok := firstExisting(searchPath); ok {
+			path = found
+		} else {
+			return cfg, nil
+		}
 	}
 
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(expandHome(path))
 	if errors.Is(err, fs.ErrNotExist) {
 		return cfg, nil
 	}
@@ -131,6 +157,44 @@ func (c Config) ResolveShellyPassword() (string, error) {
 		return "", fmt.Errorf("%s is empty", path)
 	}
 	return pw, nil
+}
+
+// ResolveAPIKey returns the API key for --remote mode.
+//
+// The environment wins over the config file so a second endpoint, or a rotated
+// key, can be used without editing anything -- which is also what makes the
+// tool easy to point at a test instance.
+func (c Config) ResolveAPIKey() (string, error) {
+	if k := strings.TrimSpace(os.Getenv("F3SCTL_KEY")); k != "" {
+		return k, nil
+	}
+	raw, err := os.ReadFile(expandHome(c.APIKeyFile))
+	if err != nil {
+		return "", fmt.Errorf("reading the API key from %s: %w (or set F3SCTL_KEY)", c.APIKeyFile, err)
+	}
+	key := strings.TrimSpace(string(raw))
+	if key == "" {
+		return "", fmt.Errorf("%s is empty", c.APIKeyFile)
+	}
+	return key, nil
+}
+
+// ResolveAPIURL returns the endpoint --remote talks to.
+func (c Config) ResolveAPIURL() string {
+	if u := strings.TrimSpace(os.Getenv("F3SCTL_URL")); u != "" {
+		return u
+	}
+	return c.APIURL
+}
+
+// firstExisting returns the first candidate path present on disk.
+func firstExisting(candidates []string) (string, bool) {
+	for _, c := range candidates {
+		if _, err := os.Stat(expandHome(c)); err == nil {
+			return c, true
+		}
+	}
+	return "", false
 }
 
 // firstReadable returns the first candidate path that can actually be opened,

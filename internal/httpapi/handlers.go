@@ -151,6 +151,7 @@ func (s *Server) handleJob(state State, _ request) (Entity, int, error) {
 
 func (s *Server) jobEntity(j Job) Entity {
 	props := map[string]any{
+		"id":      j.ID,
 		"action":  j.Action,
 		"state":   string(j.State),
 		"started": j.Started,

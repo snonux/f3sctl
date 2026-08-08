@@ -32,6 +32,15 @@ Usage:
   f3sctl fans off [--force]    Switch the rack fans off
   f3sctl version               Print the version
 
+Global flags:
+  --remote, -r   Drive the command through the HTTP API on pi0/pi1 instead of
+                 acting locally. Required when off the LAN: a Wake-on-LAN
+                 magic packet is not routed, so only a host on the homelab
+                 broadcast domain can send one. Needs api_url and an API key
+                 (config, or F3SCTL_URL / F3SCTL_KEY).
+  --force, -f    Confirm an action the server guards, e.g. switching the rack
+                 fans off while hosts are still running.
+
 f3sctl powers only the FreeBSD bhyve hosts f0-f3. It never powers a Raspberry
 Pi: pi0 and pi1 are where it runs, and powering them off would remove the only
 way to power anything back on.
@@ -39,9 +48,19 @@ way to power anything back on.
 
 // Run executes one CLI invocation.
 func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+	args, remote, force := parseGlobalFlags(args)
+
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
+	}
+
+	// In remote mode the same verbs are driven through the HTTP API instead of
+	// performed locally. That is the only way to work off-LAN: a Wake-on-LAN
+	// magic packet is not routed, so a laptop elsewhere physically cannot wake
+	// an f-host -- but pi0/pi1 can, on its behalf.
+	if remote && args[0] != "version" && args[0] != "help" {
+		return runRemote(cfg, args, force, stdout)
 	}
 
 	switch args[0] {

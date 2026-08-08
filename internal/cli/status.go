@@ -45,12 +45,16 @@ func printStatus(ctx context.Context, eng *power.Engine, out io.Writer) error {
 }
 
 // describe turns the two probe signals into the state they imply.
+//
+// The middle case is deliberately not called "booting": answering ICMP with no
+// sshd means the host is in transition, and a single observation cannot tell a
+// host coming up from one going down.
 func describe(st power.HostStatus) string {
 	switch {
 	case st.Ping && st.SSH:
 		return "up"
 	case st.Ping && !st.SSH:
-		return "booting"
+		return "in transition"
 	default:
 		// Also the signature of a host hung in single-user after a failed
 		// shutdown: powered on, no network, and not wakeable by WoL. There is

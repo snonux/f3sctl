@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,17 @@ const (
 // 300s session timeout and far past anything a watch app will wait for. So the
 // request starts a detached child and returns immediately.
 type Job struct {
+	// ID uniquely identifies this job across both API nodes.
+	//
+	// It exists because relayd load-balances pi0 and pi1: a POST may start a
+	// job on pi1 while the client's next poll lands on pi0, which holds an
+	// entirely different job -- possibly an old *failed* one. Without an ID
+	// the client cannot tell "not my job" from "my job finished", and will
+	// report someone else's stale failure as its own result. Observed for
+	// real on 2026-08-08: a shutdown that was running perfectly well was
+	// reported as failed because the other node still held a failure from
+	// twenty minutes earlier.
+	ID string `json:"id"`
 	// Action is the CLI action this job runs, e.g. "off".
 	Action string   `json:"action"`
 	State  JobState `json:"state"`
@@ -42,6 +55,17 @@ type Job struct {
 	Node string `json:"node"`
 	// Error is the child's failure message, when it failed.
 	Error string `json:"error,omitempty"`
+}
+
+// newJobID returns a random identifier for a job. Random rather than a
+// counter: the two API nodes keep separate state and must never mint the same
+// ID.
+func newJobID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating a job id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // jobStore persists job state and serialises access to it.
@@ -134,7 +158,12 @@ func (js jobStore) start(action string, args []string) (Job, error) {
 	}
 
 	node, _ := os.Hostname()
+	id, err := newJobID()
+	if err != nil {
+		return Job{}, err
+	}
 	job := Job{
+		ID:      id,
 		Action:  action,
 		State:   JobRunning,
 		Started: time.Now().UTC().Format(time.RFC3339),
