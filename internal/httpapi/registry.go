@@ -34,8 +34,16 @@ func (s State) host(name string) (power.HostStatus, bool) {
 	return power.HostStatus{}, false
 }
 
-// clusterHostsUp reports how many of f0/f1/f2 answer ICMP.
-func (s State) clusterHostsUp() (up, total int) {
+// clusterHostsUp reports how many of f0/f1/f2 answer ICMP, and how many are
+// additionally reachable over SSH.
+//
+// The two counts answer different questions. Waking is about power, so it uses
+// ping. Shutting down runs entirely over SSH -- the zusb pre-flight, the guest
+// stop, the poweroff itself -- so it needs sshUp: offering "power off" to a
+// host that is merely mid-boot produces a job that can only fail. That is
+// exactly what happened on 2026-08-08, when f3 was shut down 48 seconds after
+// waking and the pre-flight got "connection refused".
+func (s State) clusterHostsUp() (up, sshUp, total int) {
 	for _, h := range s.Hosts {
 		if h.Role != "f" || h.Name == "f3" {
 			continue
@@ -44,8 +52,11 @@ func (s State) clusterHostsUp() (up, total int) {
 		if h.Ping {
 			up++
 		}
+		if h.SSH {
+			sshUp++
+		}
 	}
-	return up, total
+	return up, sshUp, total
 }
 
 // anyFHostUp reports whether anything in the rack is drawing power. This is
@@ -123,7 +134,7 @@ func routes() []route {
 			// group already answers, waking it again is a no-op that would
 			// still cost the caller a job slot.
 			Available: func(s State) bool {
-				up, total := s.clusterHostsUp()
+				up, _, total := s.clusterHostsUp()
 				return !s.jobRunning() && up < total
 			},
 			Handle: handleAction("on"),
@@ -131,9 +142,12 @@ func routes() []route {
 		{
 			Name: "power-off", Title: "Power off f0/f1/f2",
 			Method: http.MethodPost, Path: "/power/off", Action: true,
+			// Requires SSH, not just ping: the whole shutdown runs over
+			// SSH, so a host that is only mid-boot cannot be shut down and
+			// must not be offered as if it could.
 			Available: func(s State) bool {
-				up, _ := s.clusterHostsUp()
-				return !s.jobRunning() && up > 0
+				_, sshUp, _ := s.clusterHostsUp()
+				return !s.jobRunning() && sshUp > 0
 			},
 			Handle: handleAction("off"),
 		},
@@ -149,9 +163,10 @@ func routes() []route {
 		{
 			Name: "f3-off", Title: "Power off f3",
 			Method: http.MethodPost, Path: "/power/f3/off", Action: true,
+			// SSH, not ping -- see power-off.
 			Available: func(s State) bool {
 				h, ok := s.host("f3")
-				return ok && !s.jobRunning() && h.Ping
+				return ok && !s.jobRunning() && h.SSH
 			},
 			Handle: handleAction("f3-off"),
 		},

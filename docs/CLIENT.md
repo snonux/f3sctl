@@ -171,6 +171,13 @@ field is there, and that reason is not always the same.
 
 Send fields as `application/x-www-form-urlencoded` using the action's `type`.
 
+**Always send a `Content-Length` on POST, even when the action takes no fields.**
+bozohttpd rejects a POST with no `Content-Length` header at all with a **400**,
+before the CGI ever runs — so the error looks like the API refusing the action
+when in fact the API never saw it. Most HTTP libraries send `Content-Length: 0`
+automatically (`fetch`, PebbleKit JS, Go's net/http all do); `curl -X POST`
+with no `--data` does not, which is the usual way to trip over this.
+
 Worked example. While a host is running, `fans-off` arrives as:
 
 ```json

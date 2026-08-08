@@ -20,6 +20,13 @@ import (
 // long to report.
 const powerDownTimeout = 2 * time.Minute
 
+// confirmedDownProbes is how many consecutive missed pings count as "off".
+//
+// Three, at ten seconds apart, is comfortably longer than the interface flap
+// seen mid-shutdown while still declaring a genuinely dead host down inside
+// half a minute.
+const confirmedDownProbes = 3
+
 // awaitPowerDown waits for each host to stop answering ICMP, and returns the
 // names of any that never do.
 //
@@ -36,6 +43,7 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 	fmt.Fprintln(log, "Confirming the hosts actually powered down...")
 
 	pending := make(map[string]inventory.Host, len(hosts))
+	misses := make(map[string]int, len(hosts))
 	for _, h := range hosts {
 		pending[h.Name] = h
 	}
@@ -49,7 +57,20 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 		}
 
 		for name, h := range pending {
-			if !e.pingOnce(ctx, h.IP) {
+			if e.pingOnce(ctx, h.IP) {
+				// Still answering: reset, so only a sustained silence counts.
+				misses[name] = 0
+				continue
+			}
+
+			// One missed ping is not proof of a power-down. The interface goes
+			// down and comes back up again during a normal shutdown -- f0's
+			// and f1's logs both show "re0: link state changed to DOWN" then
+			// "... to UP" seconds apart, as devd and carp shuffle around --
+			// so a single miss would let a host that is still very much alive
+			// be recorded as safely off. Require consecutive misses.
+			misses[name]++
+			if misses[name] >= confirmedDownProbes {
 				fmt.Fprintf(log, "  %s is down\n", name)
 				delete(pending, name)
 			}

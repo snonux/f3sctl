@@ -69,6 +69,10 @@ func TestActionAvailability(t *testing.T) {
 	fHost := func(name string, ping bool) power.HostStatus {
 		return power.HostStatus{Name: name, Role: "f", Ping: ping, SSH: ping}
 	}
+	// A host that answers ICMP but has no sshd yet: mid-boot, or mid-shutdown.
+	booting := func(name string) power.HostStatus {
+		return power.HostStatus{Name: name, Role: "f", Ping: true, SSH: false}
+	}
 
 	allUp := State{
 		Hosts: []power.HostStatus{fHost("f0", true), fHost("f1", true), fHost("f2", true), fHost("f3", true)},
@@ -120,6 +124,31 @@ func TestActionAvailability(t *testing.T) {
 		{"fans off", allDown, "fans-on", true, "off, so it can be switched on"},
 		{"fans off", allDown, "fans-off", false, "already off"},
 	}
+
+	// A host that is only mid-boot must not be offered a shutdown: the whole
+	// operation runs over SSH, so the job could only fail. This was a real
+	// failure on 2026-08-08, when f3 was offered f3-off 48 seconds after
+	// waking and the zusb pre-flight got "connection refused".
+	midBoot := State{
+		Hosts: []power.HostStatus{booting("f0"), booting("f1"), booting("f2"), booting("f3")},
+		Fans:  power.FansState{On: true},
+	}
+	cases = append(cases,
+		struct {
+			name   string
+			state  State
+			action string
+			want   bool
+			why    string
+		}{"mid-boot", midBoot, "power-off", false, "no sshd yet, so a shutdown could only fail"},
+		struct {
+			name   string
+			state  State
+			action string
+			want   bool
+			why    string
+		}{"mid-boot", midBoot, "f3-off", false, "no sshd yet, so a shutdown could only fail"},
+	)
 
 	for _, tc := range cases {
 		r, ok := routeByName(tc.action)
