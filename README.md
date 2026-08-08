@@ -14,6 +14,25 @@ f3sctl power f3 on|off       # f3 is standalone; addressed separately
 f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
 ```
 
+Add `--remote` to drive it through the API on pi0/pi1 instead of acting
+locally — the only way it works off-LAN, since a Wake-on-LAN magic packet is
+not routed. Add `--verbose` to trace every API call:
+
+```
+$ f3sctl -v power status
+f3sctl: API base https://f3s.buetow.org/cgi-bin/f3sctl/
+  → GET https://f3s.buetow.org/cgi-bin/f3sctl/
+  ← 200 from pi0.lan.buetow.org (510ms)
+  → GET https://f3s.buetow.org/cgi-bin/f3sctl/status
+  ← 200 from pi1.lan.buetow.org (425ms)
+```
+
+That trace answers a question nothing else can: **which node served each
+request**. relayd load-balances pi0 and pi1, so consecutive calls land on
+different machines — which is exactly why a job started on one may be invisible
+from the other. Every response carries an `X-F3sctl-Node` header, errors
+included.
+
 `f3sctl` never powers a Raspberry Pi. `pi0`/`pi1` are where it runs, and
 powering them off would remove the only way to power anything back on.
 

@@ -195,10 +195,18 @@ func writeError(out io.Writer, status int, msg string) error {
 }
 
 func writeResponse(out io.Writer, status int, contentType string, body []byte) error {
+	// X-F3sctl-Node names the node that served this response, on EVERY reply
+	// including errors. relayd load-balances pi0 and pi1, so "which node
+	// answered" explains a great deal -- a job the other node knows nothing
+	// about, most of all -- and it cannot be read off the URL. Putting it in a
+	// header rather than only in the entity means it is present even when the
+	// body is an error, which has no node property to carry it.
+	node, _ := os.Hostname()
+
 	// CGI headers use CRLF and a blank line before the body. bozohttpd turns
 	// the Status header into the HTTP status line.
 	_, err := fmt.Fprintf(out,
-		"Status: %d %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\n\r\n%s",
-		status, http.StatusText(status), contentType, body)
+		"Status: %d %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\nX-F3sctl-Node: %s\r\n\r\n%s",
+		status, http.StatusText(status), contentType, node, body)
 	return err
 }

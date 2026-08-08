@@ -40,6 +40,9 @@ Global flags:
                  (config, or F3SCTL_URL / F3SCTL_KEY).
   --force, -f    Confirm an action the server guards, e.g. switching the rack
                  fans off while hosts are still running.
+  --verbose, -v  Trace every API call to stderr: method, URL, status, which of
+                 pi0/pi1 answered, and how long it took. Implies --remote,
+                 since there is nothing to trace when acting locally.
 
 f3sctl powers only the FreeBSD bhyve hosts f0-f3. It never powers a Raspberry
 Pi: pi0 and pi1 are where it runs, and powering them off would remove the only
@@ -57,7 +60,7 @@ func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 // advance through its stages; a human at a terminal passes nil, because the
 // same information is already scrolling past them.
 func RunWithReporter(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
-	args, remote, force := parseGlobalFlags(args)
+	args, flags := parseGlobalFlags(args)
 
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
@@ -68,8 +71,8 @@ func RunWithReporter(cfg config.Config, args []string, stdout, stderr io.Writer,
 	// performed locally. That is the only way to work off-LAN: a Wake-on-LAN
 	// magic packet is not routed, so a laptop elsewhere physically cannot wake
 	// an f-host -- but pi0/pi1 can, on its behalf.
-	if remote && args[0] != "version" && args[0] != "help" {
-		return runRemote(cfg, args, force, stdout)
+	if flags.remote && args[0] != "version" && args[0] != "help" {
+		return runRemote(cfg, args, flags, stdout, stderr)
 	}
 
 	switch args[0] {

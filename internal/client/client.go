@@ -29,6 +29,22 @@ type Client struct {
 	key    string
 	http   *http.Client
 	stdout io.Writer
+
+	// trace, when set, receives a line per request showing what was called,
+	// where, and which node answered. Nil disables tracing.
+	trace io.Writer
+}
+
+// Verbose turns on request tracing, writing to w.
+//
+// It goes to stderr rather than stdout so the trace never contaminates output
+// something else might parse. Worth having because this API is discovered
+// rather than hard-coded: without a trace there is no way to see which URLs a
+// run actually followed, and -- given relayd load-balances pi0 and pi1 --
+// which node served each one.
+func (c *Client) Verbose(w io.Writer) *Client {
+	c.trace = w
+	return c
 }
 
 // New returns a client for the API at base, authenticating with key.
@@ -149,10 +165,14 @@ func (c *Client) do(href, method string, form url.Values) (Entity, error) {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 
+	started := time.Now()
+	c.tracef("→ %s %s%s", method, abs, traceFields(form))
+
 	resp, err := c.http.Do(req)
 	if err != nil {
 		// Distinguish "could not ask" from "the answer was no". A failure
 		// here says nothing about the state of the homelab.
+		c.tracef("✗ %s (%s)", err, time.Since(started).Round(time.Millisecond))
 		return e, fmt.Errorf("cannot reach the f3sctl API at %s: %w", c.base, err)
 	}
 	defer resp.Body.Close()
@@ -162,8 +182,14 @@ func (c *Client) do(href, method string, form url.Values) (Entity, error) {
 		return e, err
 	}
 	if err := json.Unmarshal(raw, &e); err != nil {
+		c.tracef("← %d, unparseable body (%s)", resp.StatusCode, time.Since(started).Round(time.Millisecond))
 		return e, fmt.Errorf("server returned something that is not an entity (HTTP %d)", resp.StatusCode)
 	}
+
+	// Report which node answered. relayd load-balances pi0 and pi1, so this is
+	// not decoration: it is what explains a job the other node knows nothing
+	// about, and it is invisible from the URL alone.
+	c.traceResponse(resp.StatusCode, resp.Header.Get("X-F3sctl-Node"), e, time.Since(started))
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusAccepted:
@@ -177,6 +203,47 @@ func (c *Client) do(href, method string, form url.Values) (Entity, error) {
 		}
 		return e, fmt.Errorf("%s", msg)
 	}
+}
+
+// tracef writes one trace line, when tracing is on.
+func (c *Client) tracef(format string, args ...any) {
+	if c.trace == nil {
+		return
+	}
+	fmt.Fprintf(c.trace, "  "+format+"\n", args...)
+}
+
+// traceResponse reports the status, the answering node and the timing.
+//
+// The node comes from the X-F3sctl-Node header, which every response carries,
+// falling back to the entity property for a server too old to send it.
+func (c *Client) traceResponse(status int, headerNode string, e Entity, took time.Duration) {
+	if c.trace == nil {
+		return
+	}
+
+	node := headerNode
+	if node == "" {
+		node, _ = e.Properties["node"].(string)
+	}
+	if node == "" {
+		node = "?"
+	}
+
+	detail := ""
+	if msg, ok := e.Properties["message"].(string); ok && msg != "" {
+		detail = " — " + msg
+	}
+	c.tracef("← %d from %s (%s)%s", status, node, took.Round(time.Millisecond), detail)
+}
+
+// traceFields renders the form fields being sent, so a trace shows not just
+// which action was invoked but with what.
+func traceFields(form url.Values) string {
+	if len(form) == 0 {
+		return ""
+	}
+	return " [" + form.Encode() + "]"
 }
 
 // Root fetches the entry point and checks the API version.

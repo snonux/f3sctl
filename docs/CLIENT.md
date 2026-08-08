@@ -277,7 +277,13 @@ following §3 will not send them.
 ## 9. Two nodes serve this API
 
 relayd load-balances the two Raspberry Pis, pi0 and pi1. Consecutive requests
-may land on different nodes. Every response carries `properties.node`.
+may land on different nodes. Every response says which one answered, in the
+**`X-F3sctl-Node` header** — present on every reply including errors, which
+have no entity properties to carry it. Entity bodies also carry
+`properties.node`.
+
+Logging that header per request is the single most useful thing a client can do
+for its own debuggability; `f3sctl --verbose` exists for exactly this.
 
 What this means:
 
