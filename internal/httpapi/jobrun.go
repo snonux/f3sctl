@@ -6,7 +6,18 @@ import (
 
 	"github.com/snonux/f3sctl/internal/cli"
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/power"
 )
+
+// jobReporter persists progress from the running operation into job.json, so a
+// polling client sees an operation advance rather than a bare "running".
+type jobReporter struct{ store jobStore }
+
+func (r jobReporter) Step(name string) { r.store.progress(name, "", "", "") }
+
+func (r jobReporter) HostState(host string, phase power.HostPhase, detail string) {
+	r.store.progress("", host, string(phase), detail)
+}
 
 // RunJob executes a power action on behalf of the API and records the outcome.
 //
@@ -25,7 +36,7 @@ func RunJob(cfg config.Config, args []string) error {
 	}
 	store := jobStore{dir: dir}
 
-	err := cli.Run(cfg, args, os.Stdout, os.Stderr)
+	err := cli.RunWithReporter(cfg, args, os.Stdout, os.Stderr, jobReporter{store: store})
 
 	rc, msg := 0, ""
 	if err != nil {

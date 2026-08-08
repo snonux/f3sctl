@@ -101,7 +101,14 @@ func (c *Client) waitForJob(root Entity, id string) error {
 
 		switch state, _ := job.Properties["state"].(string); state {
 		case "running":
-			fmt.Fprintln(c.stdout, "  still running...")
+			// Show the stage rather than a bare "still running": a shutdown
+			// takes minutes, and knowing which host it is on is the
+			// difference between waiting patiently and wondering if it hung.
+			if step, _ := job.Properties["step"].(string); step != "" {
+				fmt.Fprintf(c.stdout, "  %s\n", step)
+			} else {
+				fmt.Fprintln(c.stdout, "  still running...")
+			}
 		default:
 			if msg, _ := job.Properties["error"].(string); msg != "" {
 				fmt.Fprintf(c.stdout, "job %s: %s\n", state, msg)

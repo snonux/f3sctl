@@ -72,6 +72,7 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 			misses[name]++
 			if misses[name] >= confirmedDownProbes {
 				fmt.Fprintf(log, "  %s is down\n", name)
+				e.report.HostState(name, HostDone, "powered off")
 				delete(pending, name)
 			}
 		}
@@ -83,6 +84,7 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 
 	stuck := namesOf(pending)
 	for _, name := range stuck {
+		e.report.HostState(name, HostFailed, "still answering after "+powerDownTimeout.String()+"; likely hung and not wakeable")
 		fmt.Fprintf(log, "  ! %s accepted the shutdown but is still answering after %s.\n", name, powerDownTimeout)
 	}
 	fmt.Fprintln(log, "    A host that hangs in the last phase of shutdown stays powered on with")

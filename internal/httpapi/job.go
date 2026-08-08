@@ -55,6 +55,27 @@ type Job struct {
 	Node string `json:"node"`
 	// Error is the child's failure message, when it failed.
 	Error string `json:"error,omitempty"`
+
+	// Step is the stage the operation has reached, updated as it runs.
+	//
+	// A shutdown takes minutes. Without this a polling client can only see
+	// "running" the whole time and cannot tell a healthy slow shutdown from a
+	// wedged one.
+	Step string `json:"step,omitempty"`
+	// Updated is when Step or Hosts last changed (RFC 3339). A client can use
+	// it to notice an operation that has stopped making progress.
+	Updated string `json:"updated,omitempty"`
+	// Hosts is per-host progress, keyed by host name.
+	Hosts map[string]HostProgress `json:"hosts,omitempty"`
+}
+
+// HostProgress is where one host has got to within an operation.
+type HostProgress struct {
+	// Phase is pending, working, confirming, done or failed.
+	Phase string `json:"phase"`
+	// Detail explains the phase when there is something worth saying, such as
+	// why a host failed.
+	Detail string `json:"detail,omitempty"`
 }
 
 // newJobID returns a random identifier for a job. Random rather than a
@@ -213,6 +234,34 @@ func (js jobStore) spawn(args []string) error {
 		return fmt.Errorf("starting the job: %w", err)
 	}
 	return cmd.Process.Release()
+}
+
+// progress records a step and/or a host update on the running job.
+//
+// Each update is a read-modify-write of job.json. That is fine here: updates
+// arrive a few times a minute at most, and the alternative -- holding state in
+// memory -- would not survive the detached child being the only writer while a
+// separate CGI process serves the reads.
+func (js jobStore) progress(step string, host string, phase, detail string) {
+	j := js.read()
+	if j == nil {
+		return
+	}
+
+	if step != "" {
+		j.Step = step
+	}
+	if host != "" {
+		if j.Hosts == nil {
+			j.Hosts = map[string]HostProgress{}
+		}
+		j.Hosts[host] = HostProgress{Phase: phase, Detail: detail}
+	}
+	j.Updated = time.Now().UTC().Format(time.RFC3339)
+
+	// Best effort: losing a progress update must never derail the operation
+	// the client actually asked for.
+	_ = js.write(*j)
 }
 
 // finish records a completed job. Called by the detached child on its way out.

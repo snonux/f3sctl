@@ -17,8 +17,9 @@ import (
 
 // Engine performs power operations against the inventory in cfg.
 type Engine struct {
-	cfg config.Config
-	ssh *runner
+	cfg    config.Config
+	ssh    *runner
+	report Reporter
 }
 
 // New returns an Engine.
@@ -27,7 +28,7 @@ type Engine struct {
 // that actually needs it, so status probing works on a machine that has no
 // f3sctl key at all.
 func New(cfg config.Config) (*Engine, error) {
-	return &Engine{cfg: cfg, ssh: newRunner(cfg)}, nil
+	return &Engine{cfg: cfg, ssh: newRunner(cfg), report: nopReporter{}}, nil
 }
 
 // Config exposes the resolved configuration to callers that need the
@@ -41,17 +42,23 @@ func (e *Engine) Config() config.Config { return e.cfg }
 // woken at all — running the cluster with no fans is worse than leaving it
 // off.
 func (e *Engine) On(ctx context.Context, log io.Writer) error {
+	e.report.Step("switching the rack fans on")
 	fmt.Fprintln(log, "Switching the rack fans on...")
 	if _, err := e.FansSet(ctx, true); err != nil {
 		return fmt.Errorf("refusing to wake hosts with the fans off: %w", err)
 	}
 
+	e.report.Step("sending Wake-on-LAN packets")
 	for _, h := range e.cfg.Inventory.PowerGroup() {
 		fmt.Fprintf(log, "Sending a magic packet to %s (%s)...\n", h.Name, h.MAC)
 		if err := e.Wake(h); err != nil {
+			e.report.HostState(h.Name, HostFailed, err.Error())
 			return err
 		}
+		e.report.HostState(h.Name, HostDone, "magic packet sent")
 	}
+
+	e.report.Step("waiting for the k3s nodes, then un-muting Gogios")
 
 	// Un-muting is best-effort: the hosts are already waking, and a monitoring
 	// marker left behind is a smaller problem than reporting the whole wake as
@@ -107,17 +114,24 @@ func (e *Engine) OffHost(ctx context.Context, log io.Writer, name string) error 
 }
 
 func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host, clusterWide bool) error {
+	for _, h := range hosts {
+		e.report.HostState(h.Name, HostPending, "")
+	}
+
+	e.report.Step("checking for locally mounted NFS filesystems")
 	fmt.Fprintln(log, "Checking for locally mounted NFS filesystems...")
 	if err := e.checkLocalNFS(ctx, log); err != nil {
 		return err
 	}
 
+	e.report.Step("checking the zusb backup pool")
 	fmt.Fprintln(log, "Checking whether the zusb backup pool is imported anywhere...")
 	if err := e.zusbPreflight(ctx, log, hosts); err != nil {
 		return err
 	}
 
 	if clusterWide {
+		e.report.Step("muting Gogios monitoring")
 		fmt.Fprintln(log, "Muting Gogios monitoring...")
 		if err := e.MuteGogios(ctx, log); err != nil {
 			// Not fatal: an un-muted alert is noise, and refusing to shut
@@ -130,6 +144,8 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	var failed []string
 	var accepted []inventory.Host
 	for _, h := range hosts {
+		e.report.Step("shutting down " + h.Name)
+		e.report.HostState(h.Name, HostWorking, "stopping guests")
 		fmt.Fprintf(log, "Shutting down %s (%s)...\n", h.Name, h.IP)
 		out, err := e.ssh.agentVerb(ctx, h, "poweroff")
 		if out != "" {
@@ -137,10 +153,12 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 		}
 		if err != nil {
 			fmt.Fprintf(log, "  ! %v\n", err)
+			e.report.HostState(h.Name, HostFailed, err.Error())
 			failed = append(failed, h.Name)
 			continue
 		}
 		fmt.Fprintf(log, "  %s accepted the shutdown\n", h.Name)
+		e.report.HostState(h.Name, HostConfirming, "accepted; waiting for it to go silent")
 		accepted = append(accepted, h)
 	}
 
@@ -156,6 +174,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	// and moved on, and the failure only surfaced later when the host would
 	// not wake. Confirming each host actually goes silent turns that into an
 	// error at the moment it happens.
+	e.report.Step("confirming the hosts actually powered down")
 	if stuck := e.awaitPowerDown(ctx, log, accepted); len(stuck) > 0 {
 		failed = append(failed, stuck...)
 	}
@@ -166,6 +185,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	}
 
 	if clusterWide {
+		e.report.Step("switching the rack fans off")
 		fmt.Fprintln(log, "Switching the rack fans off...")
 		if _, err := e.FansSet(ctx, false); err != nil {
 			return err

@@ -143,9 +143,46 @@ GET  {job link}             -> poll
 
 - Poll the `job` link every **5–15 seconds**. Faster buys nothing: the
   underlying operation moves on a scale of minutes.
+- **Check `properties.id` matches the job you started.** relayd load-balances
+  the two nodes, so a poll routinely lands on the node that did *not* run your
+  job — and that node holds a **different** job, quite possibly an old failed
+  one. Treat any other id as "no news", not as your result. A client that skips
+  this will report healthy shutdowns as failures; it has happened.
 - Stop when `properties.state` is no longer `"running"`. It becomes `"done"` or
   `"failed"`.
 - Read `properties.rc` (the exit code) and `properties.error` for the reason.
+
+### Watching an operation advance
+
+A running job carries progress, so a client can show what is happening rather
+than a spinner:
+
+```json
+{ "class": ["job"],
+  "properties": {
+    "id": "c8fe5f2131c26ed3", "action": "off", "state": "running",
+    "step": "shutting down f2",
+    "updated": "2026-08-08T19:12:41Z",
+    "hosts": {
+      "f1": {"phase": "done",       "detail": "powered off"},
+      "f2": {"phase": "confirming", "detail": "accepted; waiting for it to go silent"},
+      "f0": {"phase": "pending"}
+    } } }
+```
+
+- `step` is the stage in prose — safe to display verbatim, not safe to parse.
+- `hosts[name].phase` is one of `pending`, `working`, `confirming`, `done`,
+  `failed`. `confirming` means the host accepted the shutdown and the server is
+  waiting for it to actually stop answering — accepting is not completing.
+- `detail` explains the phase when there is something worth saying, most
+  usefully on `failed`.
+- `updated` is when progress last changed. A job whose `updated` has not moved
+  in several minutes is worth surfacing, even while `state` is still
+  `"running"` — a host stuck in `confirming` is the signature of one that hung
+  and will not wake.
+
+All of these are optional and may be absent (an operation that has only just
+started, or an older server). Render what is there; do not require any of it.
 - Use a total timeout of at least **20 minutes** before declaring the job lost.
   The worst case is three hosts × 240 s of guest shutdown, plus the Gogios
   un-mute wait, plus slack. The server independently gives up on a job after 30

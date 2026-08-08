@@ -48,6 +48,15 @@ way to power anything back on.
 
 // Run executes one CLI invocation.
 func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+	return RunWithReporter(cfg, args, stdout, stderr, nil)
+}
+
+// RunWithReporter is Run with progress reporting attached.
+//
+// The API's detached child uses this so a polling client can watch a shutdown
+// advance through its stages; a human at a terminal passes nil, because the
+// same information is already scrolling past them.
+func RunWithReporter(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
 	args, remote, force := parseGlobalFlags(args)
 
 	if len(args) == 0 {
@@ -71,7 +80,7 @@ func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stdout, usage)
 		return nil
 	case "power":
-		return runPower(cfg, args[1:], stdout, stderr)
+		return runPower(cfg, args[1:], stdout, stderr, reporter)
 	case "fans":
 		return runFans(cfg, args[1:], stdout, stderr)
 	}
@@ -83,7 +92,7 @@ func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	return fmt.Errorf("unknown command %q", args[0])
 }
 
-func runPower(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
@@ -93,6 +102,7 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer) error 
 	if err != nil {
 		return err
 	}
+	eng.WithReporter(reporter)
 	ctx := context.Background()
 
 	switch args[0] {

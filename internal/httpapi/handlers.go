@@ -164,6 +164,23 @@ func (s *Server) jobEntity(j Job) Entity {
 	if j.Error != "" {
 		props["error"] = j.Error
 	}
+	if j.Step != "" {
+		props["step"] = j.Step
+	}
+	if j.Updated != "" {
+		props["updated"] = j.Updated
+	}
+	if len(j.Hosts) > 0 {
+		hosts := map[string]any{}
+		for name, hp := range j.Hosts {
+			entry := map[string]any{"phase": hp.Phase}
+			if hp.Detail != "" {
+				entry["detail"] = hp.Detail
+			}
+			hosts[name] = entry
+		}
+		props["hosts"] = hosts
+	}
 	return Entity{
 		Class:      []string{"job"},
 		Rel:        []string{"item"},
