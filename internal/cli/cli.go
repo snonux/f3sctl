@@ -25,6 +25,7 @@ Usage:
   f3sctl power status          Probe f0-f3 and the k3s nodes
   f3sctl power on              Fans on, wake f0/f1/f2, un-mute Gogios
   f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2, fans off
+                               (goes through the API: only pi0/pi1 may shut hosts down)
   f3sctl power f3 on           Wake f3 only
   f3sctl power f3 off          Power off f3 only
   f3sctl fans status           Rack-fan Shelly plug state
@@ -38,6 +39,10 @@ Global flags:
                  magic packet is not routed, so only a host on the homelab
                  broadcast domain can send one. Needs api_url and an API key
                  (config, or F3SCTL_URL / F3SCTL_KEY).
+  --local, -l    Act on the homelab directly instead of calling the API. Only
+                 works where an authorised SSH key exists, i.e. on pi0/pi1:
+                 the key is pinned to those two hosts. Use for debugging or
+                 when running on a Pi.
   --force, -f    Confirm an action the server guards, e.g. switching the rack
                  fans off while hosts are still running.
   --verbose, -v  Trace every API call to stderr: method, URL, status, which of
@@ -51,27 +56,37 @@ way to power anything back on.
 
 // Run executes one CLI invocation.
 func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
-	return RunWithReporter(cfg, args, stdout, stderr, nil)
+	return run(cfg, args, stdout, stderr, nil, false)
 }
 
-// RunWithReporter is Run with progress reporting attached.
+// RunLocal executes an invocation that must act on the homelab directly,
+// never through the API.
 //
-// The API's detached child uses this so a polling client can watch a shutdown
-// advance through its stages; a human at a terminal passes nil, because the
-// same information is already scrolling past them.
-func RunWithReporter(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
+// This is what the API's own detached child uses. It has to bypass the routing
+// in globalFlags.useAPI: a shutdown started by the API which then called the
+// API would simply recurse.
+func RunLocal(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
+	return run(cfg, args, stdout, stderr, reporter, true)
+}
+
+func run(cfg config.Config, args []string, stdout, stderr io.Writer,
+	reporter power.Reporter, forceLocal bool) error {
+
 	args, flags := parseGlobalFlags(args)
+	if forceLocal {
+		flags.local = true
+	}
 
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
 	}
 
-	// In remote mode the same verbs are driven through the HTTP API instead of
-	// performed locally. That is the only way to work off-LAN: a Wake-on-LAN
-	// magic packet is not routed, so a laptop elsewhere physically cannot wake
-	// an f-host -- but pi0/pi1 can, on its behalf.
-	if flags.remote && args[0] != "version" && args[0] != "help" {
+	// Shutdowns go through the API by default, from anywhere: only pi0/pi1
+	// hold a key the f-hosts will accept, so this is the difference between
+	// the same command working everywhere and failing on a laptop. See
+	// globalFlags.useAPI.
+	if args[0] != "version" && args[0] != "help" && flags.useAPI(args) {
 		return runRemote(cfg, args, flags, stdout, stderr)
 	}
 
@@ -107,6 +122,18 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 	}
 	eng.WithReporter(reporter)
 	ctx := context.Background()
+
+	// A local shutdown needs a key the f-hosts will accept, and that key is
+	// pinned to pi0/pi1. Say so up front rather than letting it surface as an
+	// unreadable-file error part way through the sequence, after the NFS and
+	// zusb checks have already run.
+	if isShutdown(append([]string{"power"}, args...)) {
+		if _, idErr := cfg.ResolveSSHIdentity(); idErr != nil {
+			return fmt.Errorf("cannot shut hosts down from here: %w.\n"+
+				"The f3sctl key is pinned to pi0/pi1, so only they may do this. "+
+				"Drop --local to go through the API instead", idErr)
+		}
+	}
 
 	switch args[0] {
 	case "status":

@@ -14,9 +14,15 @@ f3sctl power f3 on|off       # f3 is standalone; addressed separately
 f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
 ```
 
-Add `--remote` to drive it through the API on pi0/pi1 instead of acting
-locally — the only way it works off-LAN, since a Wake-on-LAN magic packet is
-not routed. Add `--verbose` to trace every API call:
+**Shutdowns always go through the API**, from anywhere including a Pi. Only
+pi0/pi1 can actually perform one — the restricted SSH key is pinned to them —
+so routing through the API is what makes the same command work on a laptop.
+Waking, status and the fan plug stay local: a magic packet is an unprivileged
+broadcast any LAN host may send, which also leaves a way to wake the rack when
+the API itself is unreachable. `--local` overrides the routing and `--remote`
+forces the API for everything.
+
+Add `--verbose` to trace every API call:
 
 ```
 $ f3sctl -v power status

@@ -36,7 +36,7 @@ func RunJob(cfg config.Config, args []string) error {
 	}
 	store := jobStore{dir: dir}
 
-	err := cli.RunWithReporter(cfg, args, os.Stdout, os.Stderr, jobReporter{store: store})
+	err := cli.RunLocal(cfg, args, os.Stdout, os.Stderr, jobReporter{store: store})
 
 	rc, msg := 0, ""
 	if err != nil {
