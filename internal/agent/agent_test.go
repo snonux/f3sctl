@@ -20,7 +20,6 @@ func TestRequestedVerbRejectsAnythingButOneWord(t *testing.T) {
 		"poweroff|tee /etc/x",    //
 		"zusb-unload --now",      // an argument we do not accept
 		"probe /etc/master.pass", // a path argument
-		"gogios-mute gogios-unmute",
 	}
 
 	for _, cmd := range rejected {
@@ -34,7 +33,7 @@ func TestRequestedVerbRejectsAnythingButOneWord(t *testing.T) {
 // TestRequestedVerbAcceptsBareWords confirms the legitimate case still works,
 // including the extra whitespace ssh may leave around a command.
 func TestRequestedVerbAcceptsBareWords(t *testing.T) {
-	for _, name := range []string{"probe", "zusb-status", "zusb-unload", "poweroff", "gogios-mute", "gogios-unmute"} {
+	for _, name := range []string{"probe", "zusb-status", "zusb-unload", "poweroff"} {
 		t.Setenv("SSH_ORIGINAL_COMMAND", "  "+name+" \n")
 		got, err := requestedVerb(nil)
 		if err != nil {
@@ -80,12 +79,10 @@ func TestArgvBeatsEnvironment(t *testing.T) {
 // widen the doas allowlist for no reason.
 func TestPrivilegedVerbsAreMarked(t *testing.T) {
 	want := map[string]bool{
-		"probe":         true,
-		"zusb-status":   false,
-		"zusb-unload":   true,
-		"poweroff":      true,
-		"gogios-mute":   false,
-		"gogios-unmute": false,
+		"probe":       true,
+		"zusb-status": false,
+		"zusb-unload": true,
+		"poweroff":    true,
 	}
 
 	got := map[string]bool{}

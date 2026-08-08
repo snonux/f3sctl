@@ -1,13 +1,19 @@
 // Package agent implements the restricted host-side mode of f3sctl.
 //
-// On every host f3sctl connects to (f0-f3 and the two OpenBSD gateways) sshd is
-// configured with:
+// On every f-host (f0-f3) sshd is configured with:
 //
 //	Match User f3sctl
 //	    ForceCommand /usr/local/bin/f3sctl agent
 //
 // so the f3sctl account can run this and nothing else, whatever the client
 // asks for. The requested verb arrives in $SSH_ORIGINAL_COMMAND.
+//
+// The OpenBSD gateways deliberately do NOT run f3sctl. They only ever needed
+// to set and clear the Gogios mute marker, and putting a whole homelab power
+// tool on the two internet-facing hosts to touch one file is more surface than
+// that deserves. They run conf/frontends/scripts/f3s-gogios-mute behind the
+// same ForceCommand arrangement instead, speaking the same bare verbs, so
+// nothing on this side has to care which is at the far end.
 //
 // Two rules keep that surface honest:
 //
@@ -44,8 +50,6 @@ func verbs() []verb {
 		{name: "zusb-status", run: runZusbStatus},
 		{name: "zusb-unload", privileged: true, run: runZusbUnload},
 		{name: "poweroff", privileged: true, run: runPoweroff},
-		{name: "gogios-mute", run: runGogiosMute},
-		{name: "gogios-unmute", run: runGogiosUnmute},
 	}
 }
 

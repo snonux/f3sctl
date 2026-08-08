@@ -16,12 +16,15 @@ import (
 const entry = "cmd/f3sctl/main.go"
 
 // crossTargets are the platforms shipped through pkgrepo.f3s.buetow.org:
-// netbsd/arm64 for pi0/pi1 (CGI + CLI), freebsd/amd64 for f0-f3 (agent) and
-// openbsd/amd64 for the two gateways (agent).
+// netbsd/arm64 for pi0/pi1 (CGI + CLI) and freebsd/amd64 for f0-f3 (agent).
+//
+// The OpenBSD gateways are deliberately absent. They only ever needed to set
+// and clear the Gogios mute marker, which is now done by the standalone
+// conf/frontends/scripts/f3s-gogios-mute, so no f3sctl binary goes onto the
+// two internet-facing hosts.
 var crossTargets = []struct{ goos, goarch string }{
 	{"netbsd", "arm64"},
 	{"freebsd", "amd64"},
-	{"openbsd", "amd64"},
 }
 
 func run(name string, args ...string) error {
@@ -119,8 +122,8 @@ func Cross() error {
 	return nil
 }
 
-// Publish packages and uploads f3sctl to pkgrepo.f3s.buetow.org for all three
-// BSDs.
+// Publish packages and uploads f3sctl to pkgrepo.f3s.buetow.org for NetBSD
+// (the Pis) and FreeBSD (the f-hosts).
 //
 // The packaging mechanics deliberately live in ~/git/conf/packages/Makefile
 // rather than here: that Makefile is shared infrastructure (gogios and dtail
@@ -138,7 +141,7 @@ func Publish() error {
 	}
 	pkgDir := filepath.Join(home, "git", "conf", "packages")
 
-	for _, target := range []string{"pkg-netbsd", "pkg-freebsd", "pkg-openbsd"} {
+	for _, target := range []string{"pkg-netbsd", "pkg-freebsd"} {
 		fmt.Printf("Running make %s...\n", target)
 		err := run("make", "-C", pkgDir, target,
 			"NAME=f3sctl",

@@ -23,7 +23,14 @@ powering them off would remove the only way to power anything back on.
 |---|---|---|
 | CLI | default | earth, pi0, pi1 |
 | CGI | `GATEWAY_INTERFACE` is set | pi0, pi1 (under bozohttpd) |
-| agent | `f3sctl agent` | f0–f3, blowfish, fishfinger |
+| agent | `f3sctl agent` | f0–f3 |
+
+f3sctl is deliberately **not** installed on the OpenBSD gateways. They only
+ever needed to set and clear the Gogios mute marker, and putting a whole
+homelab power tool on the two internet-facing hosts to touch one file is more
+surface than that deserves. They run the standalone `f3s-gogios-mute` script
+(in the `conf` repo) behind the same forced-command arrangement, speaking the
+same bare verbs.
 
 Keeping them in one binary is deliberate: a subsystem added to the route
 registry gains a CLI verb and an HTTP route at once, and the API can never
@@ -42,13 +49,20 @@ irreversible happens:
    snapshot, clean export and disk spin-down instead of having USB power cut
    from under it. A no-op on the hosts that do not have it.
 3. **Mute Gogios** — so a deliberate shutdown does not page.
-4. **Stop guests, then power off**, host by host. Guests get two SIGTERMs and
+4. **Stop guests, then power off** — **storage master last**. Powering `f0`
+   off first fails the CARP storage VIP over to `f1`, which then starts NFS
+   seconds before it is itself shut down and hangs in the final phase, powered
+   on and unwakeable. That is what wedged f1 on 2026-08-08. Guests get two SIGTERMs and
    240 s, then SIGKILL. That bound must stay below the hosts'
    `rcshutdown_timeout` (300 s): if `rc.shutdown` overruns its watchdog, init
    drops the host to single-user *still powered on with no network*, and
    Wake-on-LAN cannot wake a NIC that never powered down. Recovering from that
    needs physical access.
-5. **Fans off** — only once every host has accepted.
+5. **Confirm they actually went down** — accepting a shutdown is not the same
+   as completing one. Any host still answering ICMP after two minutes is
+   reported as a failure, because it is powered on, off the network, and
+   Wake-on-LAN will not wake it.
+6. **Fans off** — only once every host is genuinely down.
 
 ## The API
 
@@ -82,7 +96,7 @@ thing. On every target:
 - `ForceCommand /usr/local/bin/f3sctl agent` in `sshd_config`, which overrides
   whatever the key file says — the restriction is root-owned daemon config, not
   a key option;
-- an allowlist of six single-word verbs, none of which takes an argument, so
+- an allowlist of four single-word verbs, none of which takes an argument, so
   there is nothing a key holder can vary;
 - `doas` rules keyed to exact argv for the three verbs that need root.
 
@@ -98,8 +112,8 @@ Uses [mage](https://magefile.org).
 mage build      # ./f3sctl for this platform
 mage test       # unit tests
 mage install    # -> ~/bin/f3sctl
-mage cross      # netbsd/arm64, freebsd/amd64, openbsd/amd64 into ./dist
-mage publish    # package and upload all three to pkgrepo.f3s.buetow.org
+mage cross      # netbsd/arm64 and freebsd/amd64 into ./dist
+mage publish    # package and upload both to pkgrepo.f3s.buetow.org
 ```
 
 `mage publish` drives `~/git/conf/packages/Makefile`, which is shared with

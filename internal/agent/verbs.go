@@ -10,13 +10,6 @@ import (
 // zusbPool is the removable backup pool checked and exported before shutdown.
 const zusbPool = "zusb"
 
-// gogiosMuteFile is the marker Gogios checks (OnlyIfNotExists) to stay quiet
-// while the cluster is deliberately down. It lives on the OpenBSD gateways.
-//
-// It stays in /tmp on purpose: a gateway reboot clears it, so a mute can never
-// outlive the machine that set it.
-const gogiosMuteFile = "/tmp/f3s_taken_down"
-
 // reexecAsRoot re-runs this binary under doas for a verb that needs
 // privileges.
 //
@@ -78,23 +71,6 @@ func runZusbUnload() error {
 	fmt.Print(string(out))
 	if err != nil {
 		return fmt.Errorf("zusb-unload: %w", err)
-	}
-	return nil
-}
-
-// runGogiosMute suppresses the cluster-derived Gogios checks.
-func runGogiosMute() error {
-	f, err := os.OpenFile(gogiosMuteFile, os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("creating %s: %w", gogiosMuteFile, err)
-	}
-	return f.Close()
-}
-
-// runGogiosUnmute re-enables the cluster-derived Gogios checks.
-func runGogiosUnmute() error {
-	if err := os.Remove(gogiosMuteFile); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing %s: %w", gogiosMuteFile, err)
 	}
 	return nil
 }
