@@ -124,3 +124,38 @@ func (inv Inventory) PowerGroup() []Host {
 	}
 	return out
 }
+
+// StorageMaster is the host that normally holds the CARP storage VIP
+// (f3s-storage-ha, 192.168.1.138) and serves NFS. f1 is its BACKUP.
+const StorageMaster = "f0"
+
+// ShutdownOrder returns the power group ordered so the CARP storage master is
+// powered off LAST.
+//
+// Order matters, and getting it wrong wedges a host. Powering the master off
+// first fails the storage VIP over to f1, whose carpcontrol.sh promptly starts
+// rpcbind/mountd/nfsd/nfsuserd and restarts stunnel — and then, seconds later,
+// f1 is itself told to shut down. It goes down as a freshly-started NFS server
+// with clients still able to reach it, and hangs in the final phase: powered
+// on, off the network, and unwakeable by Wake-on-LAN.
+//
+// Observed on 2026-08-08: f0 powered off at 21:23:22, f1 logged
+// "carp: 1@re0: MASTER -> INIT" at 21:23:30 (so it had taken the VIP), was
+// shut down at 21:23:33, and never powered off. f2, which is not in the CARP
+// pair at all, went down cleanly in the same run. The homelab runbook already
+// says to take the storage master last when rebooting; this makes the tool
+// obey the same rule.
+func (inv Inventory) ShutdownOrder() []Host {
+	group := inv.PowerGroup()
+
+	out := make([]Host, 0, len(group))
+	var master []Host
+	for _, h := range group {
+		if h.Name == StorageMaster {
+			master = append(master, h)
+			continue
+		}
+		out = append(out, h)
+	}
+	return append(out, master...)
+}

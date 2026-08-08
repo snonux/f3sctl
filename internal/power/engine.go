@@ -72,10 +72,14 @@ func (e *Engine) On(ctx context.Context, log io.Writer) error {
 //  1. unmount local NFS      -- abort while the cluster is still fully up
 //  2. export zusb where held -- ditto; needs the host it lives on to be alive
 //  3. mute Gogios            -- only now, once the shutdown is going ahead
-//  4. stop guests, power off -- host by host
-//  5. fans off               -- only if every host accepted
+//  4. stop guests, power off -- host by host, storage master LAST
+//  5. fans off               -- only if every host actually went down
+//
+// The host order is not incidental: taking the CARP storage master first fails
+// the VIP over onto a host that is itself about to be shut down, which is what
+// wedged f1 on 2026-08-08. See inventory.ShutdownOrder.
 func (e *Engine) Off(ctx context.Context, log io.Writer) error {
-	return e.off(ctx, log, e.cfg.Inventory.PowerGroup(), true)
+	return e.off(ctx, log, e.cfg.Inventory.ShutdownOrder(), true)
 }
 
 // OnHost wakes a single named host, without touching the fans or the Gogios
