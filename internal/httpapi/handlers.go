@@ -178,7 +178,16 @@ func (s *Server) jobEntity(j Job) Entity {
 // The response is 202: the work has been accepted, not completed. A client
 // follows the job link until its state leaves "running".
 func handleAction(action string) func(*Server, State, request) (Entity, int, error) {
-	return func(s *Server, _ State, _ request) (Entity, int, error) {
+	return func(s *Server, _ State, req request) (Entity, int, error) {
+		// Ask the other API node first. The local flock only serialises
+		// requests that reach THIS node, and relayd load-balances the two, so
+		// without this two clicks seconds apart start two shutdowns against
+		// the same hosts -- observed on 2026-08-08.
+		if busy, node := s.peerJobRunning(req.APIKey); busy {
+			return Entity{}, http.StatusConflict,
+				fmt.Errorf("a power operation is already running on %s", node)
+		}
+
 		job, err := s.jobs.start(action, jobArgs(action))
 		if errors.Is(err, errJobRunning) {
 			return Entity{}, http.StatusConflict, err
