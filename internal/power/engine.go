@@ -124,6 +124,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	}
 
 	var failed []string
+	var accepted []inventory.Host
 	for _, h := range hosts {
 		fmt.Fprintf(log, "Shutting down %s (%s)...\n", h.Name, h.IP)
 		out, err := e.ssh.agentVerb(ctx, h, "poweroff")
@@ -135,7 +136,24 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 			failed = append(failed, h.Name)
 			continue
 		}
-		fmt.Fprintf(log, "  %s is powering off\n", h.Name)
+		fmt.Fprintf(log, "  %s accepted the shutdown\n", h.Name)
+		accepted = append(accepted, h)
+	}
+
+	// Accepting the command is not the same as completing it. A host can run
+	// the whole shutdown sequence and then wedge in the final phase -- after
+	// syslogd has exited, so nothing is logged -- leaving it powered on, off
+	// the network, and NOT wakeable by Wake-on-LAN, which only wakes a NIC
+	// that actually powered down. Recovering from that needs a console or the
+	// physical button.
+	//
+	// f1 did exactly this on 2026-08-08 while f0 and f2 powered off cleanly.
+	// Nothing reported a problem at the time: the tool said "shutdown sent"
+	// and moved on, and the failure only surfaced later when the host would
+	// not wake. Confirming each host actually goes silent turns that into an
+	// error at the moment it happens.
+	if stuck := e.awaitPowerDown(ctx, log, accepted); len(stuck) > 0 {
+		failed = append(failed, stuck...)
 	}
 
 	if len(failed) > 0 {
