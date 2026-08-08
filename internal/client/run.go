@@ -15,12 +15,26 @@ import (
 // ("f3-on"). Action names are part of the API's stable contract; CLI spelling
 // is ours to change.
 var actionFor = map[string]string{
-	"power on":     "power-on",
-	"power off":    "power-off",
-	"power f3 on":  "f3-on",
-	"power f3 off": "f3-off",
-	"fans on":      "fans-on",
-	"fans off":     "fans-off",
+	"power on":  "power-on",
+	"power off": "power-off",
+	"fans on":   "fans-on",
+	"fans off":  "fans-off",
+}
+
+// actionName maps a CLI command to the API action it invokes.
+//
+// Per-host commands ("power f1 off") are derived rather than listed, so adding
+// a host to the inventory needs no change here.
+func actionName(cmd string) (string, bool) {
+	if name, ok := actionFor[cmd]; ok {
+		return name, true
+	}
+
+	fields := strings.Fields(cmd)
+	if len(fields) == 3 && fields[0] == "power" && (fields[2] == "on" || fields[2] == "off") {
+		return fields[1] + "-" + fields[2], true
+	}
+	return "", false
 }
 
 // Run executes a CLI command against the remote API.
@@ -31,7 +45,7 @@ func Run(c *Client, args []string, force bool) error {
 		return c.showStatus()
 	}
 
-	name, ok := actionFor[cmd]
+	name, ok := actionName(cmd)
 	if !ok {
 		return fmt.Errorf("%q cannot be run remotely", cmd)
 	}

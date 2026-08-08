@@ -26,8 +26,8 @@ Usage:
   f3sctl power on              Fans on, wake f0/f1/f2, un-mute Gogios
   f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2, fans off
                                (goes through the API: only pi0/pi1 may shut hosts down)
-  f3sctl power f3 on           Wake f3 only
-  f3sctl power f3 off          Power off f3 only
+  f3sctl power f0|f1|f2|f3 on  Wake one host only
+  f3sctl power f0|f1|f2|f3 off Power off one host only (fans and Gogios untouched)
   f3sctl fans status           Rack-fan Shelly plug state
   f3sctl fans on               Switch the rack fans on
   f3sctl fans off [--force]    Switch the rack fans off

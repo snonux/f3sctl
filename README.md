@@ -10,7 +10,7 @@ It replaces the `wol-f3s` bash script.
 f3sctl power status          # probe f0-f3 and the k3s nodes
 f3sctl power on              # fans on, wake f0/f1/f2, un-mute Gogios
 f3sctl power off             # export zusb, mute Gogios, stop guests, power off, fans off
-f3sctl power f3 on|off       # f3 is standalone; addressed separately
+f3sctl power f1 on|off       # any single host: f0, f1, f2 or f3
 f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
 ```
 

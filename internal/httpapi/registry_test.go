@@ -2,8 +2,10 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -214,16 +216,41 @@ func TestGETRoutesAreLinksNotActions(t *testing.T) {
 	}
 }
 
-// TestEveryActionHasJobArgsOrHandler catches a power action added to the
-// registry without a matching CLI invocation, which would accept a request and
-// then do nothing.
+// TestEveryActionHasJobArgs catches a power action added to the registry
+// without a matching CLI invocation, which would accept a request and then do
+// nothing at all.
 func TestEveryActionHasJobArgs(t *testing.T) {
-	for _, name := range []string{"power-on", "power-off", "f3-on", "f3-off"} {
-		action := map[string]string{
-			"power-on": "on", "power-off": "off", "f3-on": "f3-on", "f3-off": "f3-off",
-		}[name]
+	for _, r := range routes() {
+		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
+			continue
+		}
+		// The cluster-wide pair use bare verbs; per-host actions are
+		// "<host>-on"/"<host>-off" and the action name is the route name.
+		action := r.Name
+		switch r.Name {
+		case "power-on":
+			action = "on"
+		case "power-off":
+			action = "off"
+		}
 		if args := jobArgs(action); len(args) == 0 {
-			t.Errorf("action %q maps to no CLI invocation", name)
+			t.Errorf("action %q maps to no CLI invocation", r.Name)
+		}
+	}
+}
+
+// TestEveryFHostIsIndividuallyControllable pins that each f-host can be
+// powered on its own, not only as part of the cluster-wide group.
+func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
+	for _, h := range inventory.Default().ByRole(inventory.RoleF) {
+		for _, verb := range []string{"on", "off"} {
+			name := h.Name + "-" + verb
+			if _, ok := routeByName(name); !ok {
+				t.Errorf("no %q action; %s cannot be powered individually", name, h.Name)
+			}
+			if _, ok := lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
+				t.Errorf("no route serving POST /power/%s/%s", h.Name, verb)
+			}
 		}
 	}
 }

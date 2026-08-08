@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/http"
 
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -100,7 +101,7 @@ type route struct {
 
 // routes is the complete API surface.
 func routes() []route {
-	return []route{
+	out := []route{
 		{
 			Name: "self", Title: "API root",
 			Method: http.MethodGet, Path: "/",
@@ -151,26 +152,19 @@ func routes() []route {
 			},
 			Handle: handleAction("off"),
 		},
-		{
-			Name: "f3-on", Title: "Power on f3",
-			Method: http.MethodPost, Path: "/power/f3/on", Action: true,
-			Available: func(s State) bool {
-				h, ok := s.host("f3")
-				return ok && !s.jobRunning() && !h.Ping
-			},
-			Handle: handleAction("f3-on"),
-		},
-		{
-			Name: "f3-off", Title: "Power off f3",
-			Method: http.MethodPost, Path: "/power/f3/off", Action: true,
-			// SSH, not ping -- see power-off.
-			Available: func(s State) bool {
-				h, ok := s.host("f3")
-				return ok && !s.jobRunning() && h.SSH
-			},
-			Handle: handleAction("f3-off"),
-		},
+	}
 
+	// Per-host actions for every f-host, so any one of f0-f3 can be powered
+	// independently of the cluster-wide pair above.
+	//
+	// Generated from the inventory rather than written out four times: adding
+	// a host to the inventory should not mean remembering to add two routes,
+	// two OpenAPI entries and two client mappings by hand.
+	for _, h := range inventory.Default().ByRole(inventory.RoleF) {
+		out = append(out, hostRoutes(h.Name)...)
+	}
+
+	out = append(out, []route{
 		{
 			Name: "fans-on", Title: "Switch the rack fans on",
 			Method: http.MethodPost, Path: "/fans/on", Action: true,
@@ -201,6 +195,45 @@ func routes() []route {
 				}}
 			},
 			Handle: (*Server).handleFansOff,
+		},
+	}...)
+
+	return out
+}
+
+// hostRoutes builds the on/off pair for one f-host.
+//
+// Powering a single host is not the same operation as powering the group: it
+// leaves the rack fans and the Gogios mute alone, because one host going down
+// does not mean the rack is idle, and the muted checks belong to the cluster
+// as a whole.
+//
+// Note for f0: it holds the CARP storage VIP, so taking it down on its own
+// fails that over to f1 -- which is what CARP is for, and is fine as long as
+// f1 stays up. The danger is only in shutting f0 down and then f1 moments
+// later, which is why the cluster-wide sequence orders f0 last.
+func hostRoutes(name string) []route {
+	return []route{
+		{
+			Name: name + "-on", Title: "Power on " + name,
+			Method: http.MethodPost, Path: "/power/" + name + "/on", Action: true,
+			Available: func(s State) bool {
+				h, ok := s.host(name)
+				return ok && !s.jobRunning() && !h.Ping
+			},
+			Handle: handleAction(name + "-on"),
+		},
+		{
+			Name: name + "-off", Title: "Power off " + name,
+			Method: http.MethodPost, Path: "/power/" + name + "/off", Action: true,
+			// SSH, not ping: the shutdown runs over SSH, so a host that is
+			// only mid-boot cannot be shut down and must not be offered as if
+			// it could.
+			Available: func(s State) bool {
+				h, ok := s.host(name)
+				return ok && !s.jobRunning() && h.SSH
+			},
+			Handle: handleAction(name + "-off"),
 		},
 	}
 }

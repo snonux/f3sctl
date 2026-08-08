@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/snonux/f3sctl/internal"
 	"github.com/snonux/f3sctl/internal/power"
@@ -231,10 +232,11 @@ func jobArgs(action string) []string {
 		return []string{"job-run", "power", "on"}
 	case "off":
 		return []string{"job-run", "power", "off"}
-	case "f3-on":
-		return []string{"job-run", "power", "f3", "on"}
-	case "f3-off":
-		return []string{"job-run", "power", "f3", "off"}
+	}
+
+	// Per-host actions are "<host>-on" / "<host>-off", e.g. "f1-off".
+	if host, verb, ok := strings.Cut(action, "-"); ok && (verb == "on" || verb == "off") {
+		return []string{"job-run", "power", host, verb}
 	}
 	return nil
 }
