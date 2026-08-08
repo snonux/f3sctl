@@ -77,10 +77,16 @@ func Default() Inventory {
 			{Name: "r1", Role: RoleCluster, IP: "192.168.1.121", SSHPort: 22, SSHUser: "f3sctl"},
 			{Name: "r2", Role: RoleCluster, IP: "192.168.1.122", SSHPort: 22, SSHUser: "f3sctl"},
 
-			// Reached by name, not IP: the gateways are addressed from the
-			// LAN via public DNS and their sshd listens on port 2.
-			{Name: "blowfish", Role: RoleGateway, IP: "blowfish.buetow.org", SSHPort: 2, SSHUser: "f3sctl"},
-			{Name: "fishfinger", Role: RoleGateway, IP: "fishfinger.buetow.org", SSHPort: 2, SSHUser: "f3sctl"},
+			// The gateways are reached over the WireGuard mesh, not by their
+			// public names. Two reasons, and the first is not optional:
+			// the restricted key is pinned with from="192.168.2.203,..." to
+			// the Pis' addresses, and a connection to the public name leaves
+			// the house through NAT, arriving with the site's public source
+			// address -- which the pin correctly refuses. Going over the mesh
+			// also keeps the traffic off the internet entirely.
+			// Their sshd listens on port 2, not 22.
+			{Name: "blowfish", Role: RoleGateway, IP: "192.168.2.110", SSHPort: 2, SSHUser: "f3sctl"},
+			{Name: "fishfinger", Role: RoleGateway, IP: "192.168.2.111", SSHPort: 2, SSHUser: "f3sctl"},
 		},
 	}
 }

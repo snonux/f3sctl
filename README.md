@@ -1,0 +1,128 @@
+# f3sctl
+
+Control tool for the [f3s homelab](https://f3s.buetow.org): powers the FreeBSD
+bhyve hosts `f0`–`f3` on and off, reports their state, and switches the rack
+fans — from a shell, or over an API a watch app can drive.
+
+It replaces the `wol-f3s` bash script.
+
+```sh
+f3sctl power status          # probe f0-f3 and the k3s nodes
+f3sctl power on              # fans on, wake f0/f1/f2, un-mute Gogios
+f3sctl power off             # export zusb, mute Gogios, stop guests, power off, fans off
+f3sctl power f3 on|off       # f3 is standalone; addressed separately
+f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
+```
+
+`f3sctl` never powers a Raspberry Pi. `pi0`/`pi1` are where it runs, and
+powering them off would remove the only way to power anything back on.
+
+## One binary, three modes
+
+| Mode | Selected by | Runs on |
+|---|---|---|
+| CLI | default | earth, pi0, pi1 |
+| CGI | `GATEWAY_INTERFACE` is set | pi0, pi1 (under bozohttpd) |
+| agent | `f3sctl agent` | f0–f3, blowfish, fishfinger |
+
+Keeping them in one binary is deliberate: a subsystem added to the route
+registry gains a CLI verb and an HTTP route at once, and the API can never
+disagree with the CLI about what "power off" means — the API literally runs
+`f3sctl power off` as a detached child.
+
+## What `power off` actually does
+
+Ordered so that everything which can refuse does so *before* anything
+irreversible happens:
+
+1. **Unmount local NFS** — abort if anything is stuck. The exports come from
+   the CARP VIP on f0/f1; powering those off under a live mount hangs the
+   client and loses writes in flight.
+2. **Export `zusb` where it is imported** — the removable backup pool gets its
+   snapshot, clean export and disk spin-down instead of having USB power cut
+   from under it. A no-op on the hosts that do not have it.
+3. **Mute Gogios** — so a deliberate shutdown does not page.
+4. **Stop guests, then power off**, host by host. Guests get two SIGTERMs and
+   240 s, then SIGKILL. That bound must stay below the hosts'
+   `rcshutdown_timeout` (300 s): if `rc.shutdown` overruns its watchdog, init
+   drops the host to single-user *still powered on with no network*, and
+   Wake-on-LAN cannot wake a NIC that never powered down. Recovering from that
+   needs physical access.
+5. **Fans off** — only once every host has accepted.
+
+## The API
+
+Self-describing hypermedia (Siren) served by bozohttpd on pi0/pi1, reachable at
+`https://f3s.buetow.org/cgi-bin/f3sctl/`. A client hard-codes the base URL and
+an API key; everything else it discovers.
+
+Actions are advertised **only when they are currently possible** — no
+`power-on` when everything is already up, nothing at all while a job is
+running, and a confirmation field on `fans-off` only while a host is still
+drawing power. A client renders what it is handed and never encodes a rule of
+its own.
+
+**Writing a client: [`docs/CLIENT.md`](docs/CLIENT.md)**, with a dependency-free
+reference implementation in [`docs/client-reference.js`](docs/client-reference.js).
+
+Authentication is an `X-API-Key` header, compared in constant time. It is never
+accepted in the query string — bozohttpd logs request URIs to syslog and relayd
+logs connections, so a key in a URL would be written to two logs on three
+machines.
+
+## Security model
+
+The API host reaches the f-hosts over SSH with a key that can do exactly one
+thing. On every target:
+
+- a dedicated unprivileged **`f3sctl` user**, whose `authorized_keys` lives in
+  a root-owned path outside its home so the account cannot re-authorise itself;
+- `from="…"` pinning the key to pi0/pi1, on both their LAN and WireGuard
+  addresses;
+- `ForceCommand /usr/local/bin/f3sctl agent` in `sshd_config`, which overrides
+  whatever the key file says — the restriction is root-owned daemon config, not
+  a key option;
+- an allowlist of six single-word verbs, none of which takes an argument, so
+  there is nothing a key holder can vary;
+- `doas` rules keyed to exact argv for the three verbs that need root.
+
+On pi0/pi1 the CGI needs **no** privilege escalation at all: Wake-on-LAN is an
+unprivileged UDP broadcast, ICMP comes from the setuid `/sbin/ping`, and the
+SSH calls use an explicit identity. Nothing runs as root.
+
+## Building
+
+Uses [mage](https://magefile.org).
+
+```sh
+mage build      # ./f3sctl for this platform
+mage test       # unit tests
+mage install    # -> ~/bin/f3sctl
+mage cross      # netbsd/arm64, freebsd/amd64, openbsd/amd64 into ./dist
+mage publish    # package and upload all three to pkgrepo.f3s.buetow.org
+```
+
+`mage publish` drives `~/git/conf/packages/Makefile`, which is shared with
+gogios and dtail and owns the repo layout and build hosts. Note that
+`pkgrepo.f3s.buetow.org` is served *from the k3s cluster*, so installing or
+updating f3sctl needs the cluster up — you cannot update the tool while the
+thing it powers on is off.
+
+## Configuration
+
+Compiled-in defaults, overlaid by `/usr/local/etc/f3sctl.json` if present, so
+the tool works with no configuration at all. Path settings are lists and the
+first readable entry wins, which lets one shipped config serve both the
+`_httpd` CGI and a human running the CLI on the same Pi.
+
+```json
+{
+  "ssh_identity":         ["/var/db/f3sctl/id_ed25519", "~/.ssh/id_ed25519"],
+  "shelly_password_file": ["/var/db/f3sctl/shelly_plug", "~/.shelly_plug"],
+  "api_key_file":         "/var/db/f3sctl/apikey",
+  "state_dir":            "/var/db/f3sctl"
+}
+```
+
+Host inventory (IPs, MACs, the broadcast address, the Shelly plug) lives in
+`internal/inventory` and can be overridden by the same file.

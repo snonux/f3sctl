@@ -3,6 +3,7 @@ package power
 import (
 	"context"
 	"net"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -76,15 +77,44 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 	return st
 }
 
+// pingCandidates are where ping(8) lives, most likely first.
+//
+// It is looked up by absolute path rather than through PATH because the CGI
+// runs with the environment bozohttpd hands it -- on NetBSD that is
+// /usr/bin:/bin:/usr/pkg/bin:/usr/local/bin, which does NOT include /sbin
+// where ping actually is. Relying on PATH made every host report ping=false
+// while plainly answering on port 22, which in turn withheld the power-off
+// action entirely.
+var pingCandidates = []string{"/sbin/ping", "/usr/sbin/ping", "/bin/ping", "/usr/bin/ping"}
+
+// pingPath resolves ping(8) once per process.
+var pingPath = sync.OnceValue(func() string {
+	for _, p := range pingCandidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	// Last resort, for a platform that keeps it somewhere else entirely.
+	if p, err := exec.LookPath("ping"); err == nil {
+		return p
+	}
+	return ""
+})
+
 // pingOnce sends a single ICMP echo and reports whether it was answered.
 //
 // This shells out to ping(8) instead of building an ICMP socket in Go. An
 // unprivileged ICMP datagram socket exists on Linux but not on NetBSD, so a
-// native implementation would need a raw socket and thus root — which the CGI
+// native implementation would need a raw socket and thus root -- which the CGI
 // (running as _httpd under bozohttpd) does not have and should not get.
 // NetBSD's /sbin/ping is setuid root, so shelling out gives real ICMP with no
 // privilege grant at all. Verified working as _httpd on pi0.
 func (e *Engine) pingOnce(ctx context.Context, ip string) bool {
+	bin := pingPath()
+	if bin == "" {
+		return false
+	}
+
 	timeout := e.cfg.ProbeTimeout.D()
 	secs := strconv.Itoa(int(timeout.Seconds()))
 
@@ -103,7 +133,7 @@ func (e *Engine) pingOnce(ctx context.Context, ip string) bool {
 	ctx, cancel := context.WithTimeout(ctx, timeout+time.Second)
 	defer cancel()
 
-	return exec.CommandContext(ctx, "ping", args...).Run() == nil
+	return exec.CommandContext(ctx, bin, args...).Run() == nil
 }
 
 // dialSSH reports whether the host's sshd is accepting connections. This is
