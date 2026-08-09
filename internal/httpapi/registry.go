@@ -21,16 +21,30 @@ type State struct {
 	// collected for this request: reading it costs two SSH round trips to the
 	// gateways, so only the routes that render it pay for it.
 	Monitoring []power.GatewayMute
+
+	// PeerBusy reports whether the *other* API node is running a job.
+	//
+	// relayd load-balances pi0 and pi1, so a job started on one node is
+	// invisible to the other's local state. Without this, the idle node cheerfully
+	// advertises power-off while the busy node is mid-shutdown, and every one of
+	// those actions 409s the instant a client tries it -- which is exactly the
+	// "read the 409, not the response" behaviour this API exists to avoid.
+	PeerBusy bool
 }
 
 // monitoringMuted reports whether Gogios is muted on at least one gateway.
 func (s State) monitoringMuted() bool { return power.AnyMuted(s.Monitoring) }
 
-// jobRunning reports whether a power operation is in flight. While one is,
-// every power action is withheld: they are not queued, and offering a button
-// that can only fail is exactly what the self-describing design exists to
-// avoid.
-func (s State) jobRunning() bool { return s.Job != nil && s.Job.State == JobRunning }
+// jobRunning reports whether a power operation is in flight on *either* API
+// node. While one is, every power action is withheld: they are not queued, and
+// offering a button that can only fail is exactly what the self-describing
+// design exists to avoid.
+//
+// The peer half matters as much as the local half. Both nodes serve the same
+// hosts, so a job on either one makes a power action impossible on both.
+func (s State) jobRunning() bool {
+	return s.PeerBusy || (s.Job != nil && s.Job.State == JobRunning)
+}
 
 // host returns the named host's status.
 func (s State) host(name string) (power.HostStatus, bool) {

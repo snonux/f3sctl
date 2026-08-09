@@ -99,6 +99,18 @@ func (s *Server) serve(out io.Writer, req request) error {
 	ctx := context.Background()
 	state := s.snapshot(ctx)
 
+	// Ask the other node whether it is mid-job. Every resource here renders the
+	// currently-available actions, and every action is withheld while either
+	// node is busy, so this is needed almost everywhere -- the OpenAPI document
+	// is the one response that describes the surface rather than the moment.
+	//
+	// An unreachable peer counts as idle, for the same reason peerJobRunning
+	// gives: if one node is down the other must still be able to power the
+	// cluster on.
+	if req.Path != openAPIPath {
+		state.PeerBusy, _ = s.peerJobRunning(req.APIKey)
+	}
+
 	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
 	// trip each to read, so it is fetched only for the routes that actually
 	// render or change it. Every other response would pay ~2s for a value it

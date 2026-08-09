@@ -338,6 +338,44 @@ func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
 	}
 }
 
+// TestPowerActionsWithheldWhileThePeerIsBusy pins that a job on the *other* API
+// node withholds power actions here too.
+//
+// relayd load-balances pi0 and pi1, so the node answering a request is often
+// not the node running the job. Judging availability on local job state alone
+// made the idle node advertise power-off, f0-off, f1-off and f2-off during a
+// live shutdown -- every one of which 409s on contact. Observed 2026-08-09:
+// pi1 correctly offered only fans-off while pi0 offered five power actions.
+//
+// A client is entitled to trust what it was handed; that is the entire premise
+// of a self-describing API.
+func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
+	busy := State{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", Ping: true, SSH: true},
+			{Name: "f1", Role: "f", Ping: true, SSH: true},
+			{Name: "f2", Role: "f", Ping: true, SSH: true},
+		},
+		Fans:     power.FansState{On: true},
+		PeerBusy: true,
+		// Job is nil: this node itself is idle, which is the whole point.
+	}
+
+	for _, r := range routes() {
+		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
+			continue
+		}
+		if r.available(busy) {
+			t.Errorf("%q offered while the peer node is running a job", r.Name)
+		}
+	}
+
+	// The fan plug is not part of a power job, so it stays usable.
+	if r, ok := routeByName("fans-off"); ok && !r.available(busy) {
+		t.Error("fans-off withheld because the peer is busy; the plug is independent of power jobs")
+	}
+}
+
 func routeByName(name string) (route, bool) {
 	for _, r := range routes() {
 		if r.Name == name {
