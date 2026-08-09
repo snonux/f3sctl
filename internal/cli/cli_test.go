@@ -303,6 +303,68 @@ func TestUnknownFansVerbPrintsUsage(t *testing.T) {
 	}
 }
 
+// TestFansStatusReportsThePlugWithoutTouchingIt pins the read-only verb: it
+// reports the plug's current state, switches nothing, and never consults the
+// liveness probe -- there is no guard on a read.
+func TestFansStatusReportsThePlugWithoutTouchingIt(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		name := "off"
+		if on {
+			name = "on"
+		}
+		t.Run(name, func(t *testing.T) {
+			shelly := newFakeShelly(t, on)
+			cfg := testConfig(t, shelly)
+			live := hostsUp("f0")
+
+			out, _, err := runCLI(t, cfg, live, "fans", "status")
+			if err != nil {
+				t.Fatalf("fans status: %v", err)
+			}
+			if want := "rack fans: " + name; !strings.Contains(out, want) {
+				t.Errorf("output = %q, want it to contain %q", out, want)
+			}
+			if !strings.Contains(out, shelly.addr()) {
+				t.Errorf("output = %q, want it to name the plug at %s", out, shelly.addr())
+			}
+			if got := shelly.setCalls(); len(got) != 0 {
+				t.Errorf("Switch.Set calls = %v, want none: status must not switch", got)
+			}
+			if live.calls != 0 {
+				t.Errorf("liveness consulted %d times, want none: status has no guard", live.calls)
+			}
+		})
+	}
+}
+
+// TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected covers the nil
+// default in runFans, the single line stopping the exported entry points from
+// calling a nil function: Run and RunLocal both pass a nil liveHostsFunc, so
+// without the fallback `f3sctl fans off` panics in fansOff -- on the thermal
+// guard path, the one that must never fail open or crash.
+//
+// It has to drive the exported Run, not runCLI: runCLI takes a *fakeLiveness
+// and always passes its non-nil method value, so it cannot express "nothing was
+// injected". The inventory is emptied so the real Engine.LiveHosts has no
+// f-host to probe: it returns nil without a single packet leaving the box, and
+// the guard then sees an idle rack and switches the plug off for real.
+func TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+	cfg.Inventory.Hosts = nil
+
+	var outBuf, errBuf bytes.Buffer
+	if err := Run(cfg, []string{"fans", "off"}, &outBuf, &errBuf); err != nil {
+		t.Fatalf("fans off with no liveness injected: %v", err)
+	}
+	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
+	}
+	if !strings.Contains(outBuf.String(), "rack fans: off") {
+		t.Errorf("output = %q, want it to report the fans off", outBuf.String())
+	}
+}
+
 // TestParseGlobalFlagsConsumesForce pins down why fansOff cannot re-derive the
 // flag from its arguments: it is gone by the time any command sees them. If
 // this ever changes, the threading in run/runFans should be revisited rather

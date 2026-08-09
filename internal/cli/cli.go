@@ -301,7 +301,9 @@ func printMonitoring(out io.Writer, states []power.GatewayMute) {
 // rather than a preference.
 //
 // force is the parsed --force/-f global flag and liveHosts the liveness probe,
-// both threaded down from run; see runFans for why neither is derived here.
+// both threaded down from run rather than derived here: see runFans for why
+// force cannot be re-read from the arguments, and the liveHostsFunc type for
+// why the probe is a seam rather than a direct engine call.
 func fansOff(ctx context.Context, eng *power.Engine, force bool,
 	liveHosts liveHostsFunc, stdout io.Writer) error {
 
