@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -20,6 +21,17 @@ type Engine struct {
 	cfg    config.Config
 	ssh    *runner
 	report Reporter
+
+	// isUp reports whether the host at ip answers ICMP.
+	//
+	// A field rather than a direct pingOnce call because three decisions hang
+	// off it -- which hosts to skip as already off, whether a host that
+	// accepted a shutdown actually went silent, and whether the rack is idle
+	// enough to cut the fans -- and none of them can be tested against real
+	// ping(8) without depending on the machine's network stack and on packets
+	// leaving the box. New wires it to pingOnce; only tests substitute
+	// anything else. Same reasoning as cli.liveHostsFunc.
+	isUp func(ctx context.Context, ip string) bool
 }
 
 // New returns an Engine.
@@ -28,7 +40,9 @@ type Engine struct {
 // that actually needs it, so status probing works on a machine that has no
 // f3sctl key at all.
 func New(cfg config.Config) (*Engine, error) {
-	return &Engine{cfg: cfg, ssh: newRunner(cfg), report: nopReporter{}}, nil
+	e := &Engine{cfg: cfg, ssh: newRunner(cfg), report: nopReporter{}}
+	e.isUp = e.pingOnce
+	return e, nil
 }
 
 // Config exposes the resolved configuration to callers that need the
@@ -100,7 +114,11 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 //  2. export zusb where held -- ditto; needs the host it lives on to be alive
 //  3. mute Gogios            -- only now, once the shutdown is going ahead
 //  4. stop guests, power off -- host by host, storage master LAST
-//  5. fans off               -- only if every host actually went down
+//  5. fans off               -- only if the whole rack is now silent
+//
+// Step 5 is not "every host this run touched": f3 is deliberately left running
+// by a bare `power off` (see inventory.PowerGroup), and the fan plug cools the
+// whole rack. See fansOffOnceTheRackIsIdle.
 //
 // The host order is not incidental: taking the CARP storage master first fails
 // the VIP over onto a host that is itself about to be shut down, which is what
@@ -116,6 +134,10 @@ func (e *Engine) Off(ctx context.Context, log io.Writer) error {
 // host has actually gone silent. This is "the whole rack goes dark", which
 // previously meant running `power off` and `power f3 off` and remembering that
 // only the first of them touches the fans.
+//
+// Because this one does take f3 down, it is the variant that normally reaches
+// the end of fansOffOnceTheRackIsIdle with nothing left answering, and so the
+// variant that actually cuts the plug.
 func (e *Engine) OffAll(ctx context.Context, log io.Writer) error {
 	return e.off(ctx, log, e.cfg.Inventory.ShutdownOrderAll(), true)
 }
@@ -149,6 +171,14 @@ func (e *Engine) OffHost(ctx context.Context, log io.Writer, name string) error 
 	return e.off(ctx, log, []inventory.Host{h}, false)
 }
 
+// off is the shared shutdown sequence behind Off, OffAll and OffHost.
+//
+// clusterWide says whether this run is a rack-wide operation rather than one
+// host being taken down on its own. It gates the two things that belong to the
+// rack as a whole rather than to any host in the list: the Gogios mute, and the
+// rack-fan plug. It does NOT mean "every host is in the list" -- Off's list
+// leaves f3 out -- which is why the fans-off step re-checks what is actually
+// still running instead of trusting this flag.
 func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host, clusterWide bool) error {
 	e.logWarnings(log)
 
@@ -174,7 +204,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	// tell whether it has the zusb pool imported, and guessing risks cutting
 	// USB power to a mounted backup pool.
 	live, alreadyOff := partitionLive(hosts, func(ip string) bool {
-		return e.pingOnce(ctx, ip)
+		return e.isUp(ctx, ip)
 	})
 	for _, h := range alreadyOff {
 		fmt.Fprintf(log, "%s is already powered off; skipping it\n", h.Name)
@@ -205,8 +235,51 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 		}
 	}
 
-	var failed []string
-	var accepted []inventory.Host
+	accepted, failed := e.shutdownEach(ctx, log, hosts)
+
+	// Accepting the command is not the same as completing it. A host can run
+	// the whole shutdown sequence and then wedge in the final phase -- after
+	// syslogd has exited, so nothing is logged -- leaving it powered on, off
+	// the network, and NOT wakeable by Wake-on-LAN, which only wakes a NIC
+	// that actually powered down. Recovering from that needs a console or the
+	// physical button.
+	//
+	// f1 did exactly this on 2026-08-08 while f0 and f2 powered off cleanly.
+	// Nothing reported a problem at the time: the tool said "shutdown sent"
+	// and moved on, and the failure only surfaced later when the host would
+	// not wake. Confirming each host actually goes silent turns that into an
+	// error at the moment it happens.
+	e.report.Step("confirming the hosts actually powered down")
+	if stuck := e.awaitPowerDown(ctx, log, accepted); len(stuck) > 0 {
+		failed = append(failed, stuck...)
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("these hosts did not complete shutdown: %v. "+
+			"Leaving the rack fans on", failed)
+	}
+
+	if clusterWide {
+		if err := e.fansOffOnceTheRackIsIdle(ctx, log); err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintln(log, "All hosts accepted shutdown.")
+	return nil
+}
+
+// shutdownEach asks every host in turn to stop its guests and power off,
+// returning those that accepted and the names of those that did not.
+//
+// One host failing does not stop the rest: they are independent machines, and
+// abandoning a shutdown half way leaves the rack in a worse state than
+// finishing it and reporting what went wrong. The caller turns a non-empty
+// failed list into an error -- and, importantly, into "leaving the rack fans
+// on".
+func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
+	hosts []inventory.Host) (accepted []inventory.Host, failed []string) {
+
 	for _, h := range hosts {
 		e.report.Step("shutting down " + h.Name)
 		e.report.HostState(h.Name, HostWorking, "stopping guests")
@@ -235,39 +308,42 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 		e.report.HostState(h.Name, HostConfirming, detail)
 		accepted = append(accepted, h)
 	}
+	return accepted, failed
+}
 
-	// Accepting the command is not the same as completing it. A host can run
-	// the whole shutdown sequence and then wedge in the final phase -- after
-	// syslogd has exited, so nothing is logged -- leaving it powered on, off
-	// the network, and NOT wakeable by Wake-on-LAN, which only wakes a NIC
-	// that actually powered down. Recovering from that needs a console or the
-	// physical button.
-	//
-	// f1 did exactly this on 2026-08-08 while f0 and f2 powered off cleanly.
-	// Nothing reported a problem at the time: the tool said "shutdown sent"
-	// and moved on, and the failure only surfaced later when the host would
-	// not wake. Confirming each host actually goes silent turns that into an
-	// error at the moment it happens.
-	e.report.Step("confirming the hosts actually powered down")
-	if stuck := e.awaitPowerDown(ctx, log, accepted); len(stuck) > 0 {
-		failed = append(failed, stuck...)
+// fansOffOnceTheRackIsIdle switches the rack fans off, unless an f-host is
+// still running.
+//
+// The plug cools the whole rack, not merely the hosts a given run shut down,
+// and the two are not the same set. A bare `power off` deliberately leaves f3
+// up -- f3 is standalone bhyve, not part of k3s, see inventory.PowerGroup --
+// so cutting the plug at the end of it left f3 running with no cooling. That
+// is precisely what `f3sctl fans off` refuses to do without --force (see
+// cli.fansOff), which made the everyday command silently do what the explicit
+// one guards against. `power all off` does take f3 down, so by the time it
+// reaches here nothing answers and the fans go off exactly as before.
+//
+// Liveness is re-probed rather than inferred from the shutdown that just ran:
+// the hosts this run skipped as already off, and f3, are equally capable of
+// generating heat, and only ICMP knows which of them are.
+//
+// A rack that is still busy is not a failed shutdown -- the hosts this run was
+// asked to power off did go down -- so this says why the fans stay on and
+// returns nil. Leaving them on is also the safe direction if the probe is
+// wrong: a dropped echo reply costs some idle fan noise, the opposite costs a
+// running host its cooling.
+func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) error {
+	if up := e.LiveHosts(ctx); len(up) > 0 {
+		still := strings.Join(up, ", ")
+		e.report.Step("leaving the rack fans on: " + still + " still running")
+		fmt.Fprintf(log, "Leaving the rack fans on: %s still running.\n", still)
+		return nil
 	}
 
-	if len(failed) > 0 {
-		return fmt.Errorf("these hosts did not complete shutdown: %v. "+
-			"Leaving the rack fans on", failed)
-	}
-
-	if clusterWide {
-		e.report.Step("switching the rack fans off")
-		fmt.Fprintln(log, "Switching the rack fans off...")
-		if _, err := e.FansSet(ctx, false); err != nil {
-			return err
-		}
-	}
-
-	fmt.Fprintln(log, "All hosts accepted shutdown.")
-	return nil
+	e.report.Step("switching the rack fans off")
+	fmt.Fprintln(log, "Switching the rack fans off...")
+	_, err := e.FansSet(ctx, false)
+	return err
 }
 
 // partitionLive splits hosts into those answering ICMP and those already off.

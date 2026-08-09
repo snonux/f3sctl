@@ -24,10 +24,11 @@ const usage = `f3sctl - control the f3s homelab
 Usage:
   f3sctl power status          Probe f0-f3 and the k3s nodes
   f3sctl power on              Fans on, wake f0/f1/f2, un-mute Gogios
-  f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2, fans off
-                               (goes through the API: only pi0/pi1 may shut hosts down)
+  f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2
+                               (goes through the API: only pi0/pi1 may shut hosts down;
+                               the fans stay on if f3 is still running)
   f3sctl power all on          Fans on, wake f0/f1/f2/f3, un-mute Gogios
-  f3sctl power all off         As "power off", but f3 too: the whole rack dark
+  f3sctl power all off         As "power off", but f3 too: the whole rack dark, fans off
   f3sctl power f0|f1|f2|f3 on  Wake one host only
   f3sctl power f0|f1|f2|f3 off Power off one host only (fans and Gogios untouched)
   f3sctl fans status           Rack-fan Shelly plug state

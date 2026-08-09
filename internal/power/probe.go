@@ -62,7 +62,7 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 	go func() {
 		defer wg.Done()
 		start := time.Now()
-		st.Ping = e.pingOnce(ctx, h.IP)
+		st.Ping = e.isUp(ctx, h.IP)
 		if st.Ping {
 			st.MS = float64(time.Since(start).Microseconds()) / 1000
 		}

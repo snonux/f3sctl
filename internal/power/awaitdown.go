@@ -57,7 +57,7 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 		}
 
 		for name, h := range pending {
-			if e.pingOnce(ctx, h.IP) {
+			if e.isUp(ctx, h.IP) {
 				// Still answering: reset, so only a sustained silence counts.
 				misses[name] = 0
 				continue
