@@ -376,6 +376,52 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 	}
 }
 
+// TestAllActionsAccountForF3 pins that the all-on/all-off pair is judged
+// against f3 as well, not just the cluster three.
+//
+// With f0-f2 up and only f3 down, "power on" is correctly withheld -- the
+// cluster is already up -- but "all-on" must still be offered, or the group
+// that exists specifically to include f3 would ignore it.
+func TestAllActionsAccountForF3(t *testing.T) {
+	onlyF3Down := State{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", Ping: true, SSH: true},
+			{Name: "f1", Role: "f", Ping: true, SSH: true},
+			{Name: "f2", Role: "f", Ping: true, SSH: true},
+			{Name: "f3", Role: "f", Ping: false, SSH: false},
+		},
+	}
+
+	if r, ok := routeByName("power-on"); ok && r.available(onlyF3Down) {
+		t.Error("power-on offered with the whole cluster up; it ignores f3 by design")
+	}
+	if r, ok := routeByName("all-on"); !ok {
+		t.Fatal("no all-on action")
+	} else if !r.available(onlyF3Down) {
+		t.Error("all-on withheld while f3 is down; the group exists to include f3")
+	}
+}
+
+// TestAllOffNeedsSSHNotPing mirrors power-off: the shutdown runs over SSH, so a
+// rack that only answers ICMP cannot be shut down and must not be offered.
+func TestAllOffNeedsSSHNotPing(t *testing.T) {
+	midBoot := State{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", Ping: true, SSH: false},
+			{Name: "f1", Role: "f", Ping: true, SSH: false},
+			{Name: "f2", Role: "f", Ping: true, SSH: false},
+			{Name: "f3", Role: "f", Ping: true, SSH: false},
+		},
+	}
+	r, ok := routeByName("all-off")
+	if !ok {
+		t.Fatal("no all-off action")
+	}
+	if r.available(midBoot) {
+		t.Error("all-off offered while no host answers SSH; the job could only fail")
+	}
+}
+
 func routeByName(name string) (route, bool) {
 	for _, r := range routes() {
 		if r.Name == name {

@@ -76,3 +76,54 @@ func TestGatewaysUseMeshAddresses(t *testing.T) {
 		}
 	}
 }
+
+// TestShutdownOrderAllCoversEveryFHost pins that `power all off` reaches f3,
+// which is the entire reason the group exists.
+func TestShutdownOrderAllCoversEveryFHost(t *testing.T) {
+	order := Default().ShutdownOrderAll()
+
+	if len(order) != len(Default().ByRole(RoleF)) {
+		t.Fatalf("ShutdownOrderAll has %d hosts, want every f-host (%d)",
+			len(order), len(Default().ByRole(RoleF)))
+	}
+
+	var seenF3 bool
+	for _, h := range order {
+		if h.Name == "f3" {
+			seenF3 = true
+		}
+	}
+	if !seenF3 {
+		t.Error("f3 missing from ShutdownOrderAll; `power all off` would leave it running")
+	}
+}
+
+// TestShutdownOrderAllStillEndsWithTheStorageMaster pins that widening the
+// group did not lose the ordering rule.
+//
+// Taking the CARP storage master first fails the VIP onto a host that is itself
+// about to be shut down, which wedged f1 on 2026-08-08. That hazard does not
+// care whether f3 is in the list.
+func TestShutdownOrderAllStillEndsWithTheStorageMaster(t *testing.T) {
+	order := Default().ShutdownOrderAll()
+	if last := order[len(order)-1].Name; last != StorageMaster {
+		t.Errorf("ShutdownOrderAll ends with %s, want the storage master %s", last, StorageMaster)
+	}
+}
+
+// TestEveryFHostIsASupersetOfThePowerGroup pins the relationship between the
+// two groups: `all` is `power off` plus f3, never something different.
+func TestEveryFHostIsASupersetOfThePowerGroup(t *testing.T) {
+	all := make(map[string]bool)
+	for _, h := range Default().EveryFHost() {
+		all[h.Name] = true
+	}
+	for _, h := range Default().PowerGroup() {
+		if !all[h.Name] {
+			t.Errorf("%s is in the power group but not in EveryFHost", h.Name)
+		}
+	}
+	if len(all) <= len(Default().PowerGroup()) {
+		t.Error("EveryFHost is no larger than PowerGroup; f3 should make it bigger")
+	}
+}

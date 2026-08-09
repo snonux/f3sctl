@@ -81,6 +81,26 @@ func (s State) clusterHostsUp() (up, sshUp, total int) {
 	return up, sshUp, total
 }
 
+// everyFHostUp counts f0-f3, f3 included: the set `power all` acts on.
+//
+// Separate from clusterHostsUp, which deliberately excludes f3, so the two
+// commands are judged against exactly the hosts they would touch.
+func (s State) everyFHostUp() (up, sshUp, total int) {
+	for _, h := range s.Hosts {
+		if h.Role != "f" {
+			continue
+		}
+		total++
+		if h.Ping {
+			up++
+		}
+		if h.SSH {
+			sshUp++
+		}
+	}
+	return up, sshUp, total
+}
+
 // anyFHostUp reports whether anything in the rack is drawing power. This is
 // what gates switching the fans off.
 func (s State) anyFHostUp() bool {
@@ -177,6 +197,26 @@ func routes() []route {
 				return !s.jobRunning() && sshUp > 0
 			},
 			Handle: handleAction("off"),
+		},
+		{
+			Name: "all-on", Title: "Power on every f-host (f0-f3)",
+			Method: http.MethodPost, Path: "/power/all/on", Action: true,
+			Available: func(s State) bool {
+				up, _, total := s.everyFHostUp()
+				return !s.jobRunning() && up < total
+			},
+			Handle: handleAction("all-on"),
+		},
+		{
+			Name: "all-off", Title: "Power off every f-host (f0-f3)",
+			Method: http.MethodPost, Path: "/power/all/off", Action: true,
+			// SSH, not ping, for the same reason as power-off: the whole
+			// shutdown runs over SSH.
+			Available: func(s State) bool {
+				_, sshUp, _ := s.everyFHostUp()
+				return !s.jobRunning() && sshUp > 0
+			},
+			Handle: handleAction("all-off"),
 		},
 	}
 

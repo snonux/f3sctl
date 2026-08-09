@@ -128,6 +128,20 @@ reached: show "unknown", **not** "off". They are different situations, and
 showing the rack as uncooled when it is merely unreachable will send someone
 to the garage for nothing.
 
+### Two power groups
+
+`power-on` / `power-off` act on **f0, f1, f2** — the k3s cluster. f3 is
+excluded deliberately: it runs a standalone VM and is usually wanted
+independently.
+
+`all-on` / `all-off` act on **every f-host, f3 included**. Same sequence
+otherwise: same pre-flight, same Gogios mute, same storage-master-last
+ordering, same fans-off once every host is silent.
+
+A client should not assume one implies the other. With f0–f2 up and only f3
+down, `power-on` is absent (the cluster is already up) while `all-on` is
+offered. Render whichever the server gives you.
+
 ### Monitoring mute
 
 Follow the root's `monitoring` link. It reports whether Gogios alerting is

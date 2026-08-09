@@ -26,6 +26,8 @@ Usage:
   f3sctl power on              Fans on, wake f0/f1/f2, un-mute Gogios
   f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2, fans off
                                (goes through the API: only pi0/pi1 may shut hosts down)
+  f3sctl power all on          Fans on, wake f0/f1/f2/f3, un-mute Gogios
+  f3sctl power all off         As "power off", but f3 too: the whole rack dark
   f3sctl power f0|f1|f2|f3 on  Wake one host only
   f3sctl power f0|f1|f2|f3 off Power off one host only (fans and Gogios untouched)
   f3sctl fans status           Rack-fan Shelly plug state
@@ -149,8 +151,18 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 		return eng.Off(ctx, stdout)
 	}
 
-	// `f3sctl power <host> on|off` -- currently only meaningful for f3, but
-	// spelled generally so a future host needs no new parsing.
+	// `f3sctl power all on|off` -- every f-host including f3. Matched before
+	// the per-host branch below, since "all" is a group, not a host name.
+	if len(args) == 2 && args[0] == "all" {
+		switch args[1] {
+		case "on":
+			return eng.OnAll(ctx, stdout)
+		case "off":
+			return eng.OffAll(ctx, stdout)
+		}
+	}
+
+	// `f3sctl power <host> on|off`.
 	if len(args) == 2 {
 		switch args[1] {
 		case "on":

@@ -125,6 +125,16 @@ func (inv Inventory) PowerGroup() []Host {
 	return out
 }
 
+// EveryFHost is the set `f3sctl power all on|off` acts on: every f-host,
+// f3 included.
+//
+// The distinction from PowerGroup is intent, not capability. A bare
+// `power off` means "take the cluster down" and leaves f3 running, because f3
+// is standalone and usually wanted independently. `power all off` means "the
+// whole rack goes dark", which is the other thing people actually want and
+// previously took two commands.
+func (inv Inventory) EveryFHost() []Host { return inv.ByRole(RoleF) }
+
 // StorageMaster is the host that normally holds the CARP storage VIP
 // (f3s-storage-ha, 192.168.1.138) and serves NFS. f1 is its BACKUP.
 const StorageMaster = "f0"
@@ -146,11 +156,23 @@ const StorageMaster = "f0"
 // says to take the storage master last when rebooting; this makes the tool
 // obey the same rule.
 func (inv Inventory) ShutdownOrder() []Host {
-	group := inv.PowerGroup()
+	return storageMasterLast(inv.PowerGroup())
+}
 
-	out := make([]Host, 0, len(group))
+// ShutdownOrderAll is ShutdownOrder over every f-host, f3 included.
+//
+// The same rule applies for the same reason: whatever else is going down, the
+// CARP storage master goes last.
+func (inv Inventory) ShutdownOrderAll() []Host {
+	return storageMasterLast(inv.EveryFHost())
+}
+
+// storageMasterLast moves the CARP storage master to the end of the list,
+// preserving the order of everything else.
+func storageMasterLast(hosts []Host) []Host {
+	out := make([]Host, 0, len(hosts))
 	var master []Host
-	for _, h := range group {
+	for _, h := range hosts {
 		if h.Name == StorageMaster {
 			master = append(master, h)
 			continue

@@ -54,6 +54,14 @@ func (e *Engine) logWarnings(log io.Writer) {
 // woken at all — running the cluster with no fans is worse than leaving it
 // off.
 func (e *Engine) On(ctx context.Context, log io.Writer) error {
+	return e.on(ctx, log, e.cfg.Inventory.PowerGroup())
+}
+
+// on is the shared wake sequence: fans first, then magic packets, then wait for
+// the cluster and clear the Gogios mute.
+func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) error {
+	e.logWarnings(log)
+
 	e.report.Step("switching the rack fans on")
 	fmt.Fprintln(log, "Switching the rack fans on...")
 	if _, err := e.FansSet(ctx, true); err != nil {
@@ -61,7 +69,7 @@ func (e *Engine) On(ctx context.Context, log io.Writer) error {
 	}
 
 	e.report.Step("sending Wake-on-LAN packets")
-	for _, h := range e.cfg.Inventory.PowerGroup() {
+	for _, h := range hosts {
 		fmt.Fprintf(log, "Sending a magic packet to %s (%s)...\n", h.Name, h.MAC)
 		if err := e.Wake(h); err != nil {
 			e.report.HostState(h.Name, HostFailed, err.Error())
@@ -99,6 +107,22 @@ func (e *Engine) On(ctx context.Context, log io.Writer) error {
 // wedged f1 on 2026-08-08. See inventory.ShutdownOrder.
 func (e *Engine) Off(ctx context.Context, log io.Writer) error {
 	return e.off(ctx, log, e.cfg.Inventory.ShutdownOrder(), true)
+}
+
+// OffAll shuts down every f-host, f3 included, and switches the rack fans off.
+//
+// Identical to Off apart from the host set: same NFS and zusb pre-flight, same
+// Gogios mute, same storage-master-last ordering, same fans-off only once every
+// host has actually gone silent. This is "the whole rack goes dark", which
+// previously meant running `power off` and `power f3 off` and remembering that
+// only the first of them touches the fans.
+func (e *Engine) OffAll(ctx context.Context, log io.Writer) error {
+	return e.off(ctx, log, e.cfg.Inventory.ShutdownOrderAll(), true)
+}
+
+// OnAll wakes every f-host, f3 included.
+func (e *Engine) OnAll(ctx context.Context, log io.Writer) error {
+	return e.on(ctx, log, e.cfg.Inventory.EveryFHost())
 }
 
 // OnHost wakes a single named host, without touching the fans or the Gogios

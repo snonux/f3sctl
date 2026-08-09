@@ -197,6 +197,14 @@ async function selftest() {
   check(!!action(entry, 'power-off') === hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && h.ping),
     'power-off is offered exactly when something is up');
 
+  // "all" covers f3 as well, so it is judged against a different host set than
+  // power-on -- with only f3 down, power-on is correctly absent and all-on is
+  // not.
+  const everyFUp = hosts.filter((h) => h.name.startsWith('f')).every((h) => h.ping);
+  check(!!action(entry, 'all-on') === !everyFUp, 'all-on is offered exactly when any f-host is down');
+  check(!!action(entry, 'all-off') === hosts.some((h) => h.name.startsWith('f') && h.ssh),
+    'all-off is offered exactly when an f-host answers SSH');
+
   const fans = entities(status, 'fans')[0]?.properties ?? {};
   check(!!action(entry, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
 
@@ -220,6 +228,8 @@ const commands = {
   status: showStatus,
   on: () => run('power-on'),
   off: () => run('power-off'),
+  'all-on': () => run('all-on'),
+  'all-off': () => run('all-off'),
   'f3-on': () => run('f3-on'),
   'f3-off': () => run('f3-off'),
   'monitoring-mute': () => run('monitoring-mute', undefined, 'monitoring'),
