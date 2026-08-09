@@ -105,7 +105,7 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 	case "power":
 		return runPower(cfg, args[1:], stdout, stderr, reporter)
 	case "fans":
-		return runFans(cfg, args[1:], stdout, stderr)
+		return runFans(cfg, args[1:], flags.force, stdout, stderr)
 	case "monitoring":
 		return runMonitoring(cfg, args[1:], stdout, stderr)
 	}
@@ -176,7 +176,13 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 	return fmt.Errorf("unknown power command %q", strings.Join(args, " "))
 }
 
-func runFans(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+// runFans reads or switches the rack-fan plug.
+//
+// force arrives from the global flag parser rather than from args: --force is
+// stripped out of args by parseGlobalFlags before any command sees them, so
+// re-deriving it here would always see nothing and the guard below could never
+// be overridden.
+func runFans(cfg config.Config, args []string, force bool, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
@@ -206,7 +212,7 @@ func runFans(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 		return nil
 
 	case "off":
-		return fansOff(ctx, eng, args[1:], stdout)
+		return fansOff(ctx, eng, force, stdout)
 	}
 
 	fmt.Fprint(stderr, usage)
@@ -270,9 +276,12 @@ func printMonitoring(out io.Writer, states []power.GatewayMute) {
 // The f-hosts switch this plug on at boot precisely so the fans run whenever
 // any host does, so switching it off under a running rack is a thermal risk
 // rather than a preference.
-func fansOff(ctx context.Context, eng *power.Engine, args []string, stdout io.Writer) error {
-	force := len(args) > 0 && (args[0] == "--force" || args[0] == "-f")
-
+//
+// force is the parsed --force/-f global flag, passed down from run. It used to
+// be re-scanned out of the remaining arguments here, which never matched:
+// parseGlobalFlags has already removed the flag by then, so `fans off --force`
+// hit the refusal below exactly as if it had been left out.
+func fansOff(ctx context.Context, eng *power.Engine, force bool, stdout io.Writer) error {
 	if !force {
 		if up := eng.LiveHosts(ctx); len(up) > 0 {
 			return fmt.Errorf("%v still up; refusing to switch the rack fans off. "+
