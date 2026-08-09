@@ -140,7 +140,7 @@ func routes() []route {
 		},
 		{
 			Name: "job", Title: "Current or last power job",
-			Method: http.MethodGet, Path: "/job",
+			Method: http.MethodGet, Path: jobPath,
 			Handle: (*Server).handleJob,
 		},
 		{

@@ -99,15 +99,22 @@ func (s *Server) serve(out io.Writer, req request) error {
 	ctx := context.Background()
 	state := s.snapshot(ctx)
 
-	// Ask the other node whether it is mid-job. Every resource here renders the
-	// currently-available actions, and every action is withheld while either
-	// node is busy, so this is needed almost everywhere -- the OpenAPI document
-	// is the one response that describes the surface rather than the moment.
+	// Ask the other node whether it is mid-job, so actions this node advertises
+	// account for a job running over there.
+	//
+	// Two routes are excluded, and /job is excluded for a reason worth stating:
+	// the peer check *is* a GET of the peer's /job. Letting /job trigger one
+	// makes each node's answer depend on the other's, so a single question
+	// bounces between them until the 3s client timeout fires and the peer is
+	// misread as idle -- which is precisely how this arrived broken the first
+	// time (pi0 answering in 5.3s and still offering power actions mid-job).
+	// /job renders no actions, so it has no use for the answer anyway.
+	// openapi.json describes the surface rather than the moment.
 	//
 	// An unreachable peer counts as idle, for the same reason peerJobRunning
 	// gives: if one node is down the other must still be able to power the
 	// cluster on.
-	if req.Path != openAPIPath {
+	if req.Path != openAPIPath && req.Path != jobPath {
 		state.PeerBusy, _ = s.peerJobRunning(req.APIKey)
 	}
 

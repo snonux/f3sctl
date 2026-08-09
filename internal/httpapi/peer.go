@@ -27,6 +27,13 @@ import (
 // double-tapping, a watch retrying, two people acting at once.
 var peerNodes = []string{"192.168.1.125", "192.168.1.126"}
 
+// jobPath is the resource the peer check reads.
+//
+// Named so Server.handle can exclude it from triggering a peer check of its
+// own: a peer check that recurses into another peer check makes each node's
+// answer wait on the other's.
+const jobPath = "/job"
+
 // peerJobRunning reports whether any other API node currently has a job
 // running.
 //
