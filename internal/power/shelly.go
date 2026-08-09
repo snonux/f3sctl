@@ -41,19 +41,49 @@ func (e *Engine) FansStatus(ctx context.Context) (FansState, error) {
 // too. Trusting the status code alone would report success while the plug sat
 // untouched — which, on the "off" path, means the fans keep running after a
 // shutdown, and on the "on" path means the rack heats up under load.
+// The read-back is retried rather than taken once, because the relay does not
+// flip instantly: Switch.Set returns as soon as the command is accepted, and a
+// GetStatus issued immediately after can still report the previous state. A
+// single eager read turned a perfectly good switch-on into a failed job on
+// 2026-08-09 -- "asked for on=true, it reports on=false" -- while the plug was
+// in fact on, and the whole rack was left powered down as a result.
+//
+// This does not weaken the check: a plug that genuinely never changes still
+// fails, just after a bounded wait instead of instantly.
+const (
+	fansSettleAttempts = 6
+	fansSettleInterval = 500 * time.Millisecond
+)
+
 func (e *Engine) FansSet(ctx context.Context, on bool) (FansState, error) {
 	q := fmt.Sprintf("/rpc/Switch.Set?id=0&on=%t", on)
 	if _, err := e.shellyRPC(ctx, q); err != nil {
 		return FansState{IP: e.cfg.Inventory.ShellyIP}, err
 	}
 
-	st, err := e.shellyGetStatus(ctx)
-	if err != nil {
-		return FansState{IP: e.cfg.Inventory.ShellyIP}, err
+	var st shellyStatus
+	var err error
+	for attempt := 0; attempt < fansSettleAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return FansState{IP: e.cfg.Inventory.ShellyIP}, ctx.Err()
+			case <-time.After(fansSettleInterval):
+			}
+		}
+		st, err = e.shellyGetStatus(ctx)
+		if err != nil {
+			return FansState{IP: e.cfg.Inventory.ShellyIP}, err
+		}
+		if st.Output == on {
+			break
+		}
 	}
 	if st.Output != on {
 		return FansState{On: st.Output, IP: e.cfg.Inventory.ShellyIP},
-			fmt.Errorf("shelly plug did not change state: asked for on=%t, it reports on=%t", on, st.Output)
+			fmt.Errorf("shelly plug did not change state: asked for on=%t, "+
+				"it still reports on=%t after %s", on, st.Output,
+				time.Duration(fansSettleAttempts-1)*fansSettleInterval)
 	}
 	return FansState{On: st.Output, IP: e.cfg.Inventory.ShellyIP}, nil
 }
