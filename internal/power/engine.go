@@ -35,6 +35,18 @@ func New(cfg config.Config) (*Engine, error) {
 // inventory (the CLI's status table, the API's registry).
 func (e *Engine) Config() config.Config { return e.cfg }
 
+// logWarnings routes diagnostics from successful agent verbs into log.
+//
+// Called at the start of each operation that has somewhere to write, because
+// the Engine holds no log of its own. Without it these messages are dropped:
+// an agent that force-kills a bhyve guest warns on stderr and still exits 0,
+// so the warning arrives on the success path or not at all.
+func (e *Engine) logWarnings(log io.Writer) {
+	e.ssh.warn = func(host, verb, msg string) {
+		fmt.Fprintf(log, "  ! %s (%s): %s\n", host, verb, indent(msg))
+	}
+}
+
 // On wakes the k3s bhyve hosts f0/f1/f2.
 //
 // Order matters: the fans go on before the hosts, not after, so the rack is
@@ -114,6 +126,8 @@ func (e *Engine) OffHost(ctx context.Context, log io.Writer, name string) error 
 }
 
 func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host, clusterWide bool) error {
+	e.logWarnings(log)
+
 	for _, h := range hosts {
 		e.report.HostState(h.Name, HostPending, "")
 	}
@@ -173,7 +187,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 		e.report.Step("shutting down " + h.Name)
 		e.report.HostState(h.Name, HostWorking, "stopping guests")
 		fmt.Fprintf(log, "Shutting down %s (%s)...\n", h.Name, h.IP)
-		out, err := e.ssh.agentVerb(ctx, h, "poweroff")
+		out, diag, err := e.ssh.agentVerbFull(ctx, h, "poweroff")
 		if out != "" {
 			fmt.Fprintf(log, "  %s\n", indent(out))
 		}
@@ -183,8 +197,18 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 			failed = append(failed, h.Name)
 			continue
 		}
+
+		// A forced guest stop still exits 0, so it arrives here rather than in
+		// the error branch. Carry it into the host's progress detail: a run
+		// that SIGKILLed a k3s guest may have torn an etcd write-ahead log,
+		// and that has to be visible to whoever reads the job, not buried in a
+		// log file on whichever node happened to run it.
+		detail := "accepted; waiting for it to go silent"
+		if diag != "" {
+			detail = "accepted, but the guests were force-stopped; check etcd on next boot"
+		}
 		fmt.Fprintf(log, "  %s accepted the shutdown\n", h.Name)
-		e.report.HostState(h.Name, HostConfirming, "accepted; waiting for it to go silent")
+		e.report.HostState(h.Name, HostConfirming, detail)
 		accepted = append(accepted, h)
 	}
 

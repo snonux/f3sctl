@@ -29,6 +29,11 @@ type runner struct {
 	once     sync.Once
 	identity string
 	idErr    error
+
+	// warn receives diagnostics an agent verb wrote to stderr while still
+	// exiting 0. Nil means "nowhere to put them", which is only right for a
+	// caller that has no log; the Engine always wires this up.
+	warn func(host, verb, msg string)
 }
 
 func newRunner(cfg config.Config) *runner {
@@ -66,13 +71,32 @@ func (r *runner) sshArgs(h inventory.Host, identity string) []string {
 
 // agentVerb runs one agent verb on h and returns its trimmed stdout.
 //
+// Diagnostics the agent wrote to stderr while still succeeding are reported
+// through r.warn rather than dropped -- see agentVerbFull.
+func (r *runner) agentVerb(ctx context.Context, h inventory.Host, verb string) (string, error) {
+	stdout, _, err := r.agentVerbFull(ctx, h, verb)
+	return stdout, err
+}
+
+// agentVerbFull runs one agent verb on h and returns its trimmed stdout and
+// stderr separately.
+//
 // The verb is passed as the SSH command, which the target's ForceCommand turns
 // into $SSH_ORIGINAL_COMMAND for `f3sctl agent`. Verbs are single words with no
 // arguments precisely so there is nothing here an attacker could vary.
-func (r *runner) agentVerb(ctx context.Context, h inventory.Host, verb string) (string, error) {
+//
+// stderr is returned even when the command SUCCEEDS, and that is the whole
+// point of this function existing. The agent's `poweroff` verb force-kills a
+// bhyve guest that outlives the 240s timeout, warns about it on stderr -- "check
+// etcd health on the next boot" -- and then exits 0, because a forced stop is
+// still a completed shutdown. An earlier version only looked at stderr on
+// failure, so that warning was discarded every single time it mattered, and a
+// run that SIGKILLed all three k3s guests was indistinguishable in the log from
+// a clean one.
+func (r *runner) agentVerbFull(ctx context.Context, h inventory.Host, verb string) (string, string, error) {
 	identity, err := r.resolveIdentity()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	args := append(r.sshArgs(h, identity), verb)
 
@@ -81,12 +105,20 @@ func (r *runner) agentVerb(ctx context.Context, h inventory.Host, verb string) (
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
+	runErr := cmd.Run()
+	outStr := strings.TrimSpace(stdout.String())
+	errStr := strings.TrimSpace(stderr.String())
+
+	if runErr != nil {
+		msg := errStr
 		if msg == "" {
-			msg = err.Error()
+			msg = runErr.Error()
 		}
-		return strings.TrimSpace(stdout.String()), fmt.Errorf("%s: %s: %s", h.Name, verb, msg)
+		return outStr, errStr, fmt.Errorf("%s: %s: %s", h.Name, verb, msg)
 	}
-	return strings.TrimSpace(stdout.String()), nil
+
+	if errStr != "" && r.warn != nil {
+		r.warn(h.Name, verb, errStr)
+	}
+	return outStr, errStr, nil
 }
