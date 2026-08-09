@@ -2,17 +2,16 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -58,6 +57,10 @@ func (s *fakeShelly) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// unplug makes the fixture unreachable, the way a plug that has lost power or
+// fallen off the wifi is. Closing twice is safe: t.Cleanup closes it again.
+func (s *fakeShelly) unplug() { s.srv.Close() }
+
 // setCalls returns the state requested by each Switch.Set so far.
 func (s *fakeShelly) setCalls() []bool {
 	s.mu.Lock()
@@ -69,9 +72,14 @@ func (s *fakeShelly) setCalls() []bool {
 // "http://" + ShellyIP + path, so a host:port belongs there.
 func (s *fakeShelly) addr() string { return strings.TrimPrefix(s.srv.URL, "http://") }
 
-// testConfig wires the CLI up to the fake plug and to a single f-host at
-// fHostIP, with a Shelly password on disk so ResolveShellyPassword succeeds.
-func testConfig(t *testing.T, s *fakeShelly, fHostIP string) config.Config {
+// fHostIP is the address of the single f-host in the test inventory. Nothing
+// ever contacts it: liveness is injected (see runCLI) and no test below reaches
+// a code path that pings or dials a host.
+const fHostIP = "192.0.2.1" // TEST-NET-1, reserved and never routed
+
+// testConfig wires the CLI up to the fake plug and to a single f-host, with a
+// Shelly password on disk so ResolveShellyPassword succeeds.
+func testConfig(t *testing.T, s *fakeShelly) config.Config {
 	t.Helper()
 
 	pwFile := filepath.Join(t.TempDir(), "shelly_plug")
@@ -81,7 +89,6 @@ func testConfig(t *testing.T, s *fakeShelly, fHostIP string) config.Config {
 
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
-	cfg.ProbeTimeout = config.Duration(time.Second)
 	cfg.Inventory = inventory.Inventory{
 		ShellyIP: s.addr(),
 		Hosts: []inventory.Host{
@@ -91,48 +98,57 @@ func testConfig(t *testing.T, s *fakeShelly, fHostIP string) config.Config {
 	return cfg
 }
 
-// loopbackIP is the address used for a host that must look alive: pinging
-// 127.0.0.1 answers on any machine that has ping(8) at all.
-const loopbackIP = "127.0.0.1"
-
-// deadIP is TEST-NET-1, reserved for documentation and never routed, so the
-// ping times out and the host looks powered off.
-const deadIP = "192.0.2.1"
-
-// requirePing skips a test that depends on LiveHosts seeing a host answer.
-// Sandboxes without ping(8), or with ICMP blocked to the loopback, would
-// otherwise report a missing refusal as a regression in the guard.
-func requirePing(t *testing.T) {
-	t.Helper()
-	bin, err := exec.LookPath("ping")
-	if err != nil {
-		t.Skip("ping(8) not available; cannot make a host look alive")
-	}
-	if err := exec.Command(bin, "-c", "1", "-w", "1", loopbackIP).Run(); err != nil {
-		t.Skipf("ping %s failed (%v); cannot make a host look alive", loopbackIP, err)
-	}
+// fakeLiveness stands in for the ICMP probe behind the fan guard.
+//
+// Injecting it is what makes the guard testable at all: the real one shells out
+// to ping(8), so "a host is up" would depend on the machine's network stack and
+// on packets leaving the box. It also counts calls, so a test can assert the
+// guard was not consulted rather than merely that it did not refuse.
+//
+// Not concurrency-safe: one CLI invocation consults it at most once, in the
+// calling goroutine.
+type fakeLiveness struct {
+	up    []string
+	calls int
 }
 
-// runCLI drives one invocation the way main does and returns stdout.
-func runCLI(t *testing.T, cfg config.Config, args ...string) (string, error) {
+func (f *fakeLiveness) hosts(context.Context) []string {
+	f.calls++
+	return f.up
+}
+
+// hostsUp returns a liveness probe reporting exactly these hosts as running.
+// With no names it reports an idle rack.
+func hostsUp(names ...string) *fakeLiveness { return &fakeLiveness{up: names} }
+
+// runCLI drives one invocation with the fan guard's liveness probe replaced.
+//
+// It calls run rather than the exported Run because Run's only job is to pass a
+// nil liveness, meaning "ask the engine over ICMP". Everything under test --
+// global flag parsing, dispatch, the guard, the plug -- is the same code path
+// main takes.
+func runCLI(t *testing.T, cfg config.Config, live *fakeLiveness, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
-	var stdout, stderr bytes.Buffer
-	err := Run(cfg, args, &stdout, &stderr)
-	return stdout.String(), err
+	var outBuf, errBuf bytes.Buffer
+	err = run(cfg, args, &outBuf, &errBuf, nil, false, live.hosts)
+	return outBuf.String(), errBuf.String(), err
 }
 
 // TestFansOffForceSwitchesThePlugWhileAHostIsUp is the regression test for the
 // bug where --force never reached fansOff: parseGlobalFlags consumes it, so the
 // old scan of the remaining arguments always found nothing and every
 // `fans off --force` hit the refusal instead of switching the plug.
+//
+// The injected liveness reporting f0 up is what gives the test its teeth: any
+// build that loses the flag on the way down consults the guard, sees a host
+// running, and refuses.
 func TestFansOffForceSwitchesThePlugWhileAHostIsUp(t *testing.T) {
-	// No ping needed: with --force the guard is not consulted at all.
 	for _, flag := range []string{"--force", "-f"} {
 		t.Run(flag, func(t *testing.T) {
 			shelly := newFakeShelly(t, true)
-			cfg := testConfig(t, shelly, loopbackIP)
+			cfg := testConfig(t, shelly)
 
-			out, err := runCLI(t, cfg, "fans", "off", flag)
+			out, _, err := runCLI(t, cfg, hostsUp("f0"), "fans", "off", flag)
 			if err != nil {
 				t.Fatalf("fans off %s: %v", flag, err)
 			}
@@ -146,14 +162,14 @@ func TestFansOffForceSwitchesThePlugWhileAHostIsUp(t *testing.T) {
 	}
 }
 
-// TestFansOffForceBeforeTheVerb checks the flag is honoured wherever it sits.
-// parseGlobalFlags accepts global flags anywhere on purpose, so `--force fans
-// off` must behave exactly like `fans off --force`.
-func TestFansOffForceBeforeTheVerb(t *testing.T) {
+// TestFansOffForceBeforeTheVerbSwitchesThePlugWhileAHostIsUp checks the flag is
+// honoured wherever it sits. parseGlobalFlags accepts global flags anywhere on
+// purpose, so `--force fans off` must behave exactly like `fans off --force`.
+func TestFansOffForceBeforeTheVerbSwitchesThePlugWhileAHostIsUp(t *testing.T) {
 	shelly := newFakeShelly(t, true)
-	cfg := testConfig(t, shelly, loopbackIP)
+	cfg := testConfig(t, shelly)
 
-	if _, err := runCLI(t, cfg, "--force", "fans", "off"); err != nil {
+	if _, _, err := runCLI(t, cfg, hostsUp("f0"), "--force", "fans", "off"); err != nil {
 		t.Fatalf("--force fans off: %v", err)
 	}
 	if got := shelly.setCalls(); len(got) != 1 || got[0] {
@@ -164,17 +180,18 @@ func TestFansOffForceBeforeTheVerb(t *testing.T) {
 // TestFansOffWithoutForceRefusesWhileAHostIsUp is the other half of the fix:
 // threading the flag through must not weaken the thermal guard.
 func TestFansOffWithoutForceRefusesWhileAHostIsUp(t *testing.T) {
-	requirePing(t)
-
 	shelly := newFakeShelly(t, true)
-	cfg := testConfig(t, shelly, loopbackIP)
+	cfg := testConfig(t, shelly)
 
-	_, err := runCLI(t, cfg, "fans", "off")
+	_, _, err := runCLI(t, cfg, hostsUp("f0"), "fans", "off")
 	if err == nil {
 		t.Fatal("fans off succeeded while a host was up; the guard did not fire")
 	}
 	if !strings.Contains(err.Error(), "refusing to switch the rack fans off") {
 		t.Errorf("error = %v, want the refusal", err)
+	}
+	if !strings.Contains(err.Error(), "f0") {
+		t.Errorf("error = %v, want it to name the host that is still up", err)
 	}
 	if got := shelly.setCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none: the plug must be untouched", got)
@@ -185,9 +202,9 @@ func TestFansOffWithoutForceRefusesWhileAHostIsUp(t *testing.T) {
 // when it has a reason to: an idle rack switches off without ceremony.
 func TestFansOffWithNothingUpNeedsNoForce(t *testing.T) {
 	shelly := newFakeShelly(t, true)
-	cfg := testConfig(t, shelly, deadIP)
+	cfg := testConfig(t, shelly)
 
-	if _, err := runCLI(t, cfg, "fans", "off"); err != nil {
+	if _, _, err := runCLI(t, cfg, hostsUp(), "fans", "off"); err != nil {
 		t.Fatalf("fans off with no host up: %v", err)
 	}
 	if got := shelly.setCalls(); len(got) != 1 || got[0] {
@@ -195,13 +212,37 @@ func TestFansOffWithNothingUpNeedsNoForce(t *testing.T) {
 	}
 }
 
-// TestFansOnIgnoresTheGuard checks switching the fans on is never gated: the
-// force flag belongs to the off path only.
-func TestFansOnIgnoresTheGuard(t *testing.T) {
-	shelly := newFakeShelly(t, false)
-	cfg := testConfig(t, shelly, loopbackIP)
+// TestFansOffReportsAnUnreachablePlug pins that a plug that cannot be reached
+// is an error, not a shrug. `power off` switches the fans off as its last step
+// and reports the run as failed if this fails, so swallowing it would claim a
+// rack was safely shut down with the fans still spinning.
+func TestFansOffReportsAnUnreachablePlug(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+	shelly.unplug()
 
-	out, err := runCLI(t, cfg, "fans", "on")
+	out, _, err := runCLI(t, cfg, hostsUp(), "fans", "off")
+	if err == nil {
+		t.Fatal("fans off succeeded against an unreachable plug")
+	}
+	if !strings.Contains(err.Error(), "reaching the Shelly plug") {
+		t.Errorf("error = %v, want it to say the plug could not be reached", err)
+	}
+	if out != "" {
+		t.Errorf("output = %q, want nothing: the fans were not switched", out)
+	}
+}
+
+// TestFansOnSwitchesThePlugOnEvenWhileHostsAreUp pins that switching the fans
+// on is never gated. There is no guard on this path at all -- more cooling is
+// never the risky direction -- so --force has no business here and liveness is
+// not consulted.
+func TestFansOnSwitchesThePlugOnEvenWhileHostsAreUp(t *testing.T) {
+	shelly := newFakeShelly(t, false)
+	cfg := testConfig(t, shelly)
+	live := hostsUp("f0")
+
+	out, _, err := runCLI(t, cfg, live, "fans", "on")
 	if err != nil {
 		t.Fatalf("fans on: %v", err)
 	}
@@ -210,6 +251,55 @@ func TestFansOnIgnoresTheGuard(t *testing.T) {
 	}
 	if !strings.Contains(out, "rack fans: on") {
 		t.Errorf("output = %q, want it to report the fans on", out)
+	}
+	if live.calls != 0 {
+		t.Errorf("liveness consulted %d times, want none: the on path has no guard", live.calls)
+	}
+}
+
+// TestFansWithNoVerbPrintsUsage pins that a bare `fans` is a usage error and
+// says so on stderr, rather than being read as some default verb.
+func TestFansWithNoVerbPrintsUsage(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+
+	out, errOut, err := runCLI(t, cfg, hostsUp("f0"), "fans")
+	if err != errUsage {
+		t.Fatalf("error = %v, want errUsage", err)
+	}
+	if !strings.Contains(errOut, "f3sctl fans off") {
+		t.Errorf("stderr = %q, want the usage text", errOut)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want usage on stderr only", out)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none", got)
+	}
+}
+
+// TestUnknownFansVerbPrintsUsage pins that a misspelled verb fails loudly and
+// leaves the plug alone. The package doc makes a point of rejecting retired
+// wol-f3s spellings outright; guessing at "fans of" would undo that.
+func TestUnknownFansVerbPrintsUsage(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+
+	out, errOut, err := runCLI(t, cfg, hostsUp("f0"), "fans", "of")
+	if err == nil {
+		t.Fatal("fans of succeeded; an unknown verb must be an error")
+	}
+	if !strings.Contains(err.Error(), `unknown fans command "of"`) {
+		t.Errorf("error = %v, want it to name the unknown verb", err)
+	}
+	if !strings.Contains(errOut, "f3sctl fans off") {
+		t.Errorf("stderr = %q, want the usage text", errOut)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want usage on stderr only", out)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none", got)
 	}
 }
 
@@ -222,7 +312,7 @@ func TestParseGlobalFlagsConsumesForce(t *testing.T) {
 	if !flags.force {
 		t.Error("--force was not parsed into flags.force")
 	}
-	if got := fmt.Sprint(rest); got != "[fans off]" {
-		t.Errorf("rest = %s, want [fans off]: --force must not reach the command", got)
+	if want := []string{"fans", "off"}; !slices.Equal(rest, want) {
+		t.Errorf("rest = %v, want %v: --force must not reach the command", rest, want)
 	}
 }

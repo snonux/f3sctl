@@ -59,9 +59,19 @@ Pi: pi0 and pi1 are where it runs, and powering them off would remove the only
 way to power anything back on.
 `
 
+// liveHostsFunc reports which f-hosts are currently drawing power, by name.
+//
+// The rack-fan guard in fansOff is its only consumer. It is a function rather
+// than a direct call to power.Engine.LiveHosts so the guard can be exercised
+// without real ICMP: LiveHosts shells out to ping(8), which would make the
+// guard's tests depend on the machine's network stack and on packets actually
+// leaving the box. Same reasoning as the isUp parameter of
+// power.partitionLive.
+type liveHostsFunc func(ctx context.Context) []string
+
 // Run executes one CLI invocation.
 func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
-	return run(cfg, args, stdout, stderr, nil, false)
+	return run(cfg, args, stdout, stderr, nil, false, nil)
 }
 
 // RunLocal executes an invocation that must act on the homelab directly,
@@ -71,11 +81,16 @@ func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 // in globalFlags.useAPI: a shutdown started by the API which then called the
 // API would simply recurse.
 func RunLocal(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
-	return run(cfg, args, stdout, stderr, reporter, true)
+	return run(cfg, args, stdout, stderr, reporter, true, nil)
 }
 
+// run executes one invocation.
+//
+// liveHosts is the seam the rack-fan guard consults; a nil one means the real
+// ICMP probe on the engine runFans builds, which is what both exported entry
+// points pass. Only the tests substitute anything else.
 func run(cfg config.Config, args []string, stdout, stderr io.Writer,
-	reporter power.Reporter, forceLocal bool) error {
+	reporter power.Reporter, forceLocal bool, liveHosts liveHostsFunc) error {
 
 	args, flags := parseGlobalFlags(args)
 	if forceLocal {
@@ -105,7 +120,7 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 	case "power":
 		return runPower(cfg, args[1:], stdout, stderr, reporter)
 	case "fans":
-		return runFans(cfg, args[1:], flags.force, stdout, stderr)
+		return runFans(cfg, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "monitoring":
 		return runMonitoring(cfg, args[1:], stdout, stderr)
 	}
@@ -180,9 +195,14 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 //
 // force arrives from the global flag parser rather than from args: --force is
 // stripped out of args by parseGlobalFlags before any command sees them, so
-// re-deriving it here would always see nothing and the guard below could never
-// be overridden.
-func runFans(cfg config.Config, args []string, force bool, stdout, stderr io.Writer) error {
+// re-deriving it here would always see nothing and the thermal guard in fansOff
+// could never be overridden.
+//
+// liveHosts is that guard's view of what is still running. A nil one means ask
+// the engine over ICMP, which is what production does.
+func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFunc,
+	stdout, stderr io.Writer) error {
+
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
@@ -191,6 +211,9 @@ func runFans(cfg config.Config, args []string, force bool, stdout, stderr io.Wri
 	eng, err := power.New(cfg)
 	if err != nil {
 		return err
+	}
+	if liveHosts == nil {
+		liveHosts = eng.LiveHosts
 	}
 	ctx := context.Background()
 
@@ -212,7 +235,7 @@ func runFans(cfg config.Config, args []string, force bool, stdout, stderr io.Wri
 		return nil
 
 	case "off":
-		return fansOff(ctx, eng, force, stdout)
+		return fansOff(ctx, eng, force, liveHosts, stdout)
 	}
 
 	fmt.Fprint(stderr, usage)
@@ -277,13 +300,13 @@ func printMonitoring(out io.Writer, states []power.GatewayMute) {
 // any host does, so switching it off under a running rack is a thermal risk
 // rather than a preference.
 //
-// force is the parsed --force/-f global flag, passed down from run. It used to
-// be re-scanned out of the remaining arguments here, which never matched:
-// parseGlobalFlags has already removed the flag by then, so `fans off --force`
-// hit the refusal below exactly as if it had been left out.
-func fansOff(ctx context.Context, eng *power.Engine, force bool, stdout io.Writer) error {
+// force is the parsed --force/-f global flag and liveHosts the liveness probe,
+// both threaded down from run; see runFans for why neither is derived here.
+func fansOff(ctx context.Context, eng *power.Engine, force bool,
+	liveHosts liveHostsFunc, stdout io.Writer) error {
+
 	if !force {
-		if up := eng.LiveHosts(ctx); len(up) > 0 {
+		if up := liveHosts(ctx); len(up) > 0 {
 			return fmt.Errorf("%v still up; refusing to switch the rack fans off. "+
 				"Use --force if you mean it", up)
 		}
