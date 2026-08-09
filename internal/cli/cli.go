@@ -26,9 +26,11 @@ Usage:
   f3sctl power on              Fans on, wake f0/f1/f2, un-mute Gogios
   f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2
                                (goes through the API: only pi0/pi1 may shut hosts down;
-                               the fans stay on if f3 is still running)
+                               the fans stay on unless nothing in the rack answers,
+                               so normally they keep running -- f3 does)
   f3sctl power all on          Fans on, wake f0/f1/f2/f3, un-mute Gogios
-  f3sctl power all off         As "power off", but f3 too: the whole rack dark, fans off
+  f3sctl power all off         As "power off", but f3 too: the whole rack dark, then
+                               fans off once nothing answers
   f3sctl power f0|f1|f2|f3 on  Wake one host only
   f3sctl power f0|f1|f2|f3 off Power off one host only (fans and Gogios untouched)
   f3sctl fans status           Rack-fan Shelly plug state
@@ -60,14 +62,17 @@ Pi: pi0 and pi1 are where it runs, and powering them off would remove the only
 way to power anything back on.
 `
 
-// liveHostsFunc reports which f-hosts are currently drawing power, by name.
+// liveHostsFunc reports which f-hosts may still be drawing power, by name.
+//
+// "May still be": power.Engine.LiveHosts includes hosts it could not probe at
+// all, because this feeds a cooling guard and an unprobeable host is not a host
+// known to be off.
 //
 // The rack-fan guard in fansOff is its only consumer. It is a function rather
 // than a direct call to power.Engine.LiveHosts so the guard can be exercised
 // without real ICMP: LiveHosts shells out to ping(8), which would make the
 // guard's tests depend on the machine's network stack and on packets actually
-// leaving the box. Same reasoning as the isUp parameter of
-// power.partitionLive.
+// leaving the box. Same reasoning as power.Engine.isUp.
 type liveHostsFunc func(ctx context.Context) []string
 
 // Run executes one CLI invocation.
@@ -305,12 +310,17 @@ func printMonitoring(out io.Writer, states []power.GatewayMute) {
 // both threaded down from run rather than derived here: see runFans for why
 // force cannot be re-read from the arguments, and the liveHostsFunc type for
 // why the probe is a seam rather than a direct engine call.
+//
+// The guard is slow on an idle rack, by design: the probe behind it wants
+// several consecutive missed pings per host before it will call one off, so
+// that a single dropped echo reply cannot cut cooling to a running rack. Half a
+// minute is a fair price for that, and --force skips it for anyone who is sure.
 func fansOff(ctx context.Context, eng *power.Engine, force bool,
 	liveHosts liveHostsFunc, stdout io.Writer) error {
 
 	if !force {
 		if up := liveHosts(ctx); len(up) > 0 {
-			return fmt.Errorf("%v still up; refusing to switch the rack fans off. "+
+			return fmt.Errorf("%v may still be running; refusing to switch the rack fans off. "+
 				"Use --force if you mean it", up)
 		}
 	}

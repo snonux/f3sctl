@@ -3,6 +3,7 @@ package power
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -24,8 +25,13 @@ import (
 // there rather than an accident. Its bash predecessor read /proc/mounts
 // unconditionally, so on NetBSD it silently found nothing and reported
 // success regardless of what was mounted.
+//
+// The listing goes through Engine.localMounts rather than straight to
+// localNFSMounts, because the unmounting below is real: a test that drives a
+// whole shutdown has to be able to say what is mounted instead of finding out
+// from — and acting on — the mount table of the machine running it.
 func (e *Engine) checkLocalNFS(ctx context.Context, log io.Writer) error {
-	mounts, err := localNFSMounts(ctx)
+	mounts, err := e.localMounts(ctx)
 	if err != nil {
 		return fmt.Errorf("listing local NFS mounts: %w", err)
 	}
@@ -94,11 +100,18 @@ func linuxNFSMounts() ([]string, error) {
 // "server:/export on /mountpoint (nfs, ...)" on all the BSDs here.
 //
 // A non-zero exit means "nothing of that type is mounted" on some of them, so
-// an error is treated as an empty list rather than a failure.
+// that is treated as an empty list rather than a failure. Failing to run
+// mount(8) at all is a different matter and is reported: it is not evidence
+// that nothing is mounted, and an empty list here lets a shutdown proceed with
+// the NFS share still mounted locally -- the exact hung mount and lost writes
+// checkLocalNFS exists to prevent.
 func bsdNFSMounts(ctx context.Context) ([]string, error) {
 	out, err := exec.CommandContext(ctx, "mount", "-t", "nfs").Output()
 	if err != nil {
-		return nil, nil
+		if errors.As(err, new(*exec.ExitError)) {
+			return nil, nil
+		}
+		return nil, err
 	}
 
 	var mounts []string

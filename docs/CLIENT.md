@@ -138,6 +138,20 @@ independently.
 otherwise: same pre-flight, same Gogios mute, same storage-master-last
 ordering, same fans-off once every host is silent.
 
+#### The fans may be left running
+
+The fan plug cools the whole rack, so a shutdown only switches it off once
+**no f-host answers at all** — f3 included, and including hosts the run never
+touched or could not probe. So `power-off`, which leaves f3 up by design,
+normally finishes with the fans **still running**; `all-off` normally does not.
+
+That is a success, not a failure: `rc` is `0` and `state` is `done`. The job's
+last `step` says which happened — it starts with `rack fans left ON` when the
+plug was deliberately not switched, and names the hosts responsible. A client
+that wants to show "rack is cold" must read that, not assume `power-off`
+implies it. The same phrase appears in a failed job's `error`, where hosts did
+not complete their shutdown and the fans were kept on for the same reason.
+
 A client should not assume one implies the other. With f0–f2 up and only f3
 down, `power-on` is absent (the cluster is already up) while `all-on` is
 offered. Render whichever the server gives you.

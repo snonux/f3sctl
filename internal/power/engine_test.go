@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -140,16 +144,41 @@ func (s *fakeShelly) setCalls() []bool {
 // "http://" + ShellyIP + path, so a host:port belongs there.
 func (s *fakeShelly) addr() string { return strings.TrimPrefix(s.srv.URL, "http://") }
 
-// testEngine returns an Engine wired to the fake plug, with liveness injected
-// and no gateways in the inventory.
+// testEngine returns an Engine wired to the fake plug, with liveness and the
+// NFS listing injected, a negligible probe gap, and no gateways in the
+// inventory.
 //
-// Both omissions are what make a whole shutdown runnable in a test. The isUp
-// seam replaces ping(8), so "f3 is running" costs no packets; dropping the
-// gateways makes the Gogios mute a no-op instead of an SSH connection to a
-// WireGuard address that is not there. The f-hosts are the real ones from the
-// compiled-in inventory, because the f3-shaped hole in PowerGroup is exactly
-// what these tests are about.
+// The seams are what make these tests hermetic. isUp replaces ping(8), so "f3
+// is running" costs no packets; nfsMounts replaces the mount table, so
+// checkLocalNFS cannot run umount(8) over whatever this machine happens to
+// have mounted (this box does mount NFS -- an earlier skip-if-mounted guard
+// silently removed four of these tests when it was); the probe gap collapses
+// the consecutive-miss wait the fan guard now performs. Dropping the gateways
+// makes the Gogios mute a no-op instead of an SSH connection to a WireGuard
+// address that is not there.
+//
+// What is NOT seamed is e.ssh, so nothing here reaches shutdownEach,
+// zusbPreflight or awaitPowerDown with a non-empty host list: the tests that
+// call Off/OffAll report every power-group host as already down, which empties
+// the list at partitionLive. They exercise the pre-flight, the fan guard and
+// the plug -- the parts this fix is about -- and not the SSH-driven middle of a
+// shutdown. Seaming that is a separate, queued task.
 func testEngine(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
+	t.Helper()
+	return buildTestEngine(t, shelly, true, up)
+}
+
+// testEngineFullInventory is testEngine over the whole compiled-in inventory,
+// gateways and k3s nodes included. Only for tests that must prove a lookup
+// filters by role itself, rather than inheriting a pre-filtered inventory; it
+// cannot be used to drive a shutdown, because the Gogios mute would then SSH
+// to the gateways for real.
+func testEngineFullInventory(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
+	t.Helper()
+	return buildTestEngine(t, shelly, false, up)
+}
+
+func buildTestEngine(t *testing.T, shelly *fakeShelly, fHostsOnly bool, up []string) *Engine {
 	t.Helper()
 
 	pwFile := filepath.Join(t.TempDir(), "shelly_plug")
@@ -160,7 +189,9 @@ func testEngine(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
 	cfg.Inventory.ShellyIP = shelly.addr()
-	cfg.Inventory.Hosts = cfg.Inventory.ByRole(inventory.RoleF)
+	if fHostsOnly {
+		cfg.Inventory.Hosts = cfg.Inventory.ByRole(inventory.RoleF)
+	}
 
 	liveIPs := map[string]bool{}
 	for _, name := range up {
@@ -175,27 +206,23 @@ func testEngine(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
 	if err != nil {
 		t.Fatalf("power.New: %v", err)
 	}
-	e.isUp = func(_ context.Context, ip string) bool { return liveIPs[ip] }
+	// Injected liveness is always *known*: these tests answer "is it up", and
+	// the unknown case has tests of its own.
+	e.isUp = func(_ context.Context, ip string) (bool, bool) { return liveIPs[ip], true }
+	e.nfsMounts = func(context.Context) ([]string, error) { return nil, nil }
+	e.downProbeInterval = time.Millisecond
 	return e
 }
 
-// skipIfNFSMounted keeps a test that drives a whole shutdown away from the
-// umount in Engine.checkLocalNFS.
-//
-// That check is deliberately not behind a seam -- it is a safety step, and one
-// more injection point on the shutdown path is a worse trade than skipping
-// here -- but it does run real umount(8) against whatever this machine has
-// mounted. No developer box or Pi in the fleet mounts NFS, so in practice this
-// never skips; if one ever does, skipping beats unmounting its filesystems.
-func skipIfNFSMounted(t *testing.T) {
+// hostIP returns a host's address from the engine's own inventory, so a test
+// can talk about "f3" without hard-coding 192.168.1.133.
+func hostIP(t *testing.T, e *Engine, name string) string {
 	t.Helper()
-	mounts, err := localNFSMounts(context.Background())
-	if err != nil {
-		t.Skipf("cannot tell whether NFS is mounted here: %v", err)
+	h, ok := e.cfg.Inventory.ByName(name)
+	if !ok {
+		t.Fatalf("no host %q in the inventory", name)
 	}
-	if len(mounts) > 0 {
-		t.Skipf("NFS is mounted at %v here; Engine.off would try to unmount it", mounts)
-	}
+	return h.IP
 }
 
 // TestClusterOffLeavesTheRackFansOnWhileF3IsRunning is the regression test for
@@ -208,8 +235,6 @@ func skipIfNFSMounted(t *testing.T) {
 // and the run must still succeed: the hosts it was asked to power off did go
 // down.
 func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
-	skipIfNFSMounted(t)
-
 	shelly := newFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f3")
 
@@ -220,11 +245,45 @@ func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
 	if got := shelly.setCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: f3 is still running", got)
 	}
-	if !strings.Contains(log.String(), "Leaving the rack fans on") {
-		t.Errorf("log = %q, want it to say the fans were left on", log.String())
+	if !strings.Contains(log.String(), fansLeftOn) {
+		t.Errorf("log = %q, want it to say %q", log.String(), fansLeftOn)
 	}
 	if !strings.Contains(log.String(), "f3") {
 		t.Errorf("log = %q, want it to name f3 as the reason", log.String())
+	}
+
+	// The closing line must carry it too: a client tailing the job log sees
+	// the end of a successful run, and "All hosts accepted shutdown." on its
+	// own reads as a rack that went fully cold.
+	tail := log.String()[strings.LastIndex(log.String(), "All hosts accepted shutdown"):]
+	if !strings.Contains(tail, fansLeftOn) {
+		t.Errorf("closing line = %q, want it to repeat %q", tail, fansLeftOn)
+	}
+}
+
+// TestClusterOffRecordsTheFansAsLeftOn pins the machine-readable half of the
+// same outcome. The run succeeds (rc=0 for the API job), so the progress step
+// is the only thing distinguishing "shut the cluster down and cut the cooling"
+// from "shut the cluster down and deliberately kept it running" -- and a client
+// polling job.json has nothing else to look at. See docs/CLIENT.md.
+func TestClusterOffRecordsTheFansAsLeftOn(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	eng := testEngine(t, shelly, "f3")
+
+	steps := &recordingReporter{}
+	eng.WithReporter(steps)
+
+	var log bytes.Buffer
+	if err := eng.Off(context.Background(), &log); err != nil {
+		t.Fatalf("power off: %v", err)
+	}
+
+	last := steps.lastStep()
+	if !strings.HasPrefix(last, fansLeftOn) {
+		t.Errorf("last step = %q, want it to start with %q", last, fansLeftOn)
+	}
+	if !strings.Contains(last, "f3") {
+		t.Errorf("last step = %q, want it to name f3", last)
 	}
 }
 
@@ -233,8 +292,6 @@ func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
 // still be cut. A guard that simply stopped cutting the fans would pass the
 // test above and leave them running for good.
 func TestRackOffStillSwitchesTheFansOffWhenNothingAnswers(t *testing.T) {
-	skipIfNFSMounted(t)
-
 	shelly := newFakeShelly(t, true)
 	eng := testEngine(t, shelly) // every f-host already silent
 
@@ -251,8 +308,6 @@ func TestRackOffStillSwitchesTheFansOffWhenNothingAnswers(t *testing.T) {
 // the rack being idle, not on f3 being special: run the cluster shutdown with
 // nothing answering at all and the fans go off, exactly as they always did.
 func TestClusterOffSwitchesTheFansOffOnceF3IsAlsoDown(t *testing.T) {
-	skipIfNFSMounted(t)
-
 	shelly := newFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 
@@ -285,7 +340,8 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 			eng := testEngine(t, shelly, tc.up...)
 
 			var log bytes.Buffer
-			if err := eng.fansOffOnceTheRackIsIdle(context.Background(), &log); err != nil {
+			leftOn, err := eng.fansOffOnceTheRackIsIdle(context.Background(), &log)
+			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
@@ -293,6 +349,9 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 			if !tc.wantSet {
 				if len(got) != 0 {
 					t.Fatalf("Switch.Set calls = %v, want none while %v is up", got, tc.up)
+				}
+				if len(leftOn) != len(tc.up) {
+					t.Errorf("hosts keeping the fans on = %v, want %v", leftOn, tc.up)
 				}
 				for _, name := range tc.up {
 					if !strings.Contains(log.String(), name) {
@@ -304,8 +363,257 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 			if len(got) != 1 || got[0] {
 				t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 			}
+			if len(leftOn) != 0 {
+				t.Errorf("hosts keeping the fans on = %v, want none", leftOn)
+			}
 		})
 	}
+}
+
+// TestFansStayOnWhenLivenessCannotBeProbed is the regression test for a guard
+// whose fail-safe pointed the wrong way.
+//
+// A probe that cannot be carried out used to be indistinguishable from a host
+// that is silent: both were a bare false. So "ping(8) is missing" read as
+// "every f-host is off", and the shutdown's last step cut the cooling to a
+// fully running rack -- while the same broken probe had already told
+// partitionLive that there was nothing to shut down. That is not hypothetical:
+// a CGI whose PATH lacked /sbin made every host report false once already, in
+// the very environment `power off` runs in (see pingCandidates).
+//
+// Unknown must therefore count as running, and nothing may be switched.
+func TestFansStayOnWhenLivenessCannotBeProbed(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	eng := testEngine(t, shelly) // nothing "answers"...
+	// ...but nothing is known either: every probe fails to happen.
+	eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
+
+	var log bytes.Buffer
+	leftOn, err := eng.fansOffOnceTheRackIsIdle(context.Background(), &log)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: nothing is known about the rack", got)
+	}
+	if want := []string{"f0", "f1", "f2", "f3"}; !reflect.DeepEqual(leftOn, want) {
+		t.Errorf("hosts keeping the fans on = %v, want %v: unknown counts as running", leftOn, want)
+	}
+	if !strings.Contains(log.String(), "could not be probed") {
+		t.Errorf("log = %q, want it to say the hosts could not be probed", log.String())
+	}
+}
+
+// TestFansStayOnWhenPingIsMissing is the same hazard driven through the real
+// classification in pingWith rather than a hand-written unknown: with no
+// ping(8) to run, every host is unknown and the plug must not be touched.
+//
+// The failure this pins is precise. Before the second return value existed,
+// pingOnce returned false when it could not find a binary, LiveHosts dropped
+// every host, and the guard read len(up)==0 as an idle rack.
+func TestFansStayOnWhenPingIsMissing(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	eng := testEngine(t, shelly)
+	eng.isUp = func(ctx context.Context, ip string) (bool, bool) {
+		return eng.pingWith(ctx, "", ip) // no ping(8) anywhere
+	}
+
+	var log bytes.Buffer
+	leftOn, err := eng.fansOffOnceTheRackIsIdle(context.Background(), &log)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: ping(8) could not be run", got)
+	}
+	if len(leftOn) != 4 {
+		t.Errorf("hosts keeping the fans on = %v, want all four f-hosts", leftOn)
+	}
+}
+
+// TestPingSeparatesSilenceFromAFailedProbe covers the distinction everything
+// above rests on, with an ordinary executable standing in for ping(8): a
+// non-zero exit is a real answer ("no reply"), while a binary that cannot be
+// run at all, or a probe cut short, is no answer.
+func TestPingSeparatesSilenceFromAFailedProbe(t *testing.T) {
+	dir := t.TempDir()
+	stub := func(exit int) string {
+		p := filepath.Join(dir, fmt.Sprintf("ping%d", exit))
+		script := fmt.Sprintf("#!/bin/sh\nexit %d\n", exit)
+		if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+			t.Fatalf("writing the ping stub: %v", err)
+		}
+		return p
+	}
+
+	eng := &Engine{cfg: config.Default()}
+	for _, tc := range []struct {
+		name      string
+		bin       string
+		cancel    bool
+		up, known bool
+	}{
+		{name: "answered", bin: stub(0), up: true, known: true},
+		{name: "no reply (linux code)", bin: stub(1), known: true},
+		{name: "no reply (bsd code)", bin: stub(2), known: true},
+		{name: "no ping(8) at all", bin: ""},
+		{name: "ping(8) cannot be run", bin: filepath.Join(dir, "absent")},
+		{name: "probe cut short", bin: stub(0), cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancel {
+				cancel()
+			}
+
+			up, known := eng.pingWith(ctx, tc.bin, "192.0.2.1")
+			if up != tc.up || known != tc.known {
+				t.Errorf("pingWith = (up=%v, known=%v), want (up=%v, known=%v)",
+					up, known, tc.up, tc.known)
+			}
+		})
+	}
+}
+
+// TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown pins that the guard
+// holds to the same evidence standard as awaitPowerDown.
+//
+// One missed ping is not proof a host is down: f0's and f1's logs both show
+// "re0: link state changed to DOWN" and back to UP seconds apart during an
+// ordinary shutdown, which is exactly when this runs. Deciding on one probe per
+// host meant a single dropped echo reply could cut the cooling to a running
+// rack -- the more dangerous question answered on the weaker evidence.
+func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	eng := testEngine(t, shelly)
+	flapping := hostIP(t, eng, "f3")
+
+	var mu sync.Mutex
+	probes := map[string]int{}
+	eng.isUp = func(_ context.Context, ip string) (bool, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		probes[ip]++
+		// f3 misses its first probe and answers the second; everything else is
+		// genuinely off and never answers.
+		return ip == flapping && probes[ip] > 1, true
+	}
+
+	var log bytes.Buffer
+	leftOn, err := eng.fansOffOnceTheRackIsIdle(context.Background(), &log)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: f3 answered its second probe", got)
+	}
+	if want := []string{"f3"}; !reflect.DeepEqual(leftOn, want) {
+		t.Fatalf("hosts keeping the fans on = %v, want %v", leftOn, want)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for ip, n := range probes {
+		if ip == flapping {
+			continue
+		}
+		if n < confirmedDownProbes {
+			t.Errorf("%s was probed %d times before being called down, want %d",
+				ip, n, confirmedDownProbes)
+		}
+	}
+}
+
+// TestAShutdownThatAbortsNeverTouchesTheFans pins the other exit from off():
+// a pre-flight that refuses must return before the fans-off step, not despite
+// it. Here the local NFS listing fails, which is itself a fix -- mount(8) that
+// cannot be run used to be reported as "nothing is mounted".
+func TestAShutdownThatAbortsNeverTouchesTheFans(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	eng := testEngine(t, shelly)
+	eng.nfsMounts = func(context.Context) ([]string, error) {
+		return nil, errors.New("mount: not found")
+	}
+
+	var log bytes.Buffer
+	if err := eng.Off(context.Background(), &log); err == nil {
+		t.Fatal("power off succeeded, want the NFS pre-flight to abort it")
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: the shutdown never happened", got)
+	}
+}
+
+// TestShutdownFailureSaysTheFansWereLeftOn pins the wording of the other place
+// a rack-wide run ends with the plug untouched: hosts that accepted a shutdown
+// and never went silent are still running, so the cooling stays on, and the
+// error has to say so in the same words as the progress step.
+//
+// It tests the message rather than a run that produces it: reaching that branch
+// needs shutdownEach or awaitPowerDown to fail, both of which speak SSH through
+// the unseamed e.ssh. Seaming that is a separate, queued task; until then the
+// path from failed hosts to the returned error is this one function.
+func TestShutdownFailureSaysTheFansWereLeftOn(t *testing.T) {
+	err := shutdownFailure([]string{"f1"})
+	if !strings.Contains(err.Error(), "f1") {
+		t.Errorf("error = %v, want it to name the host", err)
+	}
+	if !strings.Contains(err.Error(), fansLeftOn) {
+		t.Errorf("error = %v, want it to contain %q", err, fansLeftOn)
+	}
+}
+
+// TestAHandBuiltEngineFallsBackToTheRealProbes covers the nil seams on an
+// exported type.
+//
+// power.Engine is exported and its seams are plain func fields, so an Engine
+// that did not come from New carries nils in them -- and the first thing to
+// touch one would be the fan guard, which must neither crash nor fail open.
+// cli.liveHostsFunc grew the same fallback, and a regression test with it,
+// after exactly this concern; the engine's seams had neither.
+func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
+	e := &Engine{cfg: config.Default(), report: nopReporter{}}
+
+	// Method values compare by code pointer, which is what identifies the
+	// fallback here: e.liveness() must be pingOnce, not nil.
+	if got, want := reflect.ValueOf(e.liveness()).Pointer(),
+		reflect.ValueOf(e.pingOnce).Pointer(); got != want {
+		t.Error("liveness() on a hand-built Engine is not pingOnce")
+	}
+	if got := e.probeGap(); got != downProbeInterval {
+		t.Errorf("probeGap() = %s, want the %s default: a zero gap turns "+
+			"awaitPowerDown into a busy loop", got, downProbeInterval)
+	}
+	if _, err := e.localMounts(context.Background()); err != nil {
+		t.Errorf("localMounts() on a hand-built Engine: %v", err)
+	}
+}
+
+// recordingReporter keeps the progress a run reports, so a test can assert on
+// what a polling API client would see rather than only on the human log.
+type recordingReporter struct {
+	mu    sync.Mutex
+	steps []string
+}
+
+func (r *recordingReporter) Step(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.steps = append(r.steps, name)
+}
+
+func (r *recordingReporter) HostState(string, HostPhase, string) {}
+
+func (r *recordingReporter) lastStep() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.steps) == 0 {
+		return ""
+	}
+	return r.steps[len(r.steps)-1]
 }
 
 // TestOffHostNeverTouchesTheFans pins that powering one host is still not a
@@ -313,8 +621,6 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 // other host is already silent, because the operator asked for one host, not
 // for the rack to go cold.
 func TestOffHostNeverTouchesTheFans(t *testing.T) {
-	skipIfNFSMounted(t)
-
 	shelly := newFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 
@@ -331,12 +637,17 @@ func TestOffHostNeverTouchesTheFans(t *testing.T) {
 // from: the full f-host set, f3 included, in a stable order. Dropping f3 here
 // would silently restore the hazard, and an unstable order would make the
 // reason printed to the operator vary between runs.
+//
+// The inventory is deliberately the unfiltered one. With the usual test
+// engine, whose inventory has already been reduced to the f-hosts, a LiveHosts
+// that iterated inv.Hosts wholesale would pass this and only misbehave in
+// production -- where the gateways and k3s nodes are in there too.
 func TestLiveHostsReportsEveryFHostInInventoryOrder(t *testing.T) {
 	shelly := newFakeShelly(t, true)
-	eng := testEngine(t, shelly, "f3", "f0")
+	eng := testEngineFullInventory(t, shelly, "f3", "f0", "r1", "blowfish")
 
 	got := eng.LiveHosts(context.Background())
 	if len(got) != 2 || got[0] != "f0" || got[1] != "f3" {
-		t.Errorf("LiveHosts = %v, want [f0 f3]", got)
+		t.Errorf("LiveHosts = %v, want [f0 f3]: only f-hosts, in inventory order", got)
 	}
 }

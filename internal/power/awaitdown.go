@@ -22,10 +22,18 @@ const powerDownTimeout = 2 * time.Minute
 
 // confirmedDownProbes is how many consecutive missed pings count as "off".
 //
-// Three, at ten seconds apart, is comfortably longer than the interface flap
-// seen mid-shutdown while still declaring a genuinely dead host down inside
-// half a minute.
+// Three, at downProbeInterval apart, is comfortably longer than the interface
+// flap seen mid-shutdown while still declaring a genuinely dead host down
+// inside half a minute.
+//
+// The fan guard holds to the same standard (see confirmLiveness). It has to:
+// it decides whether to cut cooling, and it runs at the very moment the rack
+// is flapping.
 const confirmedDownProbes = 3
+
+// downProbeInterval is the gap between those probes. Engine.probeGap reads it,
+// so a test can shorten it; nothing else should.
+const downProbeInterval = 10 * time.Second
 
 // awaitPowerDown waits for each host to stop answering ICMP, and returns the
 // names of any that never do.
@@ -53,11 +61,16 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 		select {
 		case <-ctx.Done():
 			return namesOf(pending)
-		case <-time.After(10 * time.Second):
+		case <-time.After(e.probeGap()):
 		}
 
 		for name, h := range pending {
-			if e.isUp(ctx, h.IP) {
+			// Unknown counts as still answering (isRunning folds it that way).
+			// A probe that could not be carried out is not evidence that a host
+			// powered down, and recording a host as safely off on the strength
+			// of a probe that never ran is the failure this whole step exists
+			// to catch.
+			if e.isRunning(ctx, h.IP) {
 				// Still answering: reset, so only a sustained silence counts.
 				misses[name] = 0
 				continue

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -22,16 +23,42 @@ type Engine struct {
 	ssh    *runner
 	report Reporter
 
-	// isUp reports whether the host at ip answers ICMP.
+	// isUp probes one host: whether it answered ICMP, and -- separately --
+	// whether the probe reached any conclusion at all.
 	//
-	// A field rather than a direct pingOnce call because three decisions hang
-	// off it -- which hosts to skip as already off, whether a host that
-	// accepted a shutdown actually went silent, and whether the rack is idle
-	// enough to cut the fans -- and none of them can be tested against real
+	// A field rather than a direct pingOnce call because four things read it:
+	// which hosts to skip as already off (Engine.off), whether a host that
+	// accepted a shutdown actually went silent (awaitPowerDown), whether the
+	// rack is idle enough to cut the fans (LiveHosts, for both fan guards),
+	// and the ping column of `power status` (probeOne, and through it ProbeAll
+	// and gogios.waitForCluster). None of them can be tested against real
 	// ping(8) without depending on the machine's network stack and on packets
 	// leaving the box. New wires it to pingOnce; only tests substitute
 	// anything else. Same reasoning as cli.liveHostsFunc.
-	isUp func(ctx context.Context, ip string) bool
+	//
+	// The second result exists because "the host is silent" and "the probe
+	// could not be carried out" are indistinguishable in a bare bool, and the
+	// safety guards must never confuse them: a CGI whose PATH lacked /sbin
+	// made every host report false once already (see pingCandidates), which
+	// through a single-bool probe reads exactly like a rack that is safely
+	// cold. Decisions read this through isRunning, which folds unknown into
+	// "assume it is running"; only status reporting, which describes what was
+	// observed rather than acting on it, looks at the raw pair.
+	isUp func(ctx context.Context, ip string) (up, known bool)
+
+	// nfsMounts lists the NFS filesystems mounted on the machine f3sctl runs
+	// on. A seam for the same reason as isUp: checkLocalNFS runs real
+	// umount(8) over whatever this returns, so a test that drives a whole
+	// shutdown must be able to say "nothing is mounted here" rather than
+	// depend on -- and act on -- the mount table of the machine running it.
+	// New wires it to localNFSMounts.
+	nfsMounts func(ctx context.Context) ([]string, error)
+
+	// downProbeInterval is the gap between the consecutive probes a host must
+	// miss before it counts as powered off, in awaitPowerDown and in the fan
+	// guard alike. A field only so tests need not wait real seconds; read it
+	// through probeGap. New wires it to downProbeInterval.
+	downProbeInterval time.Duration
 }
 
 // New returns an Engine.
@@ -40,9 +67,62 @@ type Engine struct {
 // that actually needs it, so status probing works on a machine that has no
 // f3sctl key at all.
 func New(cfg config.Config) (*Engine, error) {
-	e := &Engine{cfg: cfg, ssh: newRunner(cfg), report: nopReporter{}}
+	e := &Engine{
+		cfg:               cfg,
+		ssh:               newRunner(cfg),
+		report:            nopReporter{},
+		nfsMounts:         localNFSMounts,
+		downProbeInterval: downProbeInterval,
+	}
 	e.isUp = e.pingOnce
 	return e, nil
+}
+
+// liveness returns the ICMP probe, falling back to the real one.
+//
+// Engine is exported and isUp is a plain func field, so an Engine built by
+// anything other than New carries a nil there and would panic on the first
+// probe -- on the fan guard's path, the one thing here that must neither crash
+// nor fail open. cli.liveHostsFunc grew the same fallback (see runFans) for the
+// same reason; this is the engine's half of it.
+func (e *Engine) liveness() func(ctx context.Context, ip string) (up, known bool) {
+	if e.isUp == nil {
+		return e.pingOnce
+	}
+	return e.isUp
+}
+
+// isRunning reports whether the host at ip may still be drawing power.
+//
+// A host that could not be probed counts as running, and that direction is the
+// entire point of the probe's second result. Every question asked here is
+// really "is it safe to treat this host as off": safe to skip its shutdown,
+// safe to call it powered down, safe to cut its cooling. Unknown is never a
+// safe yes, and the cost of the two mistakes is not symmetric -- a host wrongly
+// believed to be running costs a retry or some idle fan noise, one wrongly
+// believed to be off can lose its cooling while it runs.
+func (e *Engine) isRunning(ctx context.Context, ip string) bool {
+	up, known := e.liveness()(ctx, ip)
+	return up || !known
+}
+
+// probeGap is the wait between consecutive liveness probes of the same host,
+// defaulting when the field is unset (a hand-built Engine): a zero gap would
+// turn awaitPowerDown's two-minute wait into a two-minute busy loop.
+func (e *Engine) probeGap() time.Duration {
+	if e.downProbeInterval <= 0 {
+		return downProbeInterval
+	}
+	return e.downProbeInterval
+}
+
+// localMounts lists locally mounted NFS filesystems, falling back to the real
+// lookup when the seam is unset. Same nil-safety reasoning as liveness.
+func (e *Engine) localMounts(ctx context.Context) ([]string, error) {
+	if e.nfsMounts == nil {
+		return localNFSMounts(ctx)
+	}
+	return e.nfsMounts(ctx)
 }
 
 // Config exposes the resolved configuration to callers that need the
@@ -105,7 +185,8 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 	return nil
 }
 
-// Off shuts down the k3s bhyve hosts f0/f1/f2 and switches the rack fans off.
+// Off shuts down the k3s bhyve hosts f0/f1/f2, and switches the rack fans off
+// only if that leaves nothing running in the rack.
 //
 // The sequence is ordered so that everything which can refuse does so before
 // anything irreversible happens:
@@ -127,7 +208,8 @@ func (e *Engine) Off(ctx context.Context, log io.Writer) error {
 	return e.off(ctx, log, e.cfg.Inventory.ShutdownOrder(), true)
 }
 
-// OffAll shuts down every f-host, f3 included, and switches the rack fans off.
+// OffAll shuts down every f-host, f3 included, and switches the rack fans off
+// once the rack is confirmed silent.
 //
 // Identical to Off apart from the host set: same NFS and zusb pre-flight, same
 // Gogios mute, same storage-master-last ordering, same fans-off only once every
@@ -186,31 +268,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 		e.report.HostState(h.Name, HostPending, "")
 	}
 
-	// Drop hosts that are already powered off.
-	//
-	// Everything below this point speaks SSH -- the zusb pre-flight, the guest
-	// stop, the poweroff itself -- and a powered-off host cannot answer any of
-	// it. Treating that as an error is wrong twice over: it is not a failure,
-	// and it aborts work that still needs doing on the hosts that *are* up.
-	//
-	// This is not hypothetical. On 2026-08-09 a `power off` run with f0
-	// already down failed at the zusb pre-flight with "connect to host
-	// 192.168.1.130 port 22: Operation timed out" and left f1 and f2 running.
-	// Shutting the rack down in stages, or re-running after a partial run, is
-	// ordinary use.
-	//
-	// Ping decides this, not SSH. A host answering ICMP but not SSH is powered
-	// on and unreachable, and that case must still abort: there is no way to
-	// tell whether it has the zusb pool imported, and guessing risks cutting
-	// USB power to a mounted backup pool.
-	live, alreadyOff := partitionLive(hosts, func(ip string) bool {
-		return e.isUp(ctx, ip)
-	})
-	for _, h := range alreadyOff {
-		fmt.Fprintf(log, "%s is already powered off; skipping it\n", h.Name)
-		e.report.HostState(h.Name, HostDone, "already powered off")
-	}
-	hosts = live
+	hosts = e.skipAlreadyOff(ctx, log, hosts)
 
 	e.report.Step("checking for locally mounted NFS filesystems")
 	fmt.Fprintln(log, "Checking for locally mounted NFS filesystems...")
@@ -255,18 +313,82 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	}
 
 	if len(failed) > 0 {
-		return fmt.Errorf("these hosts did not complete shutdown: %v. "+
-			"Leaving the rack fans on", failed)
+		return shutdownFailure(failed)
 	}
 
 	if clusterWide {
-		if err := e.fansOffOnceTheRackIsIdle(ctx, log); err != nil {
-			return err
-		}
+		return e.fansOffAndReport(ctx, log)
 	}
 
 	fmt.Fprintln(log, "All hosts accepted shutdown.")
 	return nil
+}
+
+// skipAlreadyOff drops the hosts that are already powered off from the list,
+// saying so for each.
+//
+// Everything after it speaks SSH -- the zusb pre-flight, the guest stop, the
+// poweroff itself -- and a powered-off host cannot answer any of it. Treating
+// that as an error is wrong twice over: it is not a failure, and it aborts work
+// that still needs doing on the hosts that *are* up.
+//
+// This is not hypothetical. On 2026-08-09 a `power off` run with f0 already
+// down failed at the zusb pre-flight with "connect to host 192.168.1.130 port
+// 22: Operation timed out" and left f1 and f2 running. Shutting the rack down
+// in stages, or re-running after a partial run, is ordinary use.
+//
+// Ping decides this, not SSH. A host answering ICMP but not SSH is powered on
+// and unreachable, and that case must still abort: there is no way to tell
+// whether it has the zusb pool imported, and guessing risks cutting USB power
+// to a mounted backup pool.
+//
+// A host whose liveness could not be probed at all is kept in the list
+// (isRunning says so). It then fails at the zusb pre-flight if it really is
+// off, which is loud, undoes nothing and leaves the fans alone -- whereas
+// dropping it would silently shut nothing down and report success.
+func (e *Engine) skipAlreadyOff(ctx context.Context, log io.Writer,
+	hosts []inventory.Host) []inventory.Host {
+
+	live, alreadyOff := partitionLive(hosts, func(ip string) bool {
+		return e.isRunning(ctx, ip)
+	})
+	for _, h := range alreadyOff {
+		fmt.Fprintf(log, "%s is already powered off; skipping it\n", h.Name)
+		e.report.HostState(h.Name, HostDone, "already powered off")
+	}
+	return live
+}
+
+// fansOffAndReport ends a rack-wide run: the fan plug, then the closing line.
+//
+// The line says which of the two outcomes happened, because a run that
+// deliberately keeps the cooling on still succeeds -- the hosts it was asked to
+// power off did go down -- so it exits 0 either way, and its last progress step
+// is otherwise the only thing distinguishing them. Repeating it here means
+// neither a human reading the log tail nor a job.log reader has to infer it
+// from silence.
+func (e *Engine) fansOffAndReport(ctx context.Context, log io.Writer) error {
+	leftOn, err := e.fansOffOnceTheRackIsIdle(ctx, log)
+	if err != nil {
+		return err
+	}
+	if len(leftOn) > 0 {
+		fmt.Fprintf(log, "All hosts accepted shutdown. %s.\n", fansLeftOnReason(leftOn))
+		return nil
+	}
+
+	fmt.Fprintln(log, "All hosts accepted shutdown.")
+	return nil
+}
+
+// shutdownFailure is the error for hosts that did not complete their shutdown.
+//
+// It carries fansLeftOn for the same reason the progress step does: this is the
+// other exit through which a rack-wide run ends with the plug untouched, and
+// both need to say so in the same words, so "did the fans stay on" is one
+// string to look for rather than two phrasings to keep in sync.
+func shutdownFailure(failed []string) error {
+	return fmt.Errorf("these hosts did not complete shutdown: %v. %s", failed, fansLeftOn)
 }
 
 // shutdownEach asks every host in turn to stop its guests and power off,
@@ -311,8 +433,16 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
 	return accepted, failed
 }
 
-// fansOffOnceTheRackIsIdle switches the rack fans off, unless an f-host is
-// still running.
+// fansLeftOn is the stable phrase for "this run did not cut the rack fans".
+//
+// It goes into the progress step a client polls for and into the error of a
+// failed shutdown, so the deliberate outcome is one token to match on rather
+// than prose that drifts between the two places that produce it.
+const fansLeftOn = "rack fans left ON"
+
+// fansOffOnceTheRackIsIdle switches the rack fans off, unless something in the
+// rack may still be running. It returns the hosts that kept the fans on, empty
+// when the plug was switched off.
 //
 // The plug cools the whole rack, not merely the hosts a given run shut down,
 // and the two are not the same set. A bare `power off` deliberately leaves f3
@@ -325,25 +455,40 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
 //
 // Liveness is re-probed rather than inferred from the shutdown that just ran:
 // the hosts this run skipped as already off, and f3, are equally capable of
-// generating heat, and only ICMP knows which of them are.
+// generating heat. ICMP does not settle that either -- a host wedged in the
+// last phase of a shutdown is powered on with no network, and answers nothing
+// (see awaitPowerDown) -- so silence is the weaker claim "nothing here can be
+// shown to be running", and the guard is only as good as that. What it does
+// buy is that a host which plainly IS running can no longer lose its cooling.
 //
 // A rack that is still busy is not a failed shutdown -- the hosts this run was
 // asked to power off did go down -- so this says why the fans stay on and
-// returns nil. Leaving them on is also the safe direction if the probe is
-// wrong: a dropped echo reply costs some idle fan noise, the opposite costs a
-// running host its cooling.
-func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) error {
-	if up := e.LiveHosts(ctx); len(up) > 0 {
-		still := strings.Join(up, ", ")
-		e.report.Step("leaving the rack fans on: " + still + " still running")
-		fmt.Fprintf(log, "Leaving the rack fans on: %s still running.\n", still)
-		return nil
+// returns without an error.
+//
+// Every uncertainty resolves towards "leave them on", and it has to: the
+// probe's failure modes all look like silence. A dropped echo reply, a ping(8)
+// that could not be found, a cancelled context -- each one used to subtract a
+// host from the live set and so bring the rack one host closer to "idle", i.e.
+// the guard failed in the direction of cutting cooling to a running rack. See
+// rackStillBusy, which counts unknown as running and wants consecutive misses
+// before it accepts that a host is off.
+func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) ([]string, error) {
+	if busy := e.rackStillBusy(ctx); busy.any() {
+		e.report.Step(fansLeftOnReason(busy.names()))
+		fmt.Fprintf(log, "%s: %s.\n", fansLeftOn, busy.why())
+		return busy.names(), nil
 	}
 
 	e.report.Step("switching the rack fans off")
 	fmt.Fprintln(log, "Switching the rack fans off...")
 	_, err := e.FansSet(ctx, false)
-	return err
+	return nil, err
+}
+
+// fansLeftOnReason is the one-line, machine-greppable form of the outcome:
+// the stable phrase, then the hosts responsible for it.
+func fansLeftOnReason(hosts []string) string {
+	return fansLeftOn + ": " + strings.Join(hosts, ", ")
 }
 
 // partitionLive splits hosts into those answering ICMP and those already off.
