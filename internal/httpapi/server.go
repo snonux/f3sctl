@@ -96,7 +96,17 @@ func (s *Server) serve(out io.Writer, req request) error {
 		return writeError(out, http.StatusNotFound, "no such resource: "+req.Path)
 	}
 
-	state := s.snapshot(context.Background())
+	ctx := context.Background()
+	state := s.snapshot(ctx)
+
+	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
+	// trip each to read, so it is fetched only for the routes that actually
+	// render or change it. Every other response would pay ~2s for a value it
+	// never shows. This runs before the availability check below because
+	// monitoring-mute/unmute are judged against exactly this state.
+	if strings.HasPrefix(req.Path, "/monitoring") {
+		state.Monitoring = s.engine.MonitoringStatus(ctx)
+	}
 
 	// An action that is not currently available is refused here, before any
 	// handler runs. A well-written client never reaches this: it was not

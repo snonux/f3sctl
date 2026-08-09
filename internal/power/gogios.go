@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -15,6 +16,63 @@ import (
 // Without it, deliberately taking the cluster down pages as if it had failed.
 func (e *Engine) MuteGogios(ctx context.Context, log io.Writer) error {
 	return e.eachGateway(ctx, log, "gogios-mute", "muted")
+}
+
+// GatewayMute is one gateway's monitoring state.
+type GatewayMute struct {
+	Name  string
+	Muted bool
+	Err   error
+}
+
+// MonitoringStatus reports, per gateway, whether Gogios is currently muted.
+//
+// This exists because a mute can outlive the shutdown that created it. The wake
+// path un-mutes only after r0/r1/r2 answer, and on giving up it deliberately
+// leaves the marker in place -- so "muted" is a state the fleet can sit in
+// indefinitely with nobody watching. It has to be observable, not merely
+// settable.
+func (e *Engine) MonitoringStatus(ctx context.Context) []GatewayMute {
+	gateways := e.cfg.Inventory.ByRole(inventory.RoleGateway)
+	out := make([]GatewayMute, 0, len(gateways))
+
+	for _, gw := range gateways {
+		st := GatewayMute{Name: gw.Name}
+		res, err := e.ssh.agentVerb(ctx, gw, "gogios-status")
+		switch {
+		case err != nil:
+			st.Err = err
+		default:
+			st.Muted = strings.TrimSpace(res) == "muted"
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// AnyMuted reports whether monitoring is suppressed on at least one gateway.
+//
+// One of two muted is still a monitoring gap, and it is the state a failed
+// un-mute leaves behind, so the "should we offer to un-mute?" question keys on
+// any rather than all.
+func AnyMuted(states []GatewayMute) bool {
+	for _, st := range states {
+		if st.Err == nil && st.Muted {
+			return true
+		}
+	}
+	return false
+}
+
+// UnmuteNow removes the marker without waiting for the k3s nodes.
+//
+// UnmuteGogios is the right call at the end of a wake, where waiting prevents a
+// storm of alerts from a cluster that is still booting. This is the operator's
+// escape hatch for the other case: the fleet is already up, monitoring is still
+// muted because an earlier un-mute timed out, and there is nothing left to wait
+// for. Without it a stranded mute can only be cleared by hand over SSH.
+func (e *Engine) UnmuteNow(ctx context.Context, log io.Writer) error {
+	return e.eachGateway(ctx, log, "gogios-unmute", "un-muted")
 }
 
 // UnmuteGogios waits for the k3s nodes to come back, then removes the marker.

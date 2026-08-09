@@ -149,9 +149,18 @@ async function waitForJob(entry, timeoutMs = 20 * 60 * 1000) {
   throw new Error('gave up waiting for the job');
 }
 
-async function run(name, confirm) {
+// run performs a named action.
+//
+// holderRel names the resource that advertises it. Power and fan actions are on
+// the root; the monitoring pair is on the resource the "monitoring" link points
+// at, because reading that state costs the server an SSH round trip per gateway
+// and so is not folded into every response. Either way the action object is the
+// server's -- nothing here builds a path.
+async function run(name, confirm, holderRel) {
   const entry = await root();
-  const act = action(entry, name);
+  const holder = holderRel ? await request(follow(entry, holderRel)) : entry;
+
+  const act = action(holder, name);
   if (!act) {
     // Not an error to route around: the server is saying this cannot be done
     // right now, and the reason is visible in the status.
@@ -174,7 +183,7 @@ async function selftest() {
   const check = (ok, msg) => console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`);
 
   check(typeof entry.properties.apiVersion === 'number', 'root carries apiVersion');
-  check(['status', 'fans', 'job', 'describedby'].every((r) => {
+  check(['status', 'fans', 'job', 'monitoring', 'describedby'].every((r) => {
     try { follow(entry, r); return true; } catch { return false; }
   }), 'root links to every documented resource');
 
@@ -196,6 +205,15 @@ async function selftest() {
   if (off) {
     check((off.fields?.length > 0) === anyUp, 'fans-off carries a confirmation field only while a host is up');
   }
+
+  // The mute is reachable on its own, independent of any power action -- the
+  // property that stops a stranded mute from being unclearable once the fleet
+  // is up and power-on has been withheld.
+  const mon = await request(follow(entry, 'monitoring'));
+  const muted = mon.properties.muted;
+  check(typeof muted === 'boolean', 'monitoring reports a mute state');
+  check(!!action(mon, 'monitoring-unmute') === muted, 'unmute is offered exactly when muted');
+  check(!!action(mon, 'monitoring-mute') === !muted, 'mute is offered exactly when alerting');
 }
 
 const commands = {
@@ -204,6 +222,8 @@ const commands = {
   off: () => run('power-off'),
   'f3-on': () => run('f3-on'),
   'f3-off': () => run('f3-off'),
+  'monitoring-mute': () => run('monitoring-mute', undefined, 'monitoring'),
+  'monitoring-unmute': () => run('monitoring-unmute', undefined, 'monitoring'),
   'fans-on': () => run('fans-on'),
   'fans-off': () => run('fans-off', true),
   selftest,

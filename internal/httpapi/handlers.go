@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -128,6 +129,76 @@ func (s *Server) setFans(state State, on bool) (Entity, int, error) {
 	state.Fans, state.FansErr = fans, nil
 	e, _, _ := s.handleFans(state, request{})
 	return e, http.StatusOK, nil
+}
+
+// handleMonitoring renders whether Gogios alerting is muted, per gateway.
+//
+// The mute is a marker file on each gateway, set while the cluster is taken
+// down on purpose so a deliberate outage does not page. Showing it as a
+// resource is what makes a *stranded* mute visible: nothing else in the API
+// would reveal that alerting is off.
+func (s *Server) handleMonitoring(state State, _ request) (Entity, int, error) {
+	gateways := make([]Entity, 0, len(state.Monitoring))
+	for _, gw := range state.Monitoring {
+		props := map[string]any{"name": gw.Name}
+		if gw.Err != nil {
+			// Unreachable is not the same as un-muted, and reporting it as
+			// "alerting is fine" would be the more dangerous lie of the two.
+			props["error"] = gw.Err.Error()
+		} else {
+			props["muted"] = gw.Muted
+		}
+		gateways = append(gateways, Entity{
+			Class:      []string{"gateway"},
+			Rel:        []string{"item"},
+			Properties: props,
+		})
+	}
+
+	return Entity{
+		Class: []string{"monitoring"},
+		Title: "Gogios alerting mute",
+		Properties: map[string]any{
+			"muted": state.monitoringMuted(),
+			"node":  s.node,
+		},
+		Entities: gateways,
+		Links: []Link{
+			{Rel: []string{"self"}, Href: s.href("/monitoring")},
+			{Rel: []string{"up"}, Href: s.href("/")},
+		},
+		Actions: s.actionsFor(state, "monitoring-mute", "monitoring-unmute"),
+	}, http.StatusOK, nil
+}
+
+func (s *Server) handleUnmute(state State, _ request) (Entity, int, error) {
+	return s.setMute(state, false)
+}
+
+func (s *Server) handleMute(state State, _ request) (Entity, int, error) {
+	return s.setMute(state, true)
+}
+
+// setMute changes the marker on both gateways and re-reads it.
+//
+// Re-reading rather than assuming: these are two independent gateways reached
+// over SSH, and a partial success -- one muted, one not -- is a real outcome
+// that the caller needs to see rather than infer from a 200.
+func (s *Server) setMute(state State, mute bool) (Entity, int, error) {
+	ctx := context.Background()
+
+	var err error
+	if mute {
+		err = s.engine.MuteGogios(ctx, io.Discard)
+	} else {
+		err = s.engine.UnmuteNow(ctx, io.Discard)
+	}
+	if err != nil {
+		return Entity{}, http.StatusBadGateway, err
+	}
+
+	state.Monitoring = s.engine.MonitoringStatus(ctx)
+	return s.handleMonitoring(state, request{})
 }
 
 // handleJob renders the current or last power operation.

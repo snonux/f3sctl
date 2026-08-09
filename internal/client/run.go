@@ -15,10 +15,12 @@ import (
 // ("f3-on"). Action names are part of the API's stable contract; CLI spelling
 // is ours to change.
 var actionFor = map[string]string{
-	"power on":  "power-on",
-	"power off": "power-off",
-	"fans on":   "fans-on",
-	"fans off":  "fans-off",
+	"power on":          "power-on",
+	"power off":         "power-off",
+	"fans on":           "fans-on",
+	"fans off":          "fans-off",
+	"monitoring mute":   "monitoring-mute",
+	"monitoring unmute": "monitoring-unmute",
 }
 
 // actionName maps a CLI command to the API action it invokes.
@@ -43,6 +45,9 @@ func Run(c *Client, args []string, force bool) error {
 
 	if cmd == "power status" || cmd == "fans status" {
 		return c.showStatus()
+	}
+	if cmd == "monitoring status" {
+		return c.showMonitoring()
 	}
 
 	name, ok := actionName(cmd)
@@ -79,8 +84,54 @@ func (c *Client) runAction(name string, force bool) error {
 		return c.waitForJob(root, id)
 	}
 
+	if strings.HasPrefix(name, "monitoring-") {
+		return c.showMonitoring()
+	}
+
 	fmt.Fprintf(c.stdout, "%s: done\n", name)
 	return c.showStatus()
+}
+
+// showMonitoring renders the Gogios mute for each gateway.
+//
+// Followed from the root's "monitoring" link rather than fetched from a known
+// path: the state is only read when asked for, because it costs the server an
+// SSH round trip to each gateway.
+func (c *Client) showMonitoring() error {
+	root, err := c.Root()
+	if err != nil {
+		return err
+	}
+	mon, err := c.Follow(root, "monitoring")
+	if err != nil {
+		return err
+	}
+
+	for _, gw := range mon.Entities {
+		name, _ := gw.Properties["name"].(string)
+		if msg, _ := gw.Properties["error"].(string); msg != "" {
+			fmt.Fprintf(c.stdout, "%s: unknown (%s)\n", name, msg)
+			continue
+		}
+		if muted, _ := gw.Properties["muted"].(bool); muted {
+			fmt.Fprintf(c.stdout, "%s: MUTED\n", name)
+		} else {
+			fmt.Fprintf(c.stdout, "%s: alerting\n", name)
+		}
+	}
+
+	if muted, _ := mon.Properties["muted"].(bool); muted {
+		fmt.Fprintln(c.stdout, "\nGogios alerting is suppressed. "+
+			"Clear it with: f3sctl monitoring unmute")
+	}
+	if len(mon.Actions) > 0 {
+		var names []string
+		for _, a := range mon.Actions {
+			names = append(names, a.Name)
+		}
+		fmt.Fprintf(c.stdout, "\navailable now: %s\n", strings.Join(names, ", "))
+	}
+	return nil
 }
 
 // waitForJob polls the job resource until the job with the given id stops

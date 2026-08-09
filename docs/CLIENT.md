@@ -128,6 +128,36 @@ reached: show "unknown", **not** "off". They are different situations, and
 showing the rack as uncooled when it is merely unreachable will send someone
 to the garage for nothing.
 
+### Monitoring mute
+
+Follow the root's `monitoring` link. It reports whether Gogios alerting is
+suppressed, as a top-level `muted` plus one entity per gateway:
+
+```json
+{ "class": ["monitoring"],
+  "properties": {"muted": true, "node": "pi0"},
+  "entities": [
+    {"class":["gateway"], "properties":{"name":"blowfish",   "muted":true}},
+    {"class":["gateway"], "properties":{"name":"fishfinger", "muted":true}}
+  ],
+  "actions": [{"name":"monitoring-unmute", "method":"POST",
+               "href":"/cgi-bin/f3sctl/monitoring/unmute"}] }
+```
+
+A gateway entity carrying `error` instead of `muted` is unreachable. As with
+the fan plug, that is **not** the same as "alerting is fine" — show it as
+unknown, because the failure mode being guarded against here is believing you
+are monitored when you are not.
+
+This resource is **not** folded into `/status`, and that is deliberate: reading
+it costs the server an SSH round trip to each gateway, so a watchface polling
+status every few seconds must not drag it along. Fetch it when the user asks,
+or on a slow timer.
+
+Treat `muted: true` while the fleet is up as a **warning worth surfacing**. It
+means a shutdown muted alerting and the un-mute never completed — the fleet is
+running with nobody watching it. `monitoring-unmute` is offered exactly then.
+
 ---
 
 ## 5. Actions that take time

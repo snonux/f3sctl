@@ -31,6 +31,9 @@ Usage:
   f3sctl fans status           Rack-fan Shelly plug state
   f3sctl fans on               Switch the rack fans on
   f3sctl fans off [--force]    Switch the rack fans off
+  f3sctl monitoring status     Is Gogios alerting muted?
+  f3sctl monitoring mute       Suppress Gogios alerting
+  f3sctl monitoring unmute     Resume Gogios alerting (clears a stranded mute)
   f3sctl version               Print the version
 
 Global flags:
@@ -101,6 +104,8 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 		return runPower(cfg, args[1:], stdout, stderr, reporter)
 	case "fans":
 		return runFans(cfg, args[1:], stdout, stderr)
+	case "monitoring":
+		return runMonitoring(cfg, args[1:], stdout, stderr)
 	}
 
 	if hint := retiredVerbHint(args[0]); hint != "" {
@@ -194,6 +199,57 @@ func runFans(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 
 	fmt.Fprint(stderr, usage)
 	return fmt.Errorf("unknown fans command %q", args[0])
+}
+
+// runMonitoring reads or changes the Gogios mute on both gateways.
+//
+// Separate from `power` on purpose: the mute outlives the operation that set
+// it, and clearing a stranded one must not require powering anything.
+func runMonitoring(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usage)
+		return errUsage
+	}
+
+	eng, err := power.New(cfg)
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+
+	switch args[0] {
+	case "status":
+		printMonitoring(stdout, eng.MonitoringStatus(ctx))
+		return nil
+	case "mute":
+		if err := eng.MuteGogios(ctx, stdout); err != nil {
+			return err
+		}
+	case "unmute":
+		if err := eng.UnmuteNow(ctx, stdout); err != nil {
+			return err
+		}
+	default:
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("unknown monitoring command %q", args[0])
+	}
+
+	printMonitoring(stdout, eng.MonitoringStatus(ctx))
+	return nil
+}
+
+func printMonitoring(out io.Writer, states []power.GatewayMute) {
+	for _, gw := range states {
+		switch {
+		case gw.Err != nil:
+			// Unreachable is not "alerting is fine" -- say which it is.
+			fmt.Fprintf(out, "%s: unknown (%v)\n", gw.Name, gw.Err)
+		case gw.Muted:
+			fmt.Fprintf(out, "%s: MUTED\n", gw.Name)
+		default:
+			fmt.Fprintf(out, "%s: alerting\n", gw.Name)
+		}
+	}
 }
 
 // fansOff refuses to cut the rack fans while a host is still answering, unless

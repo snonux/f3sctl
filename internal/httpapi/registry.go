@@ -17,7 +17,14 @@ type State struct {
 	Fans    power.FansState
 	FansErr error
 	Job     *Job
+	// Monitoring is the per-gateway Gogios mute state. Nil when it was not
+	// collected for this request: reading it costs two SSH round trips to the
+	// gateways, so only the routes that render it pay for it.
+	Monitoring []power.GatewayMute
 }
+
+// monitoringMuted reports whether Gogios is muted on at least one gateway.
+func (s State) monitoringMuted() bool { return power.AnyMuted(s.Monitoring) }
 
 // jobRunning reports whether a power operation is in flight. While one is,
 // every power action is withheld: they are not queued, and offering a button
@@ -123,6 +130,11 @@ func routes() []route {
 			Handle: (*Server).handleJob,
 		},
 		{
+			Name: "monitoring", Title: "Gogios alerting mute",
+			Method: http.MethodGet, Path: "/monitoring",
+			Handle: (*Server).handleMonitoring,
+		},
+		{
 			Name: "describedby", Title: "OpenAPI description",
 			Method: http.MethodGet, Path: "/openapi.json",
 			Handle: (*Server).handleOpenAPI,
@@ -195,6 +207,29 @@ func routes() []route {
 				}}
 			},
 			Handle: (*Server).handleFansOff,
+		},
+
+		// Muting monitoring is deliberately decoupled from powering anything.
+		//
+		// It used to be reachable only as a step inside power-on/power-off,
+		// which meant a mute stranded by a timed-out un-mute could not be
+		// cleared through the API at all: once the fleet was up, power-on was
+		// withheld, and with it the only route to the marker. Gogios then
+		// stayed blind until somebody SSHed to both gateways by hand. A
+		// monitoring gap has to be closeable on its own terms.
+		{
+			Name: "monitoring-unmute", Title: "Resume Gogios alerting",
+			Method: http.MethodPost, Path: "/monitoring/unmute", Action: true,
+			Available: func(s State) bool { return s.monitoringMuted() },
+			Handle:    (*Server).handleUnmute,
+		},
+		{
+			Name: "monitoring-mute", Title: "Suppress Gogios alerting",
+			Method: http.MethodPost, Path: "/monitoring/mute", Action: true,
+			Available: func(s State) bool {
+				return s.Monitoring != nil && !s.monitoringMuted()
+			},
+			Handle: (*Server).handleMute,
 		},
 	}...)
 

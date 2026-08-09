@@ -68,7 +68,16 @@ func (f globalFlags) useAPI(args []string) bool {
 	if f.remote {
 		return true
 	}
-	return isShutdown(args)
+	return isShutdown(args) || isMonitoring(args)
+}
+
+// isMonitoring reports whether args touch the Gogios mute.
+//
+// These route through the API for the same reason shutdowns do: the marker
+// lives on the two OpenBSD gateways, reached with the restricted key that is
+// pinned to pi0/pi1, so running it locally from a laptop cannot work.
+func isMonitoring(args []string) bool {
+	return len(args) == 2 && args[0] == "monitoring"
 }
 
 // isShutdown reports whether args ask for a host to be powered off.

@@ -255,6 +255,89 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 	}
 }
 
+// TestMonitoringUnmuteIsReachableWithTheFleetUp is the regression test for the
+// hole this resource was added to close.
+//
+// Un-muting used to happen only inside power-on, and power-on is withheld once
+// every host answers. So the exact situation a stranded mute leaves behind --
+// fleet up, alerting still suppressed -- was the one situation in which the API
+// offered no way to clear it, and Gogios stayed blind until somebody SSHed to
+// both gateways by hand.
+func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
+	allUp := State{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", Ping: true, SSH: true},
+			{Name: "f1", Role: "f", Ping: true, SSH: true},
+			{Name: "f2", Role: "f", Ping: true, SSH: true},
+		},
+		Monitoring: []power.GatewayMute{
+			{Name: "blowfish", Muted: true},
+			{Name: "fishfinger", Muted: true},
+		},
+	}
+
+	if _, ok := routeByName("power-on"); !ok {
+		t.Fatal("power-on route missing")
+	}
+	if r, _ := routeByName("power-on"); r.available(allUp) {
+		t.Fatal("precondition failed: power-on should be withheld with the fleet up")
+	}
+
+	r, ok := routeByName("monitoring-unmute")
+	if !ok {
+		t.Fatal("no monitoring-unmute action")
+	}
+	if !r.available(allUp) {
+		t.Error("monitoring-unmute withheld while the fleet is up and muted; " +
+			"a stranded mute would be unclearable through the API")
+	}
+}
+
+// TestMonitoringActionsAreMutuallyExclusive pins that exactly one of mute and
+// un-mute is offered, so a client never renders both.
+func TestMonitoringActionsAreMutuallyExclusive(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		muted bool
+		want  string
+	}{
+		{"muted", true, "monitoring-unmute"},
+		{"alerting", false, "monitoring-mute"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := State{Monitoring: []power.GatewayMute{{Name: "blowfish", Muted: tc.muted}}}
+			for _, name := range []string{"monitoring-mute", "monitoring-unmute"} {
+				r, ok := routeByName(name)
+				if !ok {
+					t.Fatalf("no %q action", name)
+				}
+				if got := r.available(s); got != (name == tc.want) {
+					t.Errorf("%s available=%v, want %v", name, got, name == tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestMonitoringActionsWithheldWhenUnknown pins that neither action is offered
+// when the gateway state was not collected.
+//
+// Most routes never read the mute, because it costs an SSH round trip per
+// gateway. Offering "mute" off the back of a zero value would mean offering it
+// on every response that skipped the lookup.
+func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
+	var unknown State // Monitoring is nil
+	for _, name := range []string{"monitoring-mute", "monitoring-unmute"} {
+		r, ok := routeByName(name)
+		if !ok {
+			t.Fatalf("no %q action", name)
+		}
+		if r.available(unknown) {
+			t.Errorf("%s offered without having read the gateways", name)
+		}
+	}
+}
+
 func routeByName(name string) (route, bool) {
 	for _, r := range routes() {
 		if r.Name == name {
