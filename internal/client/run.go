@@ -54,20 +54,46 @@ func Run(c *Client, args []string, force bool) error {
 	if !ok {
 		return fmt.Errorf("%q cannot be run remotely", cmd)
 	}
-	return c.runAction(name, force)
+	// args[0] is the CLI noun ("power", "fans", "monitoring"). Where the root
+	// has a link with that rel, the matching resource is where the action is
+	// advertised -- see runAction.
+	return c.runAction(name, args[0], force)
 }
 
-func (c *Client) runAction(name string, force bool) error {
+// runAction performs a named action, looking for it on the resource named by
+// holderRel and falling back to the root.
+//
+// Not every action is advertised on the root. Reading the Gogios mute costs the
+// server an SSH round trip to each gateway, so the root carries only a
+// "monitoring" link and the mute/unmute pair lives on that resource. Looking
+// only at the root made `f3sctl monitoring mute` report "not available right
+// now" while `f3sctl monitoring status` was simultaneously advertising it --
+// the client contradicting itself about the same server state.
+//
+// The rel is derived from the CLI noun and checked against the root's links, so
+// this stays discovery-driven: no action name or path is hard-coded, and a
+// noun with no matching link (like "power") simply falls back to the root.
+func (c *Client) runAction(name, holderRel string, force bool) error {
 	root, err := c.Root()
 	if err != nil {
 		return err
 	}
 
-	action, ok := root.Action(name)
+	holder := root
+	if _, ok := root.Link(holderRel); ok {
+		if e, err := c.Follow(root, holderRel); err == nil {
+			holder = e
+		}
+	}
+
+	action, ok := holder.Action(name)
 	if !ok {
 		// The server withheld it, which is information rather than an error:
 		// show why by printing the state it was judged against.
 		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", name)
+		if strings.HasPrefix(name, "monitoring-") {
+			return c.showMonitoring()
+		}
 		return c.showStatus()
 	}
 
