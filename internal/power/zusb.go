@@ -21,8 +21,13 @@ import (
 // per host and removes the need to remember.
 //
 // A failure aborts the entire shutdown. This runs before the Gogios mute and
-// before any poweroff, so at that moment nothing has been done yet and the
-// cluster is still fully up — the cheapest possible place to stop.
+// before any poweroff, so at that moment nothing has been done yet — the
+// cheapest possible place to stop.
+//
+// Callers must pass only hosts that are actually powered on; Engine.off filters
+// those out first. A host that is off cannot have the pool imported, so failing
+// to SSH to it is not a reason to abort. A host that is *up* but unreachable
+// still is, which is why that distinction is drawn by ping before we get here.
 func (e *Engine) zusbPreflight(ctx context.Context, log io.Writer, hosts []inventory.Host) error {
 	for _, h := range hosts {
 		state, err := e.ssh.agentVerb(ctx, h, "zusb-status")

@@ -118,6 +118,32 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 		e.report.HostState(h.Name, HostPending, "")
 	}
 
+	// Drop hosts that are already powered off.
+	//
+	// Everything below this point speaks SSH -- the zusb pre-flight, the guest
+	// stop, the poweroff itself -- and a powered-off host cannot answer any of
+	// it. Treating that as an error is wrong twice over: it is not a failure,
+	// and it aborts work that still needs doing on the hosts that *are* up.
+	//
+	// This is not hypothetical. On 2026-08-09 a `power off` run with f0
+	// already down failed at the zusb pre-flight with "connect to host
+	// 192.168.1.130 port 22: Operation timed out" and left f1 and f2 running.
+	// Shutting the rack down in stages, or re-running after a partial run, is
+	// ordinary use.
+	//
+	// Ping decides this, not SSH. A host answering ICMP but not SSH is powered
+	// on and unreachable, and that case must still abort: there is no way to
+	// tell whether it has the zusb pool imported, and guessing risks cutting
+	// USB power to a mounted backup pool.
+	live, alreadyOff := partitionLive(hosts, func(ip string) bool {
+		return e.pingOnce(ctx, ip)
+	})
+	for _, h := range alreadyOff {
+		fmt.Fprintf(log, "%s is already powered off; skipping it\n", h.Name)
+		e.report.HostState(h.Name, HostDone, "already powered off")
+	}
+	hosts = live
+
 	e.report.Step("checking for locally mounted NFS filesystems")
 	fmt.Fprintln(log, "Checking for locally mounted NFS filesystems...")
 	if err := e.checkLocalNFS(ctx, log); err != nil {
@@ -194,6 +220,21 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 
 	fmt.Fprintln(log, "All hosts accepted shutdown.")
 	return nil
+}
+
+// partitionLive splits hosts into those answering ICMP and those already off.
+//
+// Pulled out as a plain function so the rule can be tested without an SSH
+// client, a Shelly plug or a live rack: isUp is the only thing it touches.
+func partitionLive(hosts []inventory.Host, isUp func(ip string) bool) (live, off []inventory.Host) {
+	for _, h := range hosts {
+		if isUp(h.IP) {
+			live = append(live, h)
+			continue
+		}
+		off = append(off, h)
+	}
+	return live, off
 }
 
 // powerHost looks up a host and confirms f3sctl is allowed to power it.
