@@ -158,12 +158,18 @@ func (s *fakeShelly) addr() string { return strings.TrimPrefix(s.srv.URL, "http:
 // makes the Gogios mute a no-op instead of an SSH connection to a WireGuard
 // address that is not there.
 //
-// What is NOT seamed is e.ssh, so nothing here reaches shutdownEach,
-// zusbPreflight or awaitPowerDown with a non-empty host list: the tests that
-// call Off/OffAll report every power-group host as already down, which empties
-// the list at partitionLive. They exercise the pre-flight, the fan guard and
-// the plug -- the parts this fix is about -- and not the SSH-driven middle of a
-// shutdown. Seaming that is a separate, queued task.
+// What this helper does NOT seam is e.ssh itself, so a testEngine built here
+// still cannot drive shutdownEach, zusbPreflight or awaitPowerDown with a
+// non-empty host list: the tests that call Off/OffAll below report every
+// power-group host as already down, which empties the list at partitionLive.
+// They exercise the pre-flight, the fan guard and the plug -- the parts this
+// fix is about -- and not the SSH-driven middle of a shutdown.
+//
+// That middle is seamed a different way, not left unseamed: PowerBackend and
+// ZusbChecker (backends.go) let a test substitute fakes for shutdownEach's and
+// zusbPreflight's SSH calls without touching e.ssh at all. See
+// backends_test.go, in particular TestOffRunsThroughFakeBackendsEndToEnd,
+// which drives exactly that middle with a non-empty host list.
 func testEngine(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
 	t.Helper()
 	return buildTestEngine(t, shelly, true, up)
@@ -884,10 +890,12 @@ func TestAShutdownThatAbortsNeverTouchesTheFans(t *testing.T) {
 // and never went silent are still running, so the cooling stays on, and the
 // error has to say so in the same words as the progress step.
 //
-// It tests the message rather than a run that produces it: reaching that branch
-// needs shutdownEach or awaitPowerDown to fail, both of which speak SSH through
-// the unseamed e.ssh. Seaming that is a separate, queued task; until then the
-// path from failed hosts to the returned error is this one function.
+// It tests the message rather than a run that produces it: reaching that
+// branch needs shutdownEach or awaitPowerDown to fail, which backends_test.go
+// now drives directly through a fake PowerBackend (see
+// TestOffReportsPowerOffFailureAndLeavesFansOn there). Kept here too because
+// this is the one function on the path from failed hosts to the returned
+// error, and pinning its wording does not need a shutdown run to do it.
 func TestShutdownFailureSaysTheFansWereLeftOn(t *testing.T) {
 	err := shutdownFailure([]string{"f1"})
 	if !strings.Contains(err.Error(), "f1") {

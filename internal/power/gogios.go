@@ -32,13 +32,18 @@ type GatewayMute struct {
 // leaves the marker in place -- so "muted" is a state the fleet can sit in
 // indefinitely with nobody watching. It has to be observable, not merely
 // settable.
+//
+// Reads the verb through powerBackend(), the same seam eachGateway's mute and
+// un-mute calls go through, rather than e.ssh directly: it is the same kind of
+// call (one allowlisted agent verb on a gateway) and it should be fakeable the
+// same way, without a second path to the SSH mechanism for tests to track.
 func (e *Engine) MonitoringStatus(ctx context.Context) []GatewayMute {
 	gateways := e.cfg.Inventory.ByRole(inventory.RoleGateway)
 	out := make([]GatewayMute, 0, len(gateways))
 
 	for _, gw := range gateways {
 		st := GatewayMute{Name: gw.Name}
-		res, err := e.ssh.agentVerb(ctx, gw, "gogios-status")
+		res, err := e.powerBackend().AgentVerb(ctx, gw, "gogios-status")
 		switch {
 		case err != nil:
 			st.Err = err
