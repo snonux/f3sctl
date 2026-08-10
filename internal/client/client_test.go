@@ -47,6 +47,8 @@ func TestActionForVerbFallsBackToLegacyNameWhenCLIVerbAbsent(t *testing.T) {
 		{Name: "monitoring-unmute"},
 		{Name: "f1-on"}, // per-host action, derived rather than listed
 		{Name: "f1-off"},
+		{Name: "all-on"}, // "all" is a host-shaped token, not a real host
+		{Name: "all-off"},
 	}}
 
 	cases := map[string]string{
@@ -58,6 +60,8 @@ func TestActionForVerbFallsBackToLegacyNameWhenCLIVerbAbsent(t *testing.T) {
 		"monitoring unmute": "monitoring-unmute",
 		"power f1 on":       "f1-on",
 		"power f1 off":      "f1-off",
+		"power all on":      "all-on",
+		"power all off":     "all-off",
 	}
 
 	for verb, wantName := range cases {
