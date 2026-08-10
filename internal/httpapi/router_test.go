@@ -89,9 +89,20 @@ func TestRouterActionsForNarrowsToTheNamedRoutes(t *testing.T) {
 	// predicate regardless of the name filter.
 	state := State{Fans: power.FansState{On: true}}
 	got := rt.ActionsFor(state, "fans-on", "fans-off")
+	if len(got) != 1 || got[0].Name != "fans-off" {
+		t.Fatalf("ActionsFor(fans-on, fans-off) = %v, want just [fans-off]", names(got))
+	}
 	for _, a := range got {
 		if a.Name != "fans-on" && a.Name != "fans-off" {
 			t.Errorf("ActionsFor(fans-on, fans-off) included %q", a.Name)
 		}
 	}
+}
+
+func names(actions []Action) []string {
+	out := make([]string, len(actions))
+	for i, a := range actions {
+		out[i] = a.Name
+	}
+	return out
 }

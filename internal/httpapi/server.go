@@ -19,11 +19,11 @@ import (
 // It owns no coordination logic of its own, and increasingly little else:
 // whether a job may start, whether the peer node is busy, and the job's
 // lifecycle all live in internal/coordination, injected here as jobs and
-// peers; the API key check, route matching/href-building, and response
-// serialisation live in Authenticator, Router and SirenRenderer,
-// respectively. Server's own job is to compose these -- parse the request,
-// ask engine/jobs/peers/auth/router what is true, hand the answer to siren to
-// render.
+// peers; the API key check, route matching/href-building, response
+// serialisation and the OpenAPI doc live in Authenticator, Router,
+// SirenRenderer and OpenAPIBuilder, respectively. Server's own job is to
+// compose these -- parse the request, ask engine/jobs/peers/auth/router what
+// is true, hand the answer to siren to render.
 type Server struct {
 	cfg    config.Config
 	engine *power.Engine
