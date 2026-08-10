@@ -59,16 +59,24 @@ func (s *Server) handleStatus(state State, _ request) (Entity, int, error) {
 // Both signals are reported rather than a single "up", because their
 // combination is what distinguishes off from booting from wedged -- see
 // power.HostStatus and docs/CLIENT.md.
+//
+// pingKnown is the third bit, and it is here because the server acts on it: a
+// host whose probe could not be carried out keeps the rack fans on, so a client
+// shown ping=false with no way to tell "silent" from "not measured" would see
+// the fans-off confirmation appear over what looks to it like a cold rack. It
+// is also the honest answer to "is that host off?", which is what the rest of
+// the response is for.
 func hostEntity(h power.HostStatus) Entity {
 	return Entity{
 		Class: []string{"host", h.Role},
 		Rel:   []string{"item"},
 		Properties: map[string]any{
-			"name": h.Name,
-			"ip":   h.IP,
-			"ping": h.Ping,
-			"ssh":  h.SSH,
-			"ms":   h.MS,
+			"name":      h.Name,
+			"ip":        h.IP,
+			"ping":      h.Ping,
+			"pingKnown": h.PingKnown,
+			"ssh":       h.SSH,
+			"ms":        h.MS,
 		},
 	}
 }

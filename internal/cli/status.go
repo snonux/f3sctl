@@ -44,7 +44,7 @@ func printStatus(ctx context.Context, eng *power.Engine, out io.Writer) error {
 	return nil
 }
 
-// describe turns the two probe signals into the state they imply.
+// describe turns the probe signals into the state they imply.
 //
 // The middle case is deliberately not called "booting": answering ICMP with no
 // sshd means the host is in transition, and a single observation cannot tell a
@@ -55,6 +55,11 @@ func describe(st power.HostStatus) string {
 		return "up"
 	case st.Ping && !st.SSH:
 		return "in transition"
+	case !st.PingKnown:
+		// The ping column reads "no" here, and it would be read as "off" --
+		// but nothing was measured. Saying so also explains why `fans off`
+		// then refuses on a rack this table appears to show as cold.
+		return "unknown (the ping probe could not run)"
 	default:
 		// Also the signature of a host hung in single-user after a failed
 		// shutdown: powered on, no network, and not wakeable by WoL. There is

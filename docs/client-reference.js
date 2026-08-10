@@ -107,6 +107,9 @@ function entities(entity, cls) {
 function describe(p) {
   if (p.ping && p.ssh) return 'up';
   if (p.ping) return 'starting…';
+  // pingKnown === false means the probe never ran, which is not evidence of
+  // anything. An older server omits the field; absent means the probe ran.
+  if (p.pingKnown === false) return 'unknown';
   return 'off';
 }
 
@@ -208,10 +211,14 @@ async function selftest() {
   const fans = entities(status, 'fans')[0]?.properties ?? {};
   check(!!action(entry, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
 
+  // A host that could not be probed counts as running: the fan plug cools the
+  // rack, and an unmeasured host is not a host known to be off. That is the
+  // server's rule, so it is the one to check against.
   const off = action(entry, 'fans-off');
-  const anyUp = hosts.some((h) => h.name.startsWith('f') && h.ping);
+  const mayBeUp = hosts.some((h) => h.name.startsWith('f') && (h.ping || h.pingKnown === false));
   if (off) {
-    check((off.fields?.length > 0) === anyUp, 'fans-off carries a confirmation field only while a host is up');
+    check((off.fields?.length > 0) === mayBeUp,
+      'fans-off carries a confirmation field exactly while an f-host may be running');
   }
 
   // The mute is reachable on its own, independent of any power action -- the

@@ -104,6 +104,35 @@ func forced() request {
 	return request{Form: url.Values{"force": []string{"true"}}}
 }
 
+// TestHostEntityReportsWhetherTheProbeRan pins the wire contract the fan guard
+// makes necessary.
+//
+// The server refuses fans-off for a host it could not probe, so a client given
+// only ping=false sees a confirmation appear over what looks to it like a cold
+// rack -- and would render that host as "off" while the server treats it as
+// possibly running. docs/client-reference.js checks the guard against exactly
+// this field.
+func TestHostEntityReportsWhetherTheProbeRan(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		host  power.HostStatus
+		known bool
+	}{
+		{name: "probed", host: fState("f0", false, true), known: true},
+		{name: "not probed", host: fState("f0", false, false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := hostEntity(tc.host).Properties["pingKnown"].(bool)
+			if !ok {
+				t.Fatal("the host entity carries no pingKnown property")
+			}
+			if got != tc.known {
+				t.Errorf("pingKnown = %v, want %v", got, tc.known)
+			}
+		})
+	}
+}
+
 // TestFansOffRefusedWhenTheRackCouldNotBeProbed is the regression test for the
 // third fan guard, the one that stayed open after the other two were fixed.
 //

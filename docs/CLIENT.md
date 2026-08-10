@@ -102,6 +102,13 @@ Each host entity in `/status` carries two independent booleans:
 | `false` | `false` | off, **or hung** | "off" |
 | `false` | `true` | — | should not occur; show "up" |
 
+There is a third boolean, `pingKnown`, and it overrides the table when it is
+`false`: the server could not carry the ICMP probe out at all — no usable
+`ping(8)` where it runs, a probe that could not be started — so `ping: false`
+there means "not measured", not "silent". Show **"unknown"**, never "off". The
+server treats it the same way: an unmeasured host keeps the rack fans on. A
+server too old to send the field omits it; absent means "the probe ran".
+
 The second row is genuinely directionless: a host answering ICMP with no sshd
 is either coming up or going down, and one observation cannot tell which. If a
 job is running, `job.properties.action` says which way — use that to pick the
@@ -442,7 +449,7 @@ When it finishes, the root offers `power-on` and `fans-on`, and nothing else.
 - `rel` names: `self`, `status`, `fans`, `job`, `describedby`, `up`
 - action `name`s: `power-on`, `power-off`, `f3-on`, `f3-off`, `fans-on`,
   `fans-off`
-- `properties` keys on hosts (`name`, `ip`, `ping`, `ssh`, `ms`), fans (`on`,
+- `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,
   `node`, `error`)
 - job `state` values: `running`, `done`, `failed`
