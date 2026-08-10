@@ -1006,7 +1006,7 @@ func TestOffHostNeverTouchesTheFans(t *testing.T) {
 	}
 }
 
-// TestLiveHostsReportsEveryFHostInInventoryOrder pins what both fan guards read
+// TestLiveHostsReportsEveryFHostInInventoryOrder pins what the fan guards read
 // from: the full f-host set, f3 included, in a stable order. Dropping f3 here
 // would silently restore the hazard, and an unstable order would make the
 // reason printed to the operator vary between runs.

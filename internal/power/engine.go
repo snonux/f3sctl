@@ -29,7 +29,8 @@ type Engine struct {
 	// A field rather than a direct pingOnce call because four things read it:
 	// which hosts to skip as already off (Engine.off), whether a host that
 	// accepted a shutdown actually went silent (awaitPowerDown), whether the
-	// rack is idle enough to cut the fans (LiveHosts, for both fan guards),
+	// rack is idle enough to cut the fans (RackActivity, for all three fan
+	// guards -- see that type),
 	// and the ping column of `power status` (probeOne, and through it ProbeAll
 	// and gogios.waitForCluster). None of them can be tested against real
 	// ping(8) without depending on the machine's network stack and on packets
