@@ -345,22 +345,23 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 	}
 }
 
-// jobArgs maps an action name to the CLI invocation the detached child runs.
+// jobArgs maps a job action identifier to the CLI invocation the detached
+// child runs, by finding the route it belongs to (matched on route.jobAction,
+// see registry.go) and splitting its declared CLIVerb into words.
 //
 // The child runs the very same code path as `f3sctl power off` typed at a
 // shell, which is what keeps the CLI and the API from ever diverging in what
-// they actually do.
+// they actually do. This used to be a hand-written switch keyed on the same
+// strings the route registry, the client and the CLI each parsed
+// independently -- see sy0's annotation for the drift that let a new action
+// silently disagree between them. Deriving the argv from CLIVerb instead
+// means the route declaration is the only place the words "power f1 on" are
+// written down.
 func jobArgs(action string) []string {
-	switch action {
-	case "on":
-		return []string{"job-run", "power", "on"}
-	case "off":
-		return []string{"job-run", "power", "off"}
-	}
-
-	// Per-host actions are "<host>-on" / "<host>-off", e.g. "f1-off".
-	if host, verb, ok := strings.Cut(action, "-"); ok && (verb == "on" || verb == "off") {
-		return []string{"job-run", "power", host, verb}
+	for _, r := range routes() {
+		if r.Action && r.CLIVerb != "" && r.jobAction() == action {
+			return append([]string{"job-run"}, strings.Fields(r.CLIVerb)...)
+		}
 	}
 	return nil
 }

@@ -150,6 +150,26 @@ type route struct {
 	// Action marks a state change (rendered in "actions"). Routes without it
 	// are resources, rendered in "links".
 	Action bool
+	// CLIVerb is the exact CLI words that invoke this action, e.g. "power on"
+	// or "power f1 on". It is the single declaration of the "power off" <->
+	// action-name <-> job-run-argv contract: jobArgs (handlers.go) splits it
+	// into the detached child's argv, and Router.action carries it over the
+	// wire on the Siren action so the remote client (internal/client/run.go)
+	// can match a typed command to an action by reading what the server just
+	// advertised, rather than the two of them independently guessing a name
+	// from the same string. Left empty on GET/link routes, which are not
+	// invoked by a CLI verb at all. See sy0's annotation for the drift this
+	// replaced -- three hand-written maps of the same strings that could
+	// silently disagree the moment a new action was added to only one of them.
+	CLIVerb string
+	// JobAction is the identifier jobArgs and coordination.Manager's Job.Action
+	// match this route's job against, when it differs from Name. It differs
+	// only for power-on/power-off: their job identifier ("on"/"off") predates
+	// the route registry and is part of the documented job wire contract
+	// (docs/CLIENT.md's `"action": "off"`), so it is kept rather than renamed
+	// to match Name ("power-on"/"power-off"). Empty means "use Name" -- true
+	// for every other action, where the two have always been the same string.
+	JobAction string
 	// Available reports whether this route may be used given the current
 	// state. Resources are always available; actions are advertised only when
 	// they would succeed.
@@ -204,6 +224,7 @@ func routes() []route {
 		{
 			Name: "power-on", Title: "Power on f0/f1/f2",
 			Method: http.MethodPost, Path: "/power/on", Action: true,
+			CLIVerb: "power on", JobAction: "on",
 			// Offered only when something is actually off. When the whole
 			// group already answers, waking it again is a no-op that would
 			// still cost the caller a job slot.
@@ -216,6 +237,7 @@ func routes() []route {
 		{
 			Name: "power-off", Title: "Power off f0/f1/f2",
 			Method: http.MethodPost, Path: "/power/off", Action: true,
+			CLIVerb: "power off", JobAction: "off",
 			// Requires SSH, not just ping: the whole shutdown runs over
 			// SSH, so a host that is only mid-boot cannot be shut down and
 			// must not be offered as if it could.
@@ -228,6 +250,7 @@ func routes() []route {
 		{
 			Name: "all-on", Title: "Power on every f-host (f0-f3)",
 			Method: http.MethodPost, Path: "/power/all/on", Action: true,
+			CLIVerb: "power all on",
 			Available: func(s State) bool {
 				up, _, total := s.everyFHostUp()
 				return !s.jobRunning() && up < total
@@ -237,6 +260,7 @@ func routes() []route {
 		{
 			Name: "all-off", Title: "Power off every f-host (f0-f3)",
 			Method: http.MethodPost, Path: "/power/all/off", Action: true,
+			CLIVerb: "power all off",
 			// SSH, not ping, for the same reason as power-off: the whole
 			// shutdown runs over SSH.
 			Available: func(s State) bool {
@@ -261,6 +285,7 @@ func routes() []route {
 		{
 			Name: "fans-on", Title: "Switch the rack fans on",
 			Method: http.MethodPost, Path: "/fans/on", Action: true,
+			CLIVerb: "fans on",
 			// Unavailable when the plug cannot be read: without a read-back
 			// there is no way to report truthfully whether it worked.
 			Available: func(s State) bool { return s.FansErr == nil && !s.Fans.On },
@@ -269,6 +294,7 @@ func routes() []route {
 		{
 			Name: "fans-off", Title: "Switch the rack fans off",
 			Method: http.MethodPost, Path: "/fans/off", Action: true,
+			CLIVerb:   "fans off",
 			Available: func(s State) bool { return s.FansErr == nil && s.Fans.On },
 			// The guard is expressed as a field rather than documented as a
 			// rule: while the rack may be busy the client is handed a
@@ -308,12 +334,14 @@ func routes() []route {
 		{
 			Name: "monitoring-unmute", Title: "Resume Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/unmute", Action: true,
+			CLIVerb:   "monitoring unmute",
 			Available: func(s State) bool { return s.monitoringMuted() },
 			Handle:    (*Server).handleUnmute,
 		},
 		{
 			Name: "monitoring-mute", Title: "Suppress Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/mute", Action: true,
+			CLIVerb: "monitoring mute",
 			Available: func(s State) bool {
 				return s.Monitoring != nil && !s.monitoringMuted()
 			},
@@ -340,6 +368,7 @@ func hostRoutes(name string) []route {
 		{
 			Name: name + "-on", Title: "Power on " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/on", Action: true,
+			CLIVerb: "power " + name + " on",
 			Available: func(s State) bool {
 				h, ok := s.host(name)
 				return ok && !s.jobRunning() && !h.Ping
@@ -349,6 +378,7 @@ func hostRoutes(name string) []route {
 		{
 			Name: name + "-off", Title: "Power off " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/off", Action: true,
+			CLIVerb: "power " + name + " off",
 			// SSH, not ping: the shutdown runs over SSH, so a host that is
 			// only mid-boot cannot be shut down and must not be offered as if
 			// it could.
@@ -359,6 +389,16 @@ func hostRoutes(name string) []route {
 			Handle: handleAction(name + "-off"),
 		},
 	}
+}
+
+// jobAction returns the identifier jobArgs and the started job's Action
+// field match this route against: JobAction when the route declares one
+// (power-on/power-off only -- see JobAction's doc comment), Name otherwise.
+func (r route) jobAction() string {
+	if r.JobAction != "" {
+		return r.JobAction
+	}
+	return r.Name
 }
 
 // available reports whether a route may be used now.

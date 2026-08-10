@@ -97,11 +97,12 @@ func (rt *Router) ActionsFor(state State, names ...string) []Action {
 
 func (rt *Router) action(r route, state State) Action {
 	a := Action{
-		Name:   r.Name,
-		Title:  r.Title,
-		Method: r.Method,
-		Href:   rt.Href(r.Path),
-		Fields: r.fields(state),
+		Name:    r.Name,
+		Title:   r.Title,
+		Method:  r.Method,
+		Href:    rt.Href(r.Path),
+		CLIVerb: r.CLIVerb,
+		Fields:  r.fields(state),
 	}
 	if len(a.Fields) > 0 {
 		a.Type = "application/x-www-form-urlencoded"

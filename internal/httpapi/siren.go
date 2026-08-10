@@ -61,6 +61,12 @@ type Action struct {
 	// Href is where to send it. It may change between releases; that is why
 	// clients are told to follow Name and read Href rather than build it.
 	Href string `json:"href"`
+	// CLIVerb is the exact f3sctl command that invokes this action, e.g.
+	// "power f1 on". It comes straight from the route's own CLIVerb
+	// (registry.go), so the CLI-command-to-action-name mapping is declared
+	// once, server-side, and a client matches against it instead of keeping
+	// an independent table that could drift -- see sy0.
+	CLIVerb string `json:"cliVerb,omitempty"`
 	// Type is the request content type, when the action takes fields.
 	Type string `json:"type,omitempty"`
 	// Fields are the parameters this action accepts. A field appears only
