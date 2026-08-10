@@ -239,6 +239,22 @@ than a spinner:
   `"running"` — a host stuck in `confirming` is the signature of one that hung
   and will not wake.
 
+**A `failed` host has two quite different meanings, and `detail` is what
+separates them.** Show it; do not summarise it as "failed".
+
+- `still answering after 2m0s; likely hung and not wakeable` — the host took
+  the shutdown and kept replying. It is heading for "powered on with no
+  network", where Wake-on-LAN cannot reach it. This one needs a console or the
+  physical button.
+- `never answered again, but could not be probed either; power-down
+  unconfirmed` — the server could not run its liveness probe. The hosts went
+  quiet and very probably powered off exactly as asked; what failed is the
+  probe, on the machine serving this API. Nothing about the rack follows from
+  it — including the `ping` flags in `/status`, which are the same probe.
+
+The job is `failed` in both cases, deliberately: the server proved nothing, and
+saying so is the point.
+
 All of these are optional and may be absent (an operation that has only just
 started, or an older server). Render what is there; do not require any of it.
 - Use a total timeout of at least **20 minutes** before declaring the job lost.

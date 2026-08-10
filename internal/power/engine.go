@@ -59,6 +59,13 @@ type Engine struct {
 	// guard alike. A field only so tests need not wait real seconds; read it
 	// through probeGap. New wires it to downProbeInterval.
 	downProbeInterval time.Duration
+
+	// powerDownTimeout bounds awaitPowerDown's wait. A field for the same
+	// reason as downProbeInterval: what happens when the wait runs out is one
+	// of the outcomes an operator actually sees, and a test of it should not
+	// take two real minutes. Read it through powerDownWait. New wires it to
+	// powerDownTimeout.
+	powerDownTimeout time.Duration
 }
 
 // New returns an Engine.
@@ -73,6 +80,7 @@ func New(cfg config.Config) (*Engine, error) {
 		report:            nopReporter{},
 		nfsMounts:         localNFSMounts,
 		downProbeInterval: downProbeInterval,
+		powerDownTimeout:  powerDownTimeout,
 	}
 	e.isUp = e.pingOnce
 	return e, nil
@@ -114,6 +122,15 @@ func (e *Engine) probeGap() time.Duration {
 		return downProbeInterval
 	}
 	return e.downProbeInterval
+}
+
+// powerDownWait is how long a host gets to actually go silent after accepting a
+// shutdown, defaulting when the field is unset (a hand-built Engine).
+func (e *Engine) powerDownWait() time.Duration {
+	if e.powerDownTimeout <= 0 {
+		return powerDownTimeout
+	}
+	return e.powerDownTimeout
 }
 
 // localMounts lists locally mounted NFS filesystems, falling back to the real

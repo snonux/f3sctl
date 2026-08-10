@@ -751,6 +751,113 @@ func TestAwaitPowerDownNeverConfirmsAHostItCouldNotProbe(t *testing.T) {
 	}
 }
 
+// TestUnconfirmedPowerDownsAreDiagnosedApart pins that "never confirmed" is
+// reported as the situation it actually is.
+//
+// Both outcomes here are failures of the run -- nothing proved the host powered
+// down -- but they lead somewhere completely different. A host that kept
+// answering is on its way to being powered on with no network, and recovering
+// it needs the JetKVM console or the physical button. A host that went quiet and
+// could not be probed has very likely powered off exactly as asked; the fault is
+// on this machine, and sending its operator to the garage with a keyboard is
+// both wrong and expensive.
+//
+// The second case is not exotic. Unknown counts as "not confirmed off"
+// throughout, deliberately, so one broken ping(8) turns a textbook shutdown into
+// three hosts reported as hung.
+func TestUnconfirmedPowerDownsAreDiagnosedApart(t *testing.T) {
+	const (
+		hungAdvice     = "JetKVM"
+		hungPhrase     = "still answering"
+		unprobedPhrase = "could not be"
+		unprobedAdvice = "fault on THIS machine"
+	)
+
+	newEngine := func(t *testing.T) (*Engine, *recordingReporter) {
+		t.Helper()
+		eng := testEngine(t, newFakeShelly(t, true))
+		// The wait is a field so this takes 50ms rather than two real minutes.
+		eng.powerDownTimeout = 50 * time.Millisecond
+		steps := &recordingReporter{}
+		eng.WithReporter(steps)
+		return eng, steps
+	}
+
+	t.Run("the probe could not run", func(t *testing.T) {
+		eng, steps := newEngine(t)
+		eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
+		hosts := eng.cfg.Inventory.ShutdownOrder()
+
+		var log bytes.Buffer
+		stuck := eng.awaitPowerDown(context.Background(), &log, hosts)
+
+		if len(stuck) != len(hosts) {
+			t.Fatalf("unconfirmed = %v, want all of %v", stuck, names(hosts))
+		}
+		if strings.Contains(log.String(), hungPhrase) || strings.Contains(log.String(), hungAdvice) {
+			t.Errorf("log = %q, want no hung-host diagnosis: these hosts never answered", log.String())
+		}
+		if !strings.Contains(log.String(), unprobedAdvice) {
+			t.Errorf("log = %q, want it to point at the probe on this machine", log.String())
+		}
+		if got := steps.hostState("f0"); !strings.Contains(got, unprobedPhrase) {
+			t.Errorf("f0 reported as %q, want it to say the power-down is unconfirmed "+
+				"because it could not be probed", got)
+		}
+	})
+
+	t.Run("the host kept answering", func(t *testing.T) {
+		eng, steps := newEngine(t)
+		eng.isUp = func(context.Context, string) (bool, bool) { return true, true }
+		hosts := eng.cfg.Inventory.ShutdownOrder()
+
+		var log bytes.Buffer
+		stuck := eng.awaitPowerDown(context.Background(), &log, hosts)
+
+		if len(stuck) != len(hosts) {
+			t.Fatalf("unconfirmed = %v, want all of %v", stuck, names(hosts))
+		}
+		if !strings.Contains(log.String(), hungPhrase) || !strings.Contains(log.String(), hungAdvice) {
+			t.Errorf("log = %q, want the hung-host diagnosis", log.String())
+		}
+		if strings.Contains(log.String(), unprobedAdvice) {
+			t.Errorf("log = %q, want no broken-probe diagnosis: the hosts answered", log.String())
+		}
+		if got := steps.hostState("f0"); !strings.Contains(got, "hung") {
+			t.Errorf("f0 reported as %q, want it to say the host is likely hung", got)
+		}
+	})
+
+	// A host heard from once and silent afterwards is a hung host, not an
+	// unprobeable one: it is alive, and the later silence is the very interface
+	// flap the consecutive-miss rule exists for.
+	t.Run("a host heard from once", func(t *testing.T) {
+		eng, _ := newEngine(t)
+		flapping := hostIP(t, eng, "f1")
+
+		var mu sync.Mutex
+		probes := 0
+		eng.isUp = func(_ context.Context, ip string) (bool, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			probes++
+			// f1 answers its first probe, then nothing can be learned about
+			// anything; f0 and f2 are never probed successfully at all.
+			return ip == flapping && probes <= 3, ip == flapping && probes <= 3
+		}
+
+		var log bytes.Buffer
+		eng.awaitPowerDown(context.Background(), &log, eng.cfg.Inventory.ShutdownOrder())
+
+		if !strings.Contains(log.String(), "f1 accepted the shutdown but is still answering") {
+			t.Errorf("log = %q, want f1 diagnosed as hung: it answered", log.String())
+		}
+		if !strings.Contains(log.String(), "f0 accepted the shutdown and then went quiet") {
+			t.Errorf("log = %q, want f0 diagnosed as unprobeable: it never answered", log.String())
+		}
+	})
+}
+
 // TestAShutdownThatAbortsNeverTouchesTheFans pins the other exit from off():
 // a pre-flight that refuses must return before the fans-off step, not despite
 // it. Here the local NFS listing fails, which is itself a fix -- mount(8) that
@@ -821,6 +928,7 @@ func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
 type recordingReporter struct {
 	mu    sync.Mutex
 	steps []string
+	hosts map[string]string
 }
 
 func (r *recordingReporter) Step(name string) {
@@ -829,7 +937,22 @@ func (r *recordingReporter) Step(name string) {
 	r.steps = append(r.steps, name)
 }
 
-func (r *recordingReporter) HostState(string, HostPhase, string) {}
+func (r *recordingReporter) HostState(host string, phase HostPhase, detail string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hosts == nil {
+		r.hosts = map[string]string{}
+	}
+	r.hosts[host] = string(phase) + ": " + detail
+}
+
+// hostState returns the last phase and detail reported for a host, which is
+// what a client polling job.json ends up rendering.
+func (r *recordingReporter) hostState(host string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hosts[host]
+}
 
 func (r *recordingReporter) lastStep() string {
 	r.mu.Lock()
