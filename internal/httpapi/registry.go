@@ -188,8 +188,38 @@ type route struct {
 }
 
 // routes is the complete API surface.
+//
+// Split into one function per group of routes (below) rather than one long
+// literal: each group is a self-contained concern -- read-only resources,
+// the cluster-wide power pair, per-host power, the fan plug, the Gogios mute
+// -- and grouping them by that concern keeps every one of these functions
+// short enough to read in one go, per this repo's function-length rule.
 func routes() []route {
-	out := []route{
+	out := resourceRoutes()
+	out = append(out, powerRoutes()...)
+	out = append(out, allHostsRoutes()...)
+
+	// Per-host actions for every f-host, so any one of f0-f3 can be powered
+	// independently of the cluster-wide pair above.
+	//
+	// Generated from the inventory rather than written out four times: adding
+	// a host to the inventory should not mean remembering to add two routes,
+	// two OpenAPI entries and two client mappings by hand.
+	for _, h := range inventory.Default().ByRole(inventory.RoleF) {
+		out = append(out, hostRoutes(h.Name)...)
+	}
+
+	out = append(out, fanActionRoutes()...)
+	out = append(out, monitoringActionRoutes()...)
+	return out
+}
+
+// resourceRoutes is every GET route: navigable resources rendered in
+// "links", never in "actions" (see TestGETRoutesAreLinksNotActions). None of
+// these takes a CLIVerb -- they are followed by relation, not invoked by a
+// CLI verb.
+func resourceRoutes() []route {
+	return []route{
 		{
 			Name: "self", Title: "API root",
 			Method: http.MethodGet, Path: "/",
@@ -220,7 +250,14 @@ func routes() []route {
 			Method: http.MethodGet, Path: "/openapi.json",
 			Handle: (*Server).handleOpenAPI,
 		},
+	}
+}
 
+// powerRoutes is the cluster-wide power pair: f0/f1/f2 only, f3 excluded.
+// The every-f-host pair lives in allHostsRoutes, and per-host actions in
+// hostRoutes, generated from the inventory.
+func powerRoutes() []route {
+	return []route{
 		{
 			Name: "power-on", Title: "Power on f0/f1/f2",
 			Method: http.MethodPost, Path: "/power/on", Action: true,
@@ -247,6 +284,13 @@ func routes() []route {
 			},
 			Handle: handleAction("off"),
 		},
+	}
+}
+
+// allHostsRoutes is the every-f-host pair: f0-f3, f3 included. See
+// powerRoutes for the cluster-only pair this complements.
+func allHostsRoutes() []route {
+	return []route{
 		{
 			Name: "all-on", Title: "Power on every f-host (f0-f3)",
 			Method: http.MethodPost, Path: "/power/all/on", Action: true,
@@ -270,18 +314,11 @@ func routes() []route {
 			Handle: handleAction("all-off"),
 		},
 	}
+}
 
-	// Per-host actions for every f-host, so any one of f0-f3 can be powered
-	// independently of the cluster-wide pair above.
-	//
-	// Generated from the inventory rather than written out four times: adding
-	// a host to the inventory should not mean remembering to add two routes,
-	// two OpenAPI entries and two client mappings by hand.
-	for _, h := range inventory.Default().ByRole(inventory.RoleF) {
-		out = append(out, hostRoutes(h.Name)...)
-	}
-
-	out = append(out, []route{
+// fanActionRoutes is the rack-fan plug's on/off pair.
+func fanActionRoutes() []route {
+	return []route{
 		{
 			Name: "fans-on", Title: "Switch the rack fans on",
 			Method: http.MethodPost, Path: "/fans/on", Action: true,
@@ -322,15 +359,21 @@ func routes() []route {
 			},
 			Handle: (*Server).handleFansOff,
 		},
+	}
+}
 
-		// Muting monitoring is deliberately decoupled from powering anything.
-		//
-		// It used to be reachable only as a step inside power-on/power-off,
-		// which meant a mute stranded by a timed-out un-mute could not be
-		// cleared through the API at all: once the fleet was up, power-on was
-		// withheld, and with it the only route to the marker. Gogios then
-		// stayed blind until somebody SSHed to both gateways by hand. A
-		// monitoring gap has to be closeable on its own terms.
+// monitoringActionRoutes is the Gogios mute/unmute pair.
+//
+// Muting monitoring is deliberately decoupled from powering anything.
+//
+// It used to be reachable only as a step inside power-on/power-off, which
+// meant a mute stranded by a timed-out un-mute could not be cleared through
+// the API at all: once the fleet was up, power-on was withheld, and with it
+// the only route to the marker. Gogios then stayed blind until somebody
+// SSHed to both gateways by hand. A monitoring gap has to be closeable on
+// its own terms.
+func monitoringActionRoutes() []route {
+	return []route{
 		{
 			Name: "monitoring-unmute", Title: "Resume Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/unmute", Action: true,
@@ -347,9 +390,7 @@ func routes() []route {
 			},
 			Handle: (*Server).handleMute,
 		},
-	}...)
-
-	return out
+	}
 }
 
 // hostRoutes builds the on/off pair for one f-host.
