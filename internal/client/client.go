@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/config"
 )
 
 // Client talks to one f3sctl API endpoint.
@@ -29,6 +31,13 @@ type Client struct {
 	key    string
 	http   *http.Client
 	stdout io.Writer
+
+	// cfg supplies settings the client and server must not disagree about --
+	// currently just UnmuteTimeout, which jobWaitTimeout uses to derive how
+	// long waitForJob polls before giving up. Carrying the whole config
+	// rather than a single duration means a future shared setting has
+	// somewhere to live without another constructor-signature change.
+	cfg config.Config
 
 	// trace, when set, receives a line per request showing what was called,
 	// where, and which node answered. Nil disables tracing.
@@ -48,7 +57,12 @@ func (c *Client) Verbose(w io.Writer) *Client {
 }
 
 // New returns a client for the API at base, authenticating with key.
-func New(base, key string, stdout io.Writer) (*Client, error) {
+//
+// cfg is the same config.Config the caller resolved for everything else --
+// passing it through (rather than just base and key) is what lets
+// jobWaitTimeout derive the poll deadline from cfg.UnmuteTimeout instead of
+// carrying an independent guess of the server's worst-case job runtime.
+func New(base, key string, cfg config.Config, stdout io.Writer) (*Client, error) {
 	if base == "" {
 		return nil, fmt.Errorf("no API URL configured (set api_url in the config or F3SCTL_URL)")
 	}
@@ -61,6 +75,7 @@ func New(base, key string, stdout io.Writer) (*Client, error) {
 	return &Client{
 		base: base,
 		key:  key,
+		cfg:  cfg,
 		// Generous but bounded: the API answers a status request by probing
 		// seven hosts, and a phone-tethered link is not fast.
 		//

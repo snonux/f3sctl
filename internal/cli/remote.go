@@ -107,7 +107,7 @@ func runRemote(cfg config.Config, args []string, flags globalFlags, stdout, stde
 	}
 
 	url := cfg.ResolveAPIURL()
-	c, err := client.New(url, key, stdout)
+	c, err := client.New(url, key, cfg, stdout)
 	if err != nil {
 		return err
 	}

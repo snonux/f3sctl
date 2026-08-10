@@ -264,10 +264,17 @@ saying so is the point.
 
 All of these are optional and may be absent (an operation that has only just
 started, or an older server). Render what is there; do not require any of it.
-- Use a total timeout of at least **20 minutes** before declaring the job lost.
-  The worst case is three hosts × 240 s of guest shutdown, plus the Gogios
-  un-mute wait, plus slack. The server independently gives up on a job after 30
-  minutes and marks it failed, so a client that waits will eventually be told.
+- Use a total timeout of at least **25 minutes** before declaring the job
+  lost. The worst case is the Gogios un-mute wait (`UnmuteTimeout`, 1200 s /
+  20 min by default) plus the wake prelude (fans, magic packets) and the
+  gateway SSH round trips that follow it -- budget at least **5 minutes** of
+  slack on top of `UnmuteTimeout` for those, since neither is bounded by
+  `UnmuteTimeout` itself. A client that timed out at 20 minutes flat used to
+  report "gave up" moments before a job that succeeded, because 20 minutes
+  matched `UnmuteTimeout`'s default with no slack at all. If your deployment
+  raises `UnmuteTimeout` in its config, raise your client's timeout by the
+  same amount. The server independently gives up on a job after 30 minutes and
+  marks it failed, so a client that waits will eventually be told either way.
 
 `fans-on` and `fans-off` are **synchronous**: they return `200` with the plug's
 state read back from the device. No job, no polling.

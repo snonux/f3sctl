@@ -134,7 +134,14 @@ async function showStatus() {
 // pi1, so the poll may land on the node that did not run the job (CLIENT.md
 // section 9). Host state is the reliable completion signal; the job is how you
 // learn *why* something failed.
-async function waitForJob(entry, timeoutMs = 20 * 60 * 1000) {
+//
+// The 25-minute default is UnmuteTimeout's default (20 min) plus 5 minutes of
+// slack for the wake prelude and gateway SSH round trips that follow it --
+// see CLIENT.md's job-polling section. A flat 20 minutes with no slack used
+// to make this throw "gave up" moments before a job that was about to
+// succeed; if the server's UnmuteTimeout is configured higher than its
+// default, pass a correspondingly larger timeoutMs.
+async function waitForJob(entry, timeoutMs = 25 * 60 * 1000) {
   const href = follow(entry, 'job');
   const deadline = Date.now() + timeoutMs;
 

@@ -8,6 +8,36 @@ import (
 	"time"
 )
 
+// jobWaitBuffer is added on top of the server's worst-case UnmuteTimeout to
+// get the client's poll deadline.
+//
+// UnmuteTimeout alone is not the job's full worst-case runtime: On() also
+// switches the fans, sends the magic packets, and eachGateway does two SSH
+// round trips to clear the mute after waitForCluster returns (see
+// internal/power/gogios.go, internal/power/engine.go on()). That prelude and
+// cleanup cost single-digit seconds normally, but a gateway SSH connection
+// under load is not bounded by anything in this codebase, so the buffer is
+// minutes rather than seconds -- generous on purpose, since the bug this
+// guards against is the client giving up moments before the server actually
+// finishes.
+const jobWaitBuffer = 5 * time.Minute
+
+// jobWaitTimeout returns how long waitForJob polls before giving up.
+//
+// It must exceed the server's worst-case job runtime, or the client can (and
+// on 2026-08-09 did) give up seconds before a job that was about to succeed.
+// Deriving it from cfg.UnmuteTimeout rather than an independently chosen
+// constant is the fix: the old code hardcoded 20 minutes to match
+// UnmuteTimeout's default of 1200s, and the two only looked equal -- the
+// server's actual worst case is UnmuteTimeout plus the prelude and gateway
+// work jobWaitBuffer accounts for, so the client was always going to lose
+// that race. Computing from the same config value means an operator who
+// raises UnmuteTimeout (as happened 2026-08-09, 600s -> 1200s, to survive a
+// slow ntpd_sync_on_start) automatically raises the client's patience too.
+func (c *Client) jobWaitTimeout() time.Duration {
+	return c.cfg.UnmuteTimeout.D() + jobWaitBuffer
+}
+
 // actionFor maps a CLI verb onto the action name the API advertises.
 //
 // The mapping exists because the two vocabularies are allowed to differ: the
@@ -169,8 +199,14 @@ func (c *Client) showMonitoring() error {
 // its state as ours reports a perfectly healthy shutdown as a failure, which is
 // exactly what happened on 2026-08-08 before ids existed. Anything that is not
 // our id is "no news", not news.
+//
+// The poll deadline comes from jobWaitTimeout, not a constant here, so it
+// tracks the server's actual worst-case runtime -- see jobWaitTimeout's
+// comment for why an independent constant caused a "gave up" report on
+// 2026-08-09 for a job that succeeded moments later.
 func (c *Client) waitForJob(root Entity, id string) error {
-	deadline := time.Now().Add(20 * time.Minute)
+	timeout := c.jobWaitTimeout()
+	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
 		time.Sleep(10 * time.Second)
@@ -209,7 +245,7 @@ func (c *Client) waitForJob(root Entity, id string) error {
 			return c.showStatus()
 		}
 	}
-	return fmt.Errorf("gave up waiting for the job after 20 minutes")
+	return fmt.Errorf("gave up waiting for the job after %s", timeout)
 }
 
 // showStatus renders the remote status in the same shape as the local CLI, so
