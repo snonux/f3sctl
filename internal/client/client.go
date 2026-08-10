@@ -107,11 +107,18 @@ type Link struct {
 }
 
 type Action struct {
-	Name   string  `json:"name"`
-	Title  string  `json:"title"`
-	Method string  `json:"method"`
-	Href   string  `json:"href"`
-	Fields []Field `json:"fields"`
+	Name   string `json:"name"`
+	Title  string `json:"title"`
+	Method string `json:"method"`
+	Href   string `json:"href"`
+	// CLIVerb is the exact f3sctl command that invokes this action, e.g.
+	// "power f1 on", declared once by the server's route registry
+	// (internal/httpapi/registry.go's route.CLIVerb) and carried here
+	// unchanged. Entity.ActionForVerb matches against it, which is what lets
+	// this client recognise a command without its own verb->name table --
+	// see that method's doc comment and sy0's annotation.
+	CLIVerb string  `json:"cliVerb,omitempty"`
+	Fields  []Field `json:"fields"`
 }
 
 type Field struct {
@@ -141,6 +148,26 @@ func (e Entity) Link(rel string) (string, bool) {
 func (e Entity) Action(name string) (Action, bool) {
 	for _, a := range e.Actions {
 		if a.Name == name {
+			return a, true
+		}
+	}
+	return Action{}, false
+}
+
+// ActionForVerb returns the offered action whose declared CLIVerb equals
+// verb -- the CLI words a command was typed with, e.g. "power f3 on".
+//
+// This is how the client recognises what to invoke: the server is the single
+// source for the verb-to-action-name mapping (route.CLIVerb in
+// internal/httpapi/registry.go), and matching against what it just
+// advertised replaces a client-local table that had to be kept in step by
+// hand. Absent means the same thing it means for Action: either verb names
+// nothing the server knows, or it names something currently withheld -- the
+// two are indistinguishable here on purpose, since only possible actions are
+// ever advertised (see httpapi.Router.Actions).
+func (e Entity) ActionForVerb(verb string) (Action, bool) {
+	for _, a := range e.Actions {
+		if a.CLIVerb == verb {
 			return a, true
 		}
 	}

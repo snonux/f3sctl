@@ -40,37 +40,6 @@ func (c *Client) jobWaitTimeout() time.Duration {
 	return c.cfg.UnmuteTimeout.D() + jobWaitBuffer
 }
 
-// actionFor maps a CLI verb onto the action name the API advertises.
-//
-// The mapping exists because the two vocabularies are allowed to differ: the
-// CLI reads as a sentence ("power f3 on"), the API as an identifier
-// ("f3-on"). Action names are part of the API's stable contract; CLI spelling
-// is ours to change.
-var actionFor = map[string]string{
-	"power on":          "power-on",
-	"power off":         "power-off",
-	"fans on":           "fans-on",
-	"fans off":          "fans-off",
-	"monitoring mute":   "monitoring-mute",
-	"monitoring unmute": "monitoring-unmute",
-}
-
-// actionName maps a CLI command to the API action it invokes.
-//
-// Per-host commands ("power f1 off") are derived rather than listed, so adding
-// a host to the inventory needs no change here.
-func actionName(cmd string) (string, bool) {
-	if name, ok := actionFor[cmd]; ok {
-		return name, true
-	}
-
-	fields := strings.Fields(cmd)
-	if len(fields) == 3 && fields[0] == "power" && (fields[2] == "on" || fields[2] == "off") {
-		return fields[1] + "-" + fields[2], true
-	}
-	return "", false
-}
-
 // Run executes a CLI command against the remote API.
 func Run(c *Client, args []string, force bool) error {
 	cmd := strings.Join(args, " ")
@@ -82,18 +51,22 @@ func Run(c *Client, args []string, force bool) error {
 		return c.showMonitoring()
 	}
 
-	name, ok := actionName(cmd)
-	if !ok {
-		return fmt.Errorf("%q cannot be run remotely", cmd)
-	}
 	// args[0] is the CLI noun ("power", "fans", "monitoring"). Where the root
 	// has a link with that rel, the matching resource is where the action is
 	// advertised -- see runAction.
-	return c.runAction(name, args[0], force)
+	return c.runAction(cmd, args[0], force)
 }
 
-// runAction performs a named action, looking for it on the resource named by
-// holderRel and falling back to the root.
+// runAction performs the action whose declared CLI verb is cmd, looking for
+// it on the resource named by holderRel and falling back to the root.
+//
+// cmd is matched against Action.CLIVerb rather than resolved to an action
+// name first: the server is the single source for that mapping (it is
+// declared once, on the route -- see internal/httpapi/registry.go's
+// route.CLIVerb), and this client already fetches the actions it advertises,
+// so reading the mapping off them replaces a local actionFor table that had
+// to be updated by hand every time a route's CLI spelling changed -- and
+// could (and did) drift from the server's if it wasn't. See sy0.
 //
 // Not every action is advertised on the root. Reading the Gogios mute costs the
 // server an SSH round trip to each gateway, so the root carries only a
@@ -105,7 +78,7 @@ func Run(c *Client, args []string, force bool) error {
 // The rel is derived from the CLI noun and checked against the root's links, so
 // this stays discovery-driven: no action name or path is hard-coded, and a
 // noun with no matching link (like "power") simply falls back to the root.
-func (c *Client) runAction(name, holderRel string, force bool) error {
+func (c *Client) runAction(cmd, holderRel string, force bool) error {
 	root, err := c.Root()
 	if err != nil {
 		return err
@@ -118,12 +91,15 @@ func (c *Client) runAction(name, holderRel string, force bool) error {
 		}
 	}
 
-	action, ok := holder.Action(name)
+	action, ok := holder.ActionForVerb(cmd)
 	if !ok {
-		// The server withheld it, which is information rather than an error:
-		// show why by printing the state it was judged against.
-		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", name)
-		if strings.HasPrefix(name, "monitoring-") {
+		// Either cmd names nothing the server has ever heard of, or it names
+		// something currently withheld -- the two look identical from here,
+		// since only possible actions are advertised (see
+		// httpapi.Router.Actions). Either way, showing the state it was
+		// judged against is more useful than a bare error.
+		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
+		if holderRel == "monitoring" {
 			return c.showMonitoring()
 		}
 		return c.showStatus()
@@ -138,15 +114,15 @@ func (c *Client) runAction(name, holderRel string, force bool) error {
 	// asynchronous one comes back as a running job to follow.
 	if state, _ := result.Properties["state"].(string); state == "running" {
 		id, _ := result.Properties["id"].(string)
-		fmt.Fprintf(c.stdout, "%s accepted; waiting for it to finish...\n", name)
+		fmt.Fprintf(c.stdout, "%s accepted; waiting for it to finish...\n", action.Name)
 		return c.waitForJob(root, id)
 	}
 
-	if strings.HasPrefix(name, "monitoring-") {
+	if strings.HasPrefix(action.Name, "monitoring-") {
 		return c.showMonitoring()
 	}
 
-	fmt.Fprintf(c.stdout, "%s: done\n", name)
+	fmt.Fprintf(c.stdout, "%s: done\n", action.Name)
 	return c.showStatus()
 }
 
