@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -20,7 +21,7 @@ import (
 // has its own well-known shape, and burying it inside "properties" would make
 // it useless to every tool that reads OpenAPI. serve() recognises it by path
 // and writes Properties out as the whole body.
-func (s *Server) handleOpenAPI(_ State, _ request) (Entity, int, error) {
+func (s *Server) handleOpenAPI(_ context.Context, _ State, _ request) (Entity, int, error) {
 	return Entity{Properties: s.openapi.Build()}, http.StatusOK, nil
 }
 

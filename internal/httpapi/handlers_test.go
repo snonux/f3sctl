@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -159,7 +160,7 @@ func TestFansOffRefusedWhenTheRackCouldNotBeProbed(t *testing.T) {
 		Fans: power.FansState{On: true},
 	}
 
-	_, status, err := srv.handleFansOff(unprobed, request{})
+	_, status, err := srv.handleFansOff(context.Background(), unprobed, request{})
 	if status != http.StatusConflict {
 		t.Fatalf("status = %d, want %d: nothing is known about the rack", status, http.StatusConflict)
 	}
@@ -188,7 +189,7 @@ func TestFansOffRefusedWhileAHostAnswers(t *testing.T) {
 	hot := coldSnapshot()
 	hot.Hosts[3] = fState("f3", true, true)
 
-	_, status, err := srv.handleFansOff(hot, request{})
+	_, status, err := srv.handleFansOff(context.Background(), hot, request{})
 	if status != http.StatusConflict {
 		t.Fatalf("status = %d, want %d while f3 answers", status, http.StatusConflict)
 	}
@@ -220,7 +221,7 @@ func TestFansOffConfirmsASnapshotThatLooksCold(t *testing.T) {
 		return power.RackActivityFrom([]power.HostStatus{fState("f3", true, true)})
 	})
 
-	_, status, err := srv.handleFansOff(coldSnapshot(), request{})
+	_, status, err := srv.handleFansOff(context.Background(), coldSnapshot(), request{})
 	if !confirmed {
 		t.Fatal("a snapshot showing a cold rack was accepted without confirmation")
 	}
@@ -243,7 +244,7 @@ func TestFansOffSwitchesThePlugOnceTheRackIsConfirmedIdle(t *testing.T) {
 		return power.RackActivity{}
 	})
 
-	_, status, err := srv.handleFansOff(coldSnapshot(), request{})
+	_, status, err := srv.handleFansOff(context.Background(), coldSnapshot(), request{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -269,7 +270,7 @@ func TestFansOffWithForceSkipsTheGuardEntirely(t *testing.T) {
 	hot := coldSnapshot()
 	hot.Hosts[3] = fState("f3", true, true)
 
-	if _, status, err := srv.handleFansOff(hot, forced()); err != nil || status != http.StatusOK {
+	if _, status, err := srv.handleFansOff(context.Background(), hot, forced()); err != nil || status != http.StatusOK {
 		t.Fatalf("forced fans off: status = %d, err = %v", status, err)
 	}
 	if got := plug.setCalls(); len(got) != 1 || got[0] {
@@ -277,5 +278,40 @@ func TestFansOffWithForceSkipsTheGuardEntirely(t *testing.T) {
 	}
 	if confirmed {
 		t.Error("the confirming probe ran despite force=true")
+	}
+}
+
+// TestSetFansRespectsTheRequestContext is the regression test for ky0: setFans
+// used to reach for its own context.Background() rather than the context
+// serve() built for the request, so a client's deadline or an abandoned
+// request never reached the Shelly call.
+//
+// A context cancelled before the handler runs is used rather than a deadline,
+// so the test does not race a timer: if the plug's HTTP client actually reads
+// the context handed to it, the very first request built from it fails
+// immediately with ctx.Err(), and the fake plug never sees a request at all.
+// Under the old context.Background() this call would instead have gone out
+// over the wire and succeeded.
+func TestSetFansRespectsTheRequestContext(t *testing.T) {
+	plug := newFakePlug(t)
+	srv := testServer(t, plug, func(context.Context) power.RackActivity {
+		return power.RackActivity{}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, status, err := srv.handleFansOn(ctx, State{}, request{})
+	if err == nil {
+		t.Fatal("expected an error from a cancelled context, got none")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error = %v, want it to wrap context.Canceled", err)
+	}
+	if status != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", status, http.StatusBadGateway)
+	}
+	if got := plug.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: the cancelled context should have stopped the request before it was sent", got)
 	}
 }

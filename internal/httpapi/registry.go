@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/snonux/f3sctl/internal/coordination"
@@ -155,8 +156,15 @@ type route struct {
 	Available func(State) bool
 	// Fields describes the action's parameters for the current state.
 	Fields func(State) []Field
-	// Handle performs the route.
-	Handle func(*Server, State, request) (Entity, int, error)
+	// Handle performs the route. ctx is the request's context, taken from
+	// serve() and carried through to every Shelly/SSH/Gogios call a handler
+	// makes, so a slow backend is bounded by the request's own deadline
+	// rather than by a fresh context.Background() with no deadline at all.
+	// It is not threaded into coordination.Manager.Start's detached child
+	// spawn -- that job deliberately outlives the CGI request that started
+	// it, so it must not be cancelled when this context is (see
+	// handleAction and internal/coordination/run.go).
+	Handle func(*Server, context.Context, State, request) (Entity, int, error)
 }
 
 // routes is the complete API surface.

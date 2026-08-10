@@ -147,7 +147,7 @@ func (s *Server) serve(out io.Writer, req request) error {
 			fmt.Sprintf("%q is not available right now; re-fetch the resource and read its actions", r.Name))
 	}
 
-	entity, status, err := r.Handle(s, state, req)
+	entity, status, err := r.Handle(s, ctx, state, req)
 	if err != nil {
 		return s.siren.WriteError(out, status, err.Error())
 	}
