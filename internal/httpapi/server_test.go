@@ -75,6 +75,36 @@ func getRequest(path string) request {
 	}
 }
 
+// TestResolvePeerJobPathDerivesFromSCRIPTNAME is the regression test for uy0:
+// with cfg.PeerJobPath left at its empty default, the peer job path must
+// track this node's own mount point (router's base, built from SCRIPT_NAME)
+// rather than a hardcoded literal, so remounting the CGI script needs one
+// change, not a config edit on top of it.
+func TestResolvePeerJobPathDerivesFromSCRIPTNAME(t *testing.T) {
+	router := NewRouter("/cgi-bin/f3sctl")
+	cfg := config.Default()
+	cfg.PeerJobPath = ""
+
+	want := "/cgi-bin/f3sctl" + jobPath
+	if got := resolvePeerJobPath(cfg, router); got != want {
+		t.Errorf("resolvePeerJobPath(empty override) = %q, want %q", got, want)
+	}
+}
+
+// TestResolvePeerJobPathHonoursExplicitOverride covers the escape hatch: two
+// peers that are *not* mounted the same way still need a way to point at the
+// other node's real path, so an explicit config value must win over the
+// SCRIPT_NAME-derived default.
+func TestResolvePeerJobPathHonoursExplicitOverride(t *testing.T) {
+	router := NewRouter("/cgi-bin/f3sctl")
+	cfg := config.Default()
+	cfg.PeerJobPath = "/somewhere/else/job"
+
+	if got := resolvePeerJobPath(cfg, router); got != cfg.PeerJobPath {
+		t.Errorf("resolvePeerJobPath(explicit override) = %q, want %q", got, cfg.PeerJobPath)
+	}
+}
+
 // TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt is the regression test
 // for jy0: serve() used to call s.snapshot(ctx) unconditionally, which ran
 // Engine.ProbeAll (7 concurrent ping+TCP probes, ~3s) and Engine.FansStatus

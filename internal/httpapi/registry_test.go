@@ -11,18 +11,14 @@ import (
 	"github.com/snonux/f3sctl/internal/power"
 )
 
-// TestPeerJobPathMatchesTheJobRoute guards against the one way
-// config.Config.PeerJobPath and this package's own job route could silently
-// drift apart: they are two separate literals (see both doc comments) because
-// a peer is reached over a real HTTP connection where the CGI mount point
-// matters, but they still have to name the same resource, or PeerSet would
-// quietly ask every peer for a path nothing serves and every peer would
-// read back as idle forever.
-func TestPeerJobPathMatchesTheJobRoute(t *testing.T) {
-	const scriptName = "/cgi-bin/f3sctl" // bozohttpd's SCRIPT_NAME on pi0/pi1
-	want := scriptName + jobPath
-	if got := config.Default().PeerJobPath; got != want {
-		t.Errorf("config.Default().PeerJobPath = %q, want %q (SCRIPT_NAME + the job route's own path)", got, want)
+// TestDefaultPeerJobPathIsDerived guards the "derive it" half of
+// resolvePeerJobPath (see server.go): the compiled-in default must stay empty
+// so newServer always derives PeerJobPath from this node's own SCRIPT_NAME
+// rather than falling back to a stale literal that could silently drift from
+// this package's own job route.
+func TestDefaultPeerJobPathIsDerived(t *testing.T) {
+	if got := config.Default().PeerJobPath; got != "" {
+		t.Errorf("config.Default().PeerJobPath = %q, want \"\" (derived from SCRIPT_NAME by resolvePeerJobPath)", got)
 	}
 }
 

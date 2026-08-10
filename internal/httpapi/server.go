@@ -123,13 +123,32 @@ func newServer(cfg config.Config) (*Server, error) {
 		cfg:     cfg,
 		engine:  eng,
 		jobs:    coordination.NewManager(cfg.StateDir),
-		peers:   coordination.NewPeerSet(cfg.PeerNodes, cfg.PeerJobPath),
+		peers:   coordination.NewPeerSet(cfg.PeerNodes, resolvePeerJobPath(cfg, router)),
 		auth:    NewAuthenticator(cfg.APIKeyFile),
 		router:  router,
 		openapi: NewOpenAPIBuilder(router),
 		siren:   NewSirenRenderer(),
 		node:    node,
 	}, nil
+}
+
+// resolvePeerJobPath returns the URL path this node asks a peer for its
+// current job.
+//
+// An explicit cfg.PeerJobPath always wins, for the rare case where the two
+// peers are not mounted the same way. Otherwise (the default) it is derived
+// from this node's own mount via router.Href -- the identical mechanism
+// every link and action handed back to a client already goes through -- on
+// the assumption that pi0 and pi1 are symmetric peers sharing one CGI mount.
+// That keeps a SCRIPT_NAME remount a one-place change instead of two: without
+// this, an operator who moves the mount point but forgets the separate
+// peer_job_path config value gets a peer check that silently reads back as
+// idle forever, which is the dangerous failure mode -- two jobs can start.
+func resolvePeerJobPath(cfg config.Config, router *Router) string {
+	if cfg.PeerJobPath != "" {
+		return cfg.PeerJobPath
+	}
+	return router.Href(jobPath)
 }
 
 func (s *Server) serve(out io.Writer, req request) error {

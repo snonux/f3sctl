@@ -163,16 +163,22 @@ first readable entry wins, which lets one shipped config serve both the
   "shelly_password_file": ["/var/db/f3sctl/shelly_plug", "~/.shelly_plug"],
   "api_key_file":         "/var/db/f3sctl/apikey",
   "state_dir":            "/var/db/f3sctl",
-  "peer_nodes":           ["192.168.1.125", "192.168.1.126"],
-  "peer_job_path":        "/cgi-bin/f3sctl/job"
+  "peer_nodes":           ["192.168.1.125", "192.168.1.126"]
 }
 ```
 
 Host inventory (IPs, MACs, the broadcast address, the Shelly plug) lives in
 `internal/inventory` and can be overridden by the same file.
 
-`peer_nodes` and `peer_job_path` are the API's own other CGI nodes (pi0 and
-pi1) that `internal/coordination.PeerSet` asks "are you mid-job?" before
-starting one, so that relayd load-balancing two clicks apart can't start two
-conflicting jobs. Readdressing a Pi, adding a third API node, or moving the
-API elsewhere is therefore a config edit here, not a rebuild.
+`peer_nodes` are the API's own other CGI nodes (pi0 and pi1) that
+`internal/coordination.PeerSet` asks "are you mid-job?" before starting one,
+so that relayd load-balancing two clicks apart can't start two conflicting
+jobs. Readdressing a Pi, adding a third API node, or moving the API elsewhere
+is therefore a config edit here, not a rebuild.
+
+The URL path used for that check (`peer_job_path`) is left out of the example
+above on purpose: by default it is derived from this node's own SCRIPT_NAME
+plus its own `/job` route, on the assumption that both peers are mounted the
+same way -- so remounting the CGI script (changing SCRIPT_NAME) keeps every
+href *and* the peer check in sync automatically. Set `peer_job_path`
+explicitly only if the two peers are genuinely mounted differently.

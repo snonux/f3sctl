@@ -67,12 +67,16 @@ type Config struct {
 	// peer's current job is read from over plain HTTP, e.g.
 	// "/cgi-bin/f3sctl/job".
 	//
-	// This is deliberately a separate literal from httpapi's own "/job" route
-	// path (PATH_INFO, as CGI sees it, never includes SCRIPT_NAME) rather
-	// than the two being reassembled from one another: the peer is a
-	// different process on a different host, reached over a real HTTP
-	// connection where the mount point matters, and config is where a value
-	// that has to be the same on both nodes belongs.
+	// Empty (the default) means "derive it": httpapi.newServer builds it from
+	// this node's own SCRIPT_NAME plus its own "/job" route, the same
+	// mechanism every href handed back to a client already goes through. pi0
+	// and pi1 are symmetric peers running the same CGI mount, so this node's
+	// own mount point is the right answer for the other one too -- and it
+	// means remounting the script is one change (SCRIPT_NAME), not two.
+	//
+	// Set this explicitly only for the rarer case where the two peers are
+	// *not* mounted the same way; an explicit value always wins over the
+	// derivation.
 	PeerJobPath string `json:"peer_job_path"`
 
 	// APIURL is the endpoint --remote talks to. Set on clients (earth), unset
@@ -121,10 +125,12 @@ func Default() Config {
 			"/keys/shelly_plug.secret",
 			"~/.shelly_plug",
 		},
-		APIKeyFile:        "/var/db/f3sctl/apikey",
-		StateDir:          "/var/db/f3sctl",
-		PeerNodes:         []string{"192.168.1.125", "192.168.1.126"},
-		PeerJobPath:       "/cgi-bin/f3sctl/job",
+		APIKeyFile: "/var/db/f3sctl/apikey",
+		StateDir:   "/var/db/f3sctl",
+		PeerNodes:  []string{"192.168.1.125", "192.168.1.126"},
+		// PeerJobPath is left empty so it is derived from this node's own
+		// SCRIPT_NAME at request time -- see the field's doc comment.
+		PeerJobPath:       "",
 		VMShutdownTimeout: Duration(240 * time.Second),
 		UnmuteTimeout:     Duration(1200 * time.Second),
 		ProbeTimeout:      Duration(2 * time.Second),
