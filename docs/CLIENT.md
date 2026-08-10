@@ -264,17 +264,37 @@ saying so is the point.
 
 All of these are optional and may be absent (an operation that has only just
 started, or an older server). Render what is there; do not require any of it.
-- Use a total timeout of at least **25 minutes** before declaring the job
-  lost. The worst case is the Gogios un-mute wait (`UnmuteTimeout`, 1200 s /
-  20 min by default) plus the wake prelude (fans, magic packets) and the
-  gateway SSH round trips that follow it -- budget at least **5 minutes** of
-  slack on top of `UnmuteTimeout` for those, since neither is bounded by
-  `UnmuteTimeout` itself. A client that timed out at 20 minutes flat used to
-  report "gave up" moments before a job that succeeded, because 20 minutes
-  matched `UnmuteTimeout`'s default with no slack at all. If your deployment
-  raises `UnmuteTimeout` in its config, raise your client's timeout by the
-  same amount. The server independently gives up on a job after 30 minutes and
-  marks it failed, so a client that waits will eventually be told either way.
+- `staleAfterSeconds` (present whenever a job entity is, i.e. not on the
+  `"state":"none"` shape) is **this node's own ceiling**: how long it lets a
+  job claim to be running before deciding the process behind it is gone (the
+  node rebooted mid-shutdown, say) and marking it `failed` on your behalf,
+  with a fabricated `"the process that owned this job is gone (node
+  restarted?)"` error. It is derived from that node's configured
+  `UnmuteTimeout` plus a fixed buffer -- **not** a flat 30 minutes -- so it
+  scales automatically whenever `UnmuteTimeout` is raised. Prefer deriving
+  your own poll deadline from it (`staleAfterSeconds * 1000` plus a minute or
+  so of slack for your own poll interval) over hardcoding a client-side
+  guess: a hardcoded number is a second, independent copy of the same value
+  that can only be kept in sync by an operator remembering to update it by
+  hand every time `UnmuteTimeout` changes -- which is exactly the bug that
+  first shipped this field (see `docs/client-reference.js`'s `waitForJob` for
+  a worked example, and this repo's history for both the client-side and
+  server-side incidents that motivated it).
+- Fall back to a total timeout of at least **25 minutes** only against a
+  server old enough not to send `staleAfterSeconds` (pre-`staleAfterSeconds`
+  servers still enforce their own, un-advertised ceiling internally --
+  historically a flat 30 minutes). That 25-minute floor comes from the Gogios
+  un-mute wait (`UnmuteTimeout`, 1200 s / 20 min by default) plus the wake
+  prelude (fans, magic packets) and the gateway SSH round trips that follow
+  it, which need roughly **5 minutes** of slack on top of `UnmuteTimeout`
+  since neither is bounded by `UnmuteTimeout` itself. A client that timed out
+  at 20 minutes flat used to report "gave up" moments before a job that
+  succeeded, because 20 minutes matched `UnmuteTimeout`'s default with no
+  slack at all -- the same false-negative class a hardcoded, unsynced client
+  timeout can still produce today if `staleAfterSeconds` is ignored: the
+  server's own ceiling now moves with `UnmuteTimeout`, so a client that never
+  re-derives its guess after an operator raises `UnmuteTimeout` will
+  eventually give up while the server-reported job is still healthy.
 
 `fans-on` and `fans-off` are **synchronous**: they return `200` with the plug's
 state read back from the device. No job, no polling.

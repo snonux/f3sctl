@@ -128,6 +128,18 @@ async function showStatus() {
   return status;
 }
 
+// jobWaitBufferMs is slack added on top of the server-advertised
+// staleAfterSeconds, for this client's own poll interval and the round trip
+// to fetch it.
+const jobWaitBufferMs = 60 * 1000;
+
+// fallbackTimeoutMs is used only against a server old enough not to advertise
+// staleAfterSeconds on the job resource (pre-kz0). It is the same guess this
+// file shipped with before lz0 -- UnmuteTimeout's shipped default (20 min)
+// plus 5 minutes of slack -- kept only as a last resort, not as the primary
+// mechanism anymore.
+const fallbackTimeoutMs = 25 * 60 * 1000;
+
 // waitForJob polls until the job stops running.
 //
 // It tolerates the job resource knowing nothing: relayd load-balances pi0 and
@@ -135,19 +147,37 @@ async function showStatus() {
 // section 9). Host state is the reliable completion signal; the job is how you
 // learn *why* something failed.
 //
-// The 25-minute default is UnmuteTimeout's default (20 min) plus 5 minutes of
-// slack for the wake prelude and gateway SSH round trips that follow it --
-// see CLIENT.md's job-polling section. A flat 20 minutes with no slack used
-// to make this throw "gave up" moments before a job that was about to
-// succeed; if the server's UnmuteTimeout is configured higher than its
-// default, pass a correspondingly larger timeoutMs.
-async function waitForJob(entry, timeoutMs = 25 * 60 * 1000) {
+// The poll budget is derived from each response's own "staleAfterSeconds"
+// property -- the answering node's coordination.Manager.StaleCeiling(),
+// itself derived from that node's configured UnmuteTimeout server-side (see
+// kz0) -- recomputed every poll rather than fixed once, so it self-corrects
+// if an early poll lands on a node with no job yet (state "none", no
+// staleAfterSeconds) before a later one reaches the node that actually holds
+// it. This closes lz0: before it, this file hardcoded its own 25-minute
+// guess, with nothing to derive from, because the API never exposed
+// UnmuteTimeout (or any server timeout) to a remote caller at all -- an
+// operator who raised UnmuteTimeout server-side had to remember to also bump
+// timeoutMs here by hand, the exact manual-sync-required pattern that caused
+// the original 2026-08-09 client-side bug this file's comment used to warn
+// about (see CLIENT.md's job-polling section, and internal/client/run.go's
+// jobWaitTimeout for the Go client's equivalent). An explicit timeoutMs still
+// overrides this outright; fallbackTimeoutMs is the last resort against a
+// server too old to advertise staleAfterSeconds.
+async function waitForJob(entry, timeoutMs = null) {
   const href = follow(entry, 'job');
-  const deadline = Date.now() + timeoutMs;
+  const start = Date.now();
 
-  while (Date.now() < deadline) {
+  for (;;) {
     await new Promise((r) => setTimeout(r, 10000));
     const job = await request(href);
+
+    const staleAfterSeconds = job.properties?.staleAfterSeconds;
+    const budgetMs = timeoutMs ??
+      (staleAfterSeconds != null ? staleAfterSeconds * 1000 + jobWaitBufferMs : fallbackTimeoutMs);
+    if (Date.now() - start > budgetMs) {
+      throw new Error('gave up waiting for the job');
+    }
+
     const s = job.properties?.state;
     if (s === 'none') continue;
     if (s !== 'running') {
@@ -156,7 +186,6 @@ async function waitForJob(entry, timeoutMs = 25 * 60 * 1000) {
     }
     console.log('…still running');
   }
-  throw new Error('gave up waiting for the job');
 }
 
 // run performs a named action.

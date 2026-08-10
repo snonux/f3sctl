@@ -44,7 +44,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 	router := NewRouter("")
 	srv := &Server{
 		cfg:     config.Default(),
-		jobs:    coordination.NewManager(dir),
+		jobs:    coordination.NewManager(dir, config.Default().UnmuteTimeout.D()),
 		peers:   coordination.NewPeerSet(nil, ""),
 		auth:    NewAuthenticator(keyFile),
 		router:  router,

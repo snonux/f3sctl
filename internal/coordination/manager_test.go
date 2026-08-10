@@ -6,13 +6,26 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/config"
 )
 
+// defaultUnmuteTimeout is config.Default().UnmuteTimeout.D(), used throughout
+// this file so newTestManager's staleCeiling matches the shipped default
+// (20m + staleBuffer's 10m = the historical fixed 30m) unless a test
+// deliberately overrides it to prove the ceiling now tracks UnmuteTimeout.
+const defaultUnmuteTimeout = 20 * time.Minute
+
 // newTestManager returns a Manager rooted at a fresh temp dir, so tests never
-// touch a real /var/db/f3sctl.
+// touch a real /var/db/f3sctl. Its staleCeiling matches config.Default(), the
+// same UnmuteTimeout every production NewManager call site is built from.
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
-	return NewManager(t.TempDir())
+	if got := config.Default().UnmuteTimeout.D(); got != defaultUnmuteTimeout {
+		t.Fatalf("config.Default().UnmuteTimeout = %s, want %s: defaultUnmuteTimeout "+
+			"must track it or the tests below silently stop meaning what they say", got, defaultUnmuteTimeout)
+	}
+	return NewManager(t.TempDir(), defaultUnmuteTimeout)
 }
 
 // TestManagerReadReturnsNilBeforeAnyJob pins the "nothing has ever run" state
@@ -180,6 +193,60 @@ func TestManagerReadDoesNotFlagARecentRunningJobAsStale(t *testing.T) {
 	got := m.Read()
 	if got == nil || got.State != JobRunning {
 		t.Fatalf("Read() = %+v, want the job to still read as running", got)
+	}
+}
+
+// TestManagerReadTracksAConfiguredUnmuteTimeout is the regression test for
+// kz0: a job started under a raised UnmuteTimeout (37m, matching the
+// 2026-08-09 600s -> 1200s change plus headroom, and the same value gy0's
+// TestJobWaitTimeoutTracksConfiguredUnmuteTimeout pins on the client side)
+// must not be marked stale at the fixed 30m the old code used. It sits at
+// 35m -- past the old fixed ceiling, but comfortably within
+// 37m+staleBuffer -- so this only passes if stale() actually reads
+// m.staleCeiling instead of a hardcoded 30*time.Minute.
+func TestManagerReadTracksAConfiguredUnmuteTimeout(t *testing.T) {
+	m := NewManager(t.TempDir(), 37*time.Minute)
+	old := time.Now().Add(-35 * time.Minute).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "still-going", State: JobRunning, Started: old}); err != nil {
+		t.Fatalf("seeding a running job: %v", err)
+	}
+
+	got := m.Read()
+	if got == nil || got.State != JobRunning {
+		t.Errorf("Read() = %+v, want State=%q: a 35m-old job must still read as running "+
+			"when UnmuteTimeout=37m, the same false-negative class gy0 fixed on the client, "+
+			"just on the server's own staleness ceiling", got, JobRunning)
+	}
+}
+
+// TestManagerReadStillFlagsStaleBeyondTheConfiguredCeiling is
+// TestManagerReadTracksAConfiguredUnmuteTimeout's companion: raising the
+// ceiling must not turn the check into a no-op. A job far beyond even a
+// generous 37m UnmuteTimeout's derived ceiling is still a crashed process,
+// not a slow one, and must still be reclassified failed -- preserving the
+// safety direction the staleness check exists for.
+func TestManagerReadStillFlagsStaleBeyondTheConfiguredCeiling(t *testing.T) {
+	m := NewManager(t.TempDir(), 37*time.Minute)
+	old := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "long-gone", State: JobRunning, Started: old}); err != nil {
+		t.Fatalf("seeding a stale job: %v", err)
+	}
+
+	got := m.Read()
+	if got == nil || got.State != JobFailed {
+		t.Errorf("Read() = %+v, want State=%q: a 2h-old job is a crashed process "+
+			"regardless of how generous UnmuteTimeout is configured", got, JobFailed)
+	}
+}
+
+// TestNewManagerDerivesStaleCeilingFromUnmuteTimeout pins the exact formula
+// (UnmuteTimeout + staleBuffer) rather than just its externally visible
+// effect, so a future change to the constant is caught here first.
+func TestNewManagerDerivesStaleCeilingFromUnmuteTimeout(t *testing.T) {
+	m := NewManager(t.TempDir(), 37*time.Minute)
+	want := 37*time.Minute + staleBuffer
+	if got := m.StaleCeiling(); got != want {
+		t.Errorf("StaleCeiling() = %s, want UnmuteTimeout + staleBuffer = %s", got, want)
 	}
 }
 

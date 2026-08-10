@@ -276,6 +276,16 @@ func (s *Server) jobEntity(j coordination.Job) Entity {
 		"started": j.Started,
 		"node":    j.Node,
 		"rc":      j.RC,
+		// staleAfterSeconds is this node's own coordination.Manager.stale
+		// ceiling (UnmuteTimeout + a buffer -- see kz0), in seconds. A remote
+		// client has no access to this node's UnmuteTimeout config, so before
+		// this it had nothing to derive its own poll deadline from and could
+		// only hardcode a guess that silently went stale the moment an
+		// operator raised UnmuteTimeout server-side (see lz0, and
+		// docs/client-reference.js's waitForJob). Reading it here instead
+		// keeps a client's patience and this node's own staleness judgment
+		// from ever being able to decouple again.
+		"staleAfterSeconds": int(s.jobs.StaleCeiling().Seconds()),
 	}
 	if j.Finished != "" {
 		props["finished"] = j.Finished
@@ -289,15 +299,7 @@ func (s *Server) jobEntity(j coordination.Job) Entity {
 	if j.Updated != "" {
 		props["updated"] = j.Updated
 	}
-	if len(j.Hosts) > 0 {
-		hosts := map[string]any{}
-		for name, hp := range j.Hosts {
-			entry := map[string]any{"phase": hp.Phase}
-			if hp.Detail != "" {
-				entry["detail"] = hp.Detail
-			}
-			hosts[name] = entry
-		}
+	if hosts := jobHostProps(j.Hosts); hosts != nil {
 		props["hosts"] = hosts
 	}
 	return Entity{
@@ -307,6 +309,24 @@ func (s *Server) jobEntity(j coordination.Job) Entity {
 		Properties: props,
 		Links:      []Link{{Rel: []string{"self"}, Href: s.router.Href("/job")}},
 	}
+}
+
+// jobHostProps renders a job's per-host progress as wire properties, or nil
+// when there is none yet. Split out of jobEntity to keep that function within
+// this repo's function-length guideline.
+func jobHostProps(hosts map[string]coordination.HostProgress) map[string]any {
+	if len(hosts) == 0 {
+		return nil
+	}
+	out := map[string]any{}
+	for name, hp := range hosts {
+		entry := map[string]any{"phase": hp.Phase}
+		if hp.Detail != "" {
+			entry["detail"] = hp.Detail
+		}
+		out[name] = entry
+	}
+	return out
 }
 
 // handleAction returns a handler that starts a detached power job.

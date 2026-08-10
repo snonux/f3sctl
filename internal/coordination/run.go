@@ -40,7 +40,7 @@ func RunJob(cfg config.Config, args []string) error {
 	if dir == "" {
 		dir = cfg.StateDir
 	}
-	mgr := NewManager(dir)
+	mgr := NewManager(dir, cfg.UnmuteTimeout.D())
 
 	err := cli.RunLocal(cfg, args, os.Stdout, os.Stderr, jobReporter{mgr: mgr})
 

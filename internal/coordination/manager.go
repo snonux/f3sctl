@@ -89,6 +89,21 @@ func newJobID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// staleBuffer is added on top of the configured UnmuteTimeout to get the
+// server's staleness ceiling (Manager.staleCeiling).
+//
+// It mirrors internal/client.jobWaitBuffer's reasoning (see that constant's
+// doc comment, added by gy0): UnmuteTimeout alone is not a job's full
+// worst-case runtime. On the wake path there is the fan/WoL prelude and the
+// gateway SSH round trips that follow waitForCluster; on the shutdown path
+// there is Off's own worst case (three hosts at VMShutdownTimeout, 240s each
+// by default, ~12m), which has nothing to do with UnmuteTimeout at all. Ten
+// minutes covers either, and keeps the default ceiling unchanged (20m
+// UnmuteTimeout + 10m = the old fixed 30m) while now scaling with an
+// operator-raised UnmuteTimeout instead of silently falling behind it -- see
+// kz0.
+const staleBuffer = 10 * time.Minute
+
 // Manager owns the on-disk lifecycle of one node's power job: claiming the
 // lock, spawning the detached child that actually runs it, recording its
 // progress, and reading the result back for a client to render.
@@ -99,6 +114,12 @@ type Manager struct {
 	// dir holds job.json, job.lock and job.log.
 	dir string
 
+	// staleCeiling is how long a job may claim to be running before Read
+	// reclassifies it as failed -- see stale(). Derived from the configured
+	// UnmuteTimeout at construction time (NewManager) rather than a fixed
+	// constant, so raising UnmuteTimeout raises this ceiling too. See kz0.
+	staleCeiling time.Duration
+
 	// spawnFunc starts the detached child that actually performs a job's
 	// args. Nil means the real re-exec of this binary (see spawn); only
 	// tests substitute anything else, the same seam as PeerSet.fetch, so
@@ -108,7 +129,15 @@ type Manager struct {
 }
 
 // NewManager returns a Manager whose state lives under dir.
-func NewManager(dir string) *Manager { return &Manager{dir: dir} }
+//
+// unmuteTimeout is the configured UnmuteTimeout (config.Config.UnmuteTimeout,
+// passed as a plain time.Duration rather than the whole config -- the same
+// minimal-surface pattern NewPeerSet uses for PeerNodes/jobPath). It is used
+// only to derive staleCeiling; see staleBuffer's doc comment for why the
+// ceiling must track it.
+func NewManager(dir string, unmuteTimeout time.Duration) *Manager {
+	return &Manager{dir: dir, staleCeiling: unmuteTimeout + staleBuffer}
+}
 
 func (m *Manager) statePath() string { return filepath.Join(m.dir, "job.json") }
 func (m *Manager) lockPath() string  { return filepath.Join(m.dir, "job.lock") }
@@ -136,15 +165,30 @@ func (m *Manager) Read() *Job {
 }
 
 // stale reports whether a job claiming to run has outlived any plausible
-// runtime. The bound is generous: three hosts at 240s each, plus the Gogios
-// un-mute wait, plus slack.
+// runtime, judged against m.staleCeiling (UnmuteTimeout + staleBuffer -- see
+// NewManager and staleBuffer's doc comment). Before kz0 this was a fixed 30
+// minutes, which quietly stopped being generous enough the moment an operator
+// raised UnmuteTimeout past ~25m (as happened 2026-08-09, 600s -> 1200s, to
+// survive a slow ntpd_sync_on_start): the server would call a perfectly
+// healthy job "failed" while the client was still patiently waiting on the
+// same, larger, UnmuteTimeout-derived deadline (internal/client.jobWaitTimeout,
+// gy0). Deriving both from the same config value is what keeps them from
+// decoupling again.
 func (m *Manager) stale(j Job) bool {
 	started, err := time.Parse(time.RFC3339, j.Started)
 	if err != nil {
 		return true
 	}
-	return time.Since(started) > 30*time.Minute
+	return time.Since(started) > m.staleCeiling
 }
+
+// StaleCeiling returns how long a job may run before Read reclassifies it as
+// failed. Exposed so httpapi can advertise it on the job resource
+// (jobEntity's "staleAfterSeconds"), letting a remote client -- which has no
+// access to this node's UnmuteTimeout config -- derive its own poll deadline
+// from the server's actual effective value instead of a second, independently
+// hardcoded guess. See lz0.
+func (m *Manager) StaleCeiling() time.Duration { return m.staleCeiling }
 
 func (m *Manager) write(j Job) error {
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {

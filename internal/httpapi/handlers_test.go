@@ -12,8 +12,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -103,6 +105,39 @@ func coldSnapshot() State {
 // forced is a POST /fans/off carrying the confirmation checkbox.
 func forced() request {
 	return request{Form: url.Values{"force": []string{"true"}}}
+}
+
+// TestJobEntityAdvertisesStaleAfterSecondsFromTheManager pins lz0's half of
+// the fix: the job entity's wire properties must carry this node's own
+// staleness ceiling (s.jobs.StaleCeiling(), UnmuteTimeout-derived as of kz0)
+// under "staleAfterSeconds", not a value made up here -- a remote client (see
+// docs/client-reference.js's waitForJob) has no other way to learn it.
+//
+// Two different UnmuteTimeouts are checked to prove this reads the live
+// ceiling rather than a compile-time constant that happens to match one case.
+func TestJobEntityAdvertisesStaleAfterSecondsFromTheManager(t *testing.T) {
+	for _, unmute := range []time.Duration{20 * time.Minute, 37 * time.Minute} {
+		t.Run(unmute.String(), func(t *testing.T) {
+			srv := &Server{
+				jobs:   coordination.NewManager(t.TempDir(), unmute),
+				router: NewRouter(""),
+			}
+			want := int(srv.jobs.StaleCeiling().Seconds())
+
+			e := srv.jobEntity(coordination.Job{
+				ID: "x", State: coordination.JobRunning,
+				Started: time.Now().UTC().Format(time.RFC3339),
+			})
+
+			got, ok := e.Properties["staleAfterSeconds"].(int)
+			if !ok {
+				t.Fatalf("Properties[%q] = %#v (%T), want an int", "staleAfterSeconds", e.Properties["staleAfterSeconds"], e.Properties["staleAfterSeconds"])
+			}
+			if got != want {
+				t.Errorf("staleAfterSeconds = %d, want %d (StaleCeiling() for UnmuteTimeout=%s)", got, want, unmute)
+			}
+		})
+	}
 }
 
 // TestHostEntityReportsWhetherTheProbeRan pins the wire contract the fan guard
