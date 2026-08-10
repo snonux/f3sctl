@@ -54,6 +54,19 @@ type Server struct {
 	// Nil means the engine's own probe; only tests substitute anything else.
 	// See Server.confirmRack.
 	rackConfirm func(context.Context) power.RackActivity
+
+	// probeHosts probes every host worth reporting, feeding State.Hosts. Nil
+	// means the engine's own probe (Engine.ProbeAll, ~3s of concurrent
+	// ping+TCP dials); only tests substitute anything else -- to count calls,
+	// or to avoid paying for real network probes when what is under test is
+	// whether snapshot() ran them at all. See Server.probeHostsFn.
+	probeHosts func(context.Context) []power.HostStatus
+
+	// fansStatus reads the rack-fan Shelly plug, feeding State.Fans and
+	// State.FansErr. Nil means the engine's own read (Engine.FansStatus, an
+	// HTTP call bounded by a 5s timeout); same reasoning as probeHosts. See
+	// Server.fansStatusFn.
+	fansStatus func(context.Context) (power.FansState, error)
 }
 
 // request is the parsed CGI request.
@@ -136,7 +149,7 @@ func (s *Server) serve(out io.Writer, req request) error {
 	}
 
 	ctx := context.Background()
-	state := s.enrichState(ctx, s.snapshot(ctx), req)
+	state := s.enrichState(ctx, s.snapshot(ctx, req), req)
 
 	// An action that is not currently available is refused here, before any
 	// handler runs. A well-written client never reaches this: it was not
@@ -160,14 +173,70 @@ func (s *Server) serve(out io.Writer, req request) error {
 	return s.siren.WriteEntity(out, status, entity)
 }
 
-// snapshot probes everything the availability predicates need, once.
-func (s *Server) snapshot(ctx context.Context) State {
-	st := State{
-		Hosts: s.engine.ProbeAll(ctx),
-		Job:   s.jobs.Read(),
+// snapshot probes what the requested route actually needs, once.
+//
+// Job is a local disk read (coordination.Manager.Read), cheap enough to take
+// unconditionally. Hosts and Fans are not: Hosts costs Engine.ProbeAll, 7
+// concurrent ping+TCP probes bounded by ProbeTimeout+1s each (~3s total);
+// Fans costs Engine.FansStatus, an HTTP round trip to the Shelly plug bounded
+// by a 5s timeout. Every Available predicate and every handler that reads
+// either lives in routes whose Path does NOT satisfy skipsProbe -- see that
+// function's doc for the routes excluded and why each one's handler and
+// predicates provably never look at state.Hosts or state.Fans. Paying for
+// both on every request used to mean /job, polled every 10s through a
+// multi-minute shutdown, waited out a full fleet probe and a plug read for
+// data it discards.
+func (s *Server) snapshot(ctx context.Context, req request) State {
+	st := State{Job: s.jobs.Read()}
+
+	if !skipsProbe(req.Path) {
+		st.Hosts = s.probeHostsFn()(ctx)
+		st.Fans, st.FansErr = s.fansStatusFn()(ctx)
 	}
-	st.Fans, st.FansErr = s.engine.FansStatus(ctx)
 	return st
+}
+
+// skipsProbe reports whether a route never reads State.Hosts or State.Fans,
+// in its handler or in any Available/Fields predicate the router evaluates
+// while rendering it -- so snapshot() can skip the fleet probe and the Shelly
+// read for it entirely.
+//
+// The three cases, verified against the current handlers and registry.go
+// rather than assumed:
+//   - jobPath (handleJob) renders only state.Job.
+//   - the "/monitoring" family (handleMonitoring, handleMute, handleUnmute,
+//     and the monitoring-mute/monitoring-unmute Available predicates) reads
+//     only state.Monitoring, populated separately by enrichState.
+//   - openAPIPath (handleOpenAPI) ignores State completely: OpenAPIBuilder
+//     renders every route's Fields against a synthetic widestState(), not the
+//     request's own state (see openapi.go).
+//
+// Router.Actions/ActionsFor, called from handleRoot/handleStatus/handleFans/
+// handleMonitoring, evaluate every action route's Available predicate before
+// filtering by name -- including ones that do read Hosts/Fans -- but a
+// skipped route's own handler never renders that unfiltered result, so a
+// zero-value Hosts/Fans reaching those predicates only produces answers that
+// get discarded, never ones a client sees.
+func skipsProbe(path string) bool {
+	return path == jobPath || path == openAPIPath || strings.HasPrefix(path, "/monitoring")
+}
+
+// probeHostsFn returns the fleet probe, falling back to the engine's real
+// one. Same nil-safety pattern as Server.confirmRack.
+func (s *Server) probeHostsFn() func(context.Context) []power.HostStatus {
+	if s.probeHosts != nil {
+		return s.probeHosts
+	}
+	return s.engine.ProbeAll
+}
+
+// fansStatusFn returns the Shelly plug read, falling back to the engine's
+// real one. Same nil-safety pattern as Server.confirmRack.
+func (s *Server) fansStatusFn() func(context.Context) (power.FansState, error) {
+	if s.fansStatus != nil {
+		return s.fansStatus
+	}
+	return s.engine.FansStatus
 }
 
 // enrichState adds the request-scoped facts that cost more than the local
