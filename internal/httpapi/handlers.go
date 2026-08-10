@@ -346,8 +346,18 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 }
 
 // jobArgs maps a job action identifier to the CLI invocation the detached
-// child runs, by finding the route it belongs to (matched on route.jobAction,
-// see registry.go) and splitting its declared CLIVerb into words.
+// child runs. It is jobArgsFrom bound to the real route table; see that
+// function for the derivation and registry_test.go's consistency tests for
+// what it guards against.
+func jobArgs(action string) []string {
+	return jobArgsFrom(routes(), action)
+}
+
+// jobArgsFrom finds the route whose job action identifier (route.jobAction,
+// see registry.go) is action, and splits its declared CLIVerb into words to
+// build the detached child's argv. Split out of jobArgs so a test can feed it
+// a synthetic route table -- e.g. one route with no CLIVerb declared -- and
+// check the fallback that never happens against the real registry.
 //
 // The child runs the very same code path as `f3sctl power off` typed at a
 // shell, which is what keeps the CLI and the API from ever diverging in what
@@ -357,8 +367,8 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 // silently disagree between them. Deriving the argv from CLIVerb instead
 // means the route declaration is the only place the words "power f1 on" are
 // written down.
-func jobArgs(action string) []string {
-	for _, r := range routes() {
+func jobArgsFrom(rs []route, action string) []string {
+	for _, r := range rs {
 		if r.Action && r.CLIVerb != "" && r.jobAction() == action {
 			return append([]string{"job-run"}, strings.Fields(r.CLIVerb)...)
 		}
