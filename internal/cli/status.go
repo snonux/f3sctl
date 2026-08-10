@@ -14,7 +14,11 @@ import (
 // Both signals are shown rather than a single "up" column, because the
 // combination is what tells you which state a host is in -- see
 // power.HostStatus.
-func printStatus(ctx context.Context, eng *power.Engine, out io.Writer) error {
+//
+// Takes powerEngine rather than *power.Engine so it has the same signature as
+// every other powerAction (see cli.go): the read-only verb needs no adapter,
+// but it still has to fit the same seam the on/off actions do.
+func printStatus(ctx context.Context, eng powerEngine, out io.Writer) error {
 	statuses := eng.ProbeAll(ctx)
 
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)

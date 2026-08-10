@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/power"
 )
 
 // fakeShelly stands in for the rack-fan Shelly plug.
@@ -421,6 +423,14 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 	// None of these route to the API: isShutdown only matches `power off` and
 	// `power <host> off`, so they all reach runPower locally, which is exactly
 	// where the misreading used to happen.
+	//
+	// "on off" and "status off" are here specifically for the routing bug: the
+	// old isShutdown checked only that a 3-token command ended in "off",
+	// ignoring the middle word, so both were misclassified as legitimate
+	// shutdowns and sent to runRemote instead of ever reaching runPower's
+	// validation -- producing a confusing API-key/HTTP error here rather than
+	// the "unknown power command" this test asserts on. See TestIsShutdown
+	// AgreesWithPowerActionFor below for the direct unit-level check.
 	for _, args := range [][]string{
 		{"on", "f3"},
 		{"off", "f2"},
@@ -431,6 +441,8 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 		{"on", "f0", "f1"},
 		{"f0", "on", "off"},
 		{"all", "on", "off"},
+		{"on", "off"},
+		{"status", "off"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			shelly := newFakeShelly(t, true)
@@ -455,6 +467,60 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 				t.Errorf("Switch.Set calls = %v, want none: the fan plug must be untouched", got)
 			}
 		})
+	}
+}
+
+// TestIsShutdownAgreesWithPowerActionFor is the direct unit-level regression
+// test for the routing bug: isShutdown used to check only that a 3-token
+// command ended in "off", ignoring args[1] entirely, so
+// isShutdown([]string{"power", "on", "off"}) and
+// isShutdown([]string{"power", "status", "off"}) both came back true --
+// misreading a malformed spelling as a legitimate shutdown and sending it to
+// runRemote before powerActionFor ever saw it. It must agree with
+// powerActionFor on every case here: shutdown if and only if
+// powerActionFor(args[1:]) resolves and the verb it names is "off".
+func TestIsShutdownAgreesWithPowerActionFor(t *testing.T) {
+	for _, args := range [][]string{
+		{"power", "off"},
+		{"power", "on"},
+		{"power", "status"},
+		{"power", "all", "off"},
+		{"power", "all", "on"},
+		{"power", "f3", "off"},
+		{"power", "f3", "on"},
+		{"power", "on", "off"},     // the misclassified spelling
+		{"power", "status", "off"}, // the other misclassified spelling
+		{"power", "off", "on"},
+		{"power", "on", "f3"},
+		{"power", "off", "f2"},
+		{"monitoring", "mute"},
+		{},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var want bool
+			if len(args) > 0 && args[0] == "power" {
+				sp, ok := parsePowerArgs(args[1:])
+				want = ok && sp.verb == "off"
+			}
+			if got := isShutdown(args); got != want {
+				t.Errorf("isShutdown(%v) = %v, want %v", args, got, want)
+			}
+		})
+	}
+
+	// The two malformed spellings the reviewer verified concretely: neither
+	// may be classified as a shutdown, or globalFlags.useAPI routes them to
+	// the API before powerActionFor ever gets a look.
+	for _, args := range [][]string{
+		{"power", "on", "off"},
+		{"power", "status", "off"},
+	} {
+		if isShutdown(args) {
+			t.Errorf("isShutdown(%v) = true, want false: not a real shutdown spelling", args)
+		}
+		if (globalFlags{}).useAPI(args) {
+			t.Errorf("globalFlags{}.useAPI(%v) = true, want false: must stay local and hit powerActionFor's validation", args)
+		}
 	}
 }
 
@@ -563,10 +629,12 @@ func TestPowerStatusPrintsTheTable(t *testing.T) {
 	}
 }
 
-// TestPowerActionForCoversEveryAcceptedSpelling is the table's own test: the
-// off spellings cannot be driven end to end from here (they SSH into the rack),
-// so this at least pins that each one still resolves to an action and that no
-// arity around them does.
+// TestPowerActionForCoversEveryAcceptedSpelling is the table's own test: it
+// pins which spellings resolve to an action at all and which are rejected.
+// It does NOT tell the accepted spellings apart from one another -- a
+// non-nil action and no error looks the same whether powerActionFor bound
+// On or Off, which is exactly what TestPowerActionForBindsTheRightMethod
+// below is for.
 func TestPowerActionForCoversEveryAcceptedSpelling(t *testing.T) {
 	for _, args := range [][]string{
 		{"status"}, {"on"}, {"off"},
@@ -585,9 +653,107 @@ func TestPowerActionForCoversEveryAcceptedSpelling(t *testing.T) {
 	for _, args := range [][]string{
 		{}, {"onn"}, {"on", "off"}, {"all"}, {"f0"}, {"status", "f0"},
 		{"on", "f3"}, {"off", "f2"}, {"all", "on", "off"},
+		// A verb where a host name belongs, the two spellings the doc comment
+		// on the isPowerVerb branch (cli.go) actually cites as motivating
+		// examples -- kept alongside {"on", "off"} above rather than just it.
+		{"off", "on"}, {"status", "on"},
 	} {
 		if _, err := powerActionFor(args); err == nil {
 			t.Errorf("powerActionFor(%v) accepted a spelling nothing documents", args)
 		}
+	}
+}
+
+// spyEngine is a fake powerEngine that only records which method ran and
+// with what host argument, standing in for a genuine *power.Engine so
+// TestPowerActionForBindsTheRightMethod can pin exactly which Engine method
+// powerActionFor bound to a given spelling.
+//
+// It exists because Off, OffAll and OffHost dial real SSH connections on a
+// genuine *power.Engine -- driving those over the network is not an option
+// for a hermetic unit test -- and because a method-swap mutation (binding
+// the "off" slot to On instead of Off) has the identical func signature as
+// the correct binding, so nothing short of actually calling the resolved
+// action can tell the two apart.
+type spyEngine struct {
+	calls []string
+	hosts []string
+}
+
+func (s *spyEngine) On(context.Context, io.Writer) error     { return s.record("On", "") }
+func (s *spyEngine) Off(context.Context, io.Writer) error    { return s.record("Off", "") }
+func (s *spyEngine) OnAll(context.Context, io.Writer) error  { return s.record("OnAll", "") }
+func (s *spyEngine) OffAll(context.Context, io.Writer) error { return s.record("OffAll", "") }
+
+func (s *spyEngine) OnHost(_ context.Context, _ io.Writer, name string) error {
+	return s.record("OnHost", name)
+}
+
+func (s *spyEngine) OffHost(_ context.Context, _ io.Writer, name string) error {
+	return s.record("OffHost", name)
+}
+
+func (s *spyEngine) ProbeAll(context.Context) []power.HostStatus {
+	_ = s.record("ProbeAll", "")
+	return nil
+}
+
+func (s *spyEngine) FansStatus(context.Context) (power.FansState, error) {
+	return power.FansState{}, nil
+}
+
+func (s *spyEngine) record(call, host string) error {
+	s.calls = append(s.calls, call)
+	if host != "" {
+		s.hosts = append(s.hosts, host)
+	}
+	return nil
+}
+
+// TestPowerActionForBindsTheRightMethod invokes each resolved powerAction
+// against a spy engine and asserts which method actually ran. This is the
+// regression test for a method-swap mutation on the off side (e.g. binding
+// the "off" slot to powerEngine.On): TestPowerActionForCoversEveryAccepted
+// Spelling above only checks that powerActionFor returns a non-nil action and
+// no error, which looks identical either way. The on side already gets this
+// for free from the end-to-end tests above, which pin it by which hosts get
+// woken; the off side cannot be driven the same way without real SSH, so it
+// needs the spy instead.
+func TestPowerActionForBindsTheRightMethod(t *testing.T) {
+	tests := []struct {
+		args []string
+		call string
+		host string
+	}{
+		{[]string{"status"}, "ProbeAll", ""},
+		{[]string{"on"}, "On", ""},
+		{[]string{"off"}, "Off", ""},
+		{[]string{"all", "on"}, "OnAll", ""},
+		{[]string{"all", "off"}, "OffAll", ""},
+		{[]string{"f0", "on"}, "OnHost", "f0"},
+		{[]string{"f0", "off"}, "OffHost", "f0"},
+		{[]string{"f3", "on"}, "OnHost", "f3"},
+		{[]string{"f3", "off"}, "OffHost", "f3"},
+	}
+
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.args, "_"), func(t *testing.T) {
+			act, err := powerActionFor(tt.args)
+			if err != nil {
+				t.Fatalf("powerActionFor(%v): %v", tt.args, err)
+			}
+
+			spy := &spyEngine{}
+			if err := act(context.Background(), spy, io.Discard); err != nil {
+				t.Fatalf("action for %v: %v", tt.args, err)
+			}
+
+			if len(spy.calls) != 1 || spy.calls[0] != tt.call {
+				t.Errorf("calls = %v, want [%s]", spy.calls, tt.call)
+			}
+			if tt.host != "" && (len(spy.hosts) != 1 || spy.hosts[0] != tt.host) {
+				t.Errorf("hosts = %v, want [%s]", spy.hosts, tt.host)
+			}
+		})
 	}
 }

@@ -80,15 +80,23 @@ func isMonitoring(args []string) bool {
 	return len(args) == 2 && args[0] == "monitoring"
 }
 
-// isShutdown reports whether args ask for a host to be powered off.
+// isShutdown reports whether args ask for a host, group, or the whole rack to
+// be powered off.
+//
+// Built on parsePowerArgs -- the same parse powerActionFor uses (cli.go) --
+// rather than pattern-matching args itself. It used to check only that a
+// 3-token command ended in "off", ignoring the middle word entirely, so any
+// `power <anything> off` -- including the malformed `power on off` and
+// `power status off` -- was classified as a legitimate shutdown and routed
+// straight to runRemote, never reaching powerActionFor's validation. Sharing
+// the parse means the routing decision here and the local dispatch cannot
+// disagree about which spellings are valid.
 func isShutdown(args []string) bool {
-	switch {
-	case len(args) == 2 && args[0] == "power" && args[1] == "off":
-		return true
-	case len(args) == 3 && args[0] == "power" && args[2] == "off":
-		return true
+	if len(args) == 0 || args[0] != "power" {
+		return false
 	}
-	return false
+	sp, ok := parsePowerArgs(args[1:])
+	return ok && sp.verb == "off"
 }
 
 // runRemote drives the command through the HTTP API.
