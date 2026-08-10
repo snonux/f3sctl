@@ -5,9 +5,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
+
+// TestPeerJobPathMatchesTheJobRoute guards against the one way
+// config.Config.PeerJobPath and this package's own job route could silently
+// drift apart: they are two separate literals (see both doc comments) because
+// a peer is reached over a real HTTP connection where the CGI mount point
+// matters, but they still have to name the same resource, or PeerSet would
+// quietly ask every peer for a path nothing serves and every peer would
+// read back as idle forever.
+func TestPeerJobPathMatchesTheJobRoute(t *testing.T) {
+	const scriptName = "/cgi-bin/f3sctl" // bozohttpd's SCRIPT_NAME on pi0/pi1
+	want := scriptName + jobPath
+	if got := config.Default().PeerJobPath; got != want {
+		t.Errorf("config.Default().PeerJobPath = %q, want %q (SCRIPT_NAME + the job route's own path)", got, want)
+	}
+}
 
 // TestOpenAPICoversEveryRoute is the guard that keeps the two halves of
 // "self-describing" honest: the Siren actions a client sees at runtime and the
@@ -93,7 +110,7 @@ func TestActionAvailability(t *testing.T) {
 	busy := State{
 		Hosts: allUp.Hosts,
 		Fans:  power.FansState{On: true},
-		Job:   &Job{State: JobRunning, Action: "off"},
+		Job:   &coordination.Job{State: coordination.JobRunning, Action: "off"},
 	}
 
 	cases := []struct {

@@ -18,6 +18,7 @@ import (
 	"github.com/snonux/f3sctl/internal/agent"
 	"github.com/snonux/f3sctl/internal/cli"
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/httpapi"
 )
 
@@ -51,7 +52,7 @@ func run() error {
 	// records the outcome for a polling client. Internal, not part of the
 	// documented CLI surface.
 	if len(os.Args) > 1 && os.Args[1] == "job-run" {
-		return httpapi.RunJob(cfg, os.Args[2:])
+		return coordination.RunJob(cfg, os.Args[2:])
 	}
 
 	// bozohttpd sets GATEWAY_INTERFACE=CGI/1.1 (verified on NetBSD 11.0), and

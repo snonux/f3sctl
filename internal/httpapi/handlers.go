@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/snonux/f3sctl/internal"
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -266,7 +267,7 @@ func (s *Server) handleJob(state State, _ request) (Entity, int, error) {
 	return e, http.StatusOK, nil
 }
 
-func (s *Server) jobEntity(j Job) Entity {
+func (s *Server) jobEntity(j coordination.Job) Entity {
 	props := map[string]any{
 		"id":      j.ID,
 		"action":  j.Action,
@@ -317,13 +318,13 @@ func handleAction(action string) func(*Server, State, request) (Entity, int, err
 		// requests that reach THIS node, and relayd load-balances the two, so
 		// without this two clicks seconds apart start two shutdowns against
 		// the same hosts -- observed on 2026-08-08.
-		if busy, node := s.peerJobRunning(req.APIKey); busy {
+		if busy, node := s.peers.Busy(s.node, req.APIKey); busy {
 			return Entity{}, http.StatusConflict,
 				fmt.Errorf("a power operation is already running on %s", node)
 		}
 
-		job, err := s.jobs.start(action, jobArgs(action))
-		if errors.Is(err, errJobRunning) {
+		job, err := s.jobs.Start(action, jobArgs(action))
+		if errors.Is(err, coordination.ErrJobRunning) {
 			return Entity{}, http.StatusConflict, err
 		}
 		if err != nil {

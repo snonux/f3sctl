@@ -12,14 +12,28 @@ import (
 	"strings"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
 // Server answers one CGI request.
+//
+// It owns no coordination logic of its own: whether a job may start, whether
+// the peer node is busy, and the job's lifecycle all live in
+// internal/coordination, injected here as jobs and peers. Server's job is
+// HTTP transport and rendering -- parse the request, ask engine/jobs/peers
+// what is true, render the answer as Siren.
 type Server struct {
 	cfg    config.Config
 	engine *power.Engine
-	jobs   jobStore
+	// jobs owns the on-disk lifecycle of a power job started by this node:
+	// claiming the lock, spawning the detached child, and reading back its
+	// progress. See internal/coordination.Manager.
+	jobs *coordination.Manager
+	// peers answers whether the *other* API node is currently running a job,
+	// so a client is never offered an action that job would conflict with.
+	// See internal/coordination.PeerSet.
+	peers *coordination.PeerSet
 	// base is the URL prefix every href is built from -- bozohttpd's
 	// SCRIPT_NAME, e.g. "/cgi-bin/f3sctl". Hrefs are absolute paths so a
 	// client never has to know how the API is mounted.
@@ -80,7 +94,8 @@ func newServer(cfg config.Config) (*Server, error) {
 	return &Server{
 		cfg:    cfg,
 		engine: eng,
-		jobs:   jobStore{dir: cfg.StateDir},
+		jobs:   coordination.NewManager(cfg.StateDir),
+		peers:  coordination.NewPeerSet(cfg.PeerNodes, cfg.PeerJobPath),
 		base:   strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/"),
 		node:   node,
 	}, nil
@@ -117,11 +132,11 @@ func (s *Server) serve(out io.Writer, req request) error {
 	// /job renders no actions, so it has no use for the answer anyway.
 	// openapi.json describes the surface rather than the moment.
 	//
-	// An unreachable peer counts as idle, for the same reason peerJobRunning
+	// An unreachable peer counts as idle, for the same reason PeerSet.Busy
 	// gives: if one node is down the other must still be able to power the
 	// cluster on.
 	if req.Path != openAPIPath && req.Path != jobPath {
-		state.PeerBusy, _ = s.peerJobRunning(req.APIKey)
+		state.PeerBusy, _ = s.peers.Busy(s.node, req.APIKey)
 	}
 
 	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
@@ -183,7 +198,7 @@ func (s *Server) authenticate(req request) error {
 func (s *Server) snapshot(ctx context.Context) State {
 	st := State{
 		Hosts: s.engine.ProbeAll(ctx),
-		Job:   s.jobs.read(),
+		Job:   s.jobs.Read(),
 	}
 	st.Fans, st.FansErr = s.engine.FansStatus(ctx)
 	return st

@@ -3,9 +3,20 @@ package httpapi
 import (
 	"net/http"
 
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
+
+// jobPath is PATH_INFO for the job route, as CGI sees it -- i.e. without the
+// SCRIPT_NAME mount point. This is a different value from
+// config.Config.PeerJobPath, which is the *full* URL path a peer's job is
+// fetched from over a real HTTP connection; see that field's doc comment.
+//
+// Named so Server.serve can exclude it from triggering a peer check of its
+// own: a peer check that recurses into another peer check makes each node's
+// answer wait on the other's.
+const jobPath = "/job"
 
 // State is a snapshot of the world, taken once per request before anything is
 // rendered.
@@ -16,7 +27,7 @@ type State struct {
 	Hosts   []power.HostStatus
 	Fans    power.FansState
 	FansErr error
-	Job     *Job
+	Job     *coordination.Job
 	// Monitoring is the per-gateway Gogios mute state. Nil when it was not
 	// collected for this request: reading it costs two SSH round trips to the
 	// gateways, so only the routes that render it pay for it.
@@ -43,7 +54,7 @@ func (s State) monitoringMuted() bool { return power.AnyMuted(s.Monitoring) }
 // The peer half matters as much as the local half. Both nodes serve the same
 // hosts, so a job on either one makes a power action impossible on both.
 func (s State) jobRunning() bool {
-	return s.PeerBusy || (s.Job != nil && s.Job.State == JobRunning)
+	return s.PeerBusy || (s.Job != nil && s.Job.State == coordination.JobRunning)
 }
 
 // host returns the named host's status.
