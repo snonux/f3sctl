@@ -162,9 +162,17 @@ first readable entry wins, which lets one shipped config serve both the
   "ssh_identity":         ["/var/db/f3sctl/id_ed25519", "~/.ssh/id_ed25519"],
   "shelly_password_file": ["/var/db/f3sctl/shelly_plug", "~/.shelly_plug"],
   "api_key_file":         "/var/db/f3sctl/apikey",
-  "state_dir":            "/var/db/f3sctl"
+  "state_dir":            "/var/db/f3sctl",
+  "peer_nodes":           ["192.168.1.125", "192.168.1.126"],
+  "peer_job_path":        "/cgi-bin/f3sctl/job"
 }
 ```
 
 Host inventory (IPs, MACs, the broadcast address, the Shelly plug) lives in
 `internal/inventory` and can be overridden by the same file.
+
+`peer_nodes` and `peer_job_path` are the API's own other CGI nodes (pi0 and
+pi1) that `internal/coordination.PeerSet` asks "are you mid-job?" before
+starting one, so that relayd load-balancing two clicks apart can't start two
+conflicting jobs. Readdressing a Pi, adding a third API node, or moving the
+API elsewhere is therefore a config edit here, not a rebuild.
