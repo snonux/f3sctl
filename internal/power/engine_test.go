@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -900,13 +901,18 @@ func TestShutdownFailureSaysTheFansWereLeftOn(t *testing.T) {
 // TestAHandBuiltEngineFallsBackToTheRealProbes covers the nil seams on an
 // exported type.
 //
-// power.Engine is exported and its seams are plain func fields, so an Engine
-// that did not come from New carries nils in them -- and the first thing to
-// touch one would be the fan guard, which must neither crash nor fail open.
+// power.Engine is exported and its seams are plain fields, so an Engine that
+// did not come from New carries nils in them -- and the first thing to touch one
+// would be the fan guard, which must neither crash nor fail open.
 // cli.liveHostsFunc grew the same fallback, and a regression test with it,
 // after exactly this concern; the engine's seams had neither.
+//
+// The reporter is constructed nil on purpose. An earlier version of this test
+// passed report: nopReporter{}, and so could not see that the guard called
+// e.report.Step on a nil interface -- the claim above was half-delivered and the
+// test was what hid it.
 func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
-	e := &Engine{cfg: config.Default(), report: nopReporter{}}
+	e := &Engine{cfg: config.Default()}
 
 	// Method values compare by code pointer, which is what identifies the
 	// fallback here: e.liveness() must be pingOnce, not nil.
@@ -918,8 +924,28 @@ func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
 		t.Errorf("probeGap() = %s, want the %s default: a zero gap turns "+
 			"awaitPowerDown into a busy loop", got, downProbeInterval)
 	}
+	if got := e.powerDownWait(); got != powerDownTimeout {
+		t.Errorf("powerDownWait() = %s, want the %s default: a zero wait would "+
+			"declare every host unconfirmed before probing it once", got, powerDownTimeout)
+	}
 	if _, err := e.localMounts(context.Background()); err != nil {
 		t.Errorf("localMounts() on a hand-built Engine: %v", err)
+	}
+	if e.reporter() == nil {
+		t.Error("reporter() on a hand-built Engine is nil")
+	}
+
+	// And the path the whole fallback exists for, driven for real. The probe
+	// is the only seam substituted, because the point is that nothing else had
+	// to be: this must run on an Engine somebody built with a struct literal.
+	e.isUp = func(context.Context, string) (bool, bool) { return true, true }
+	e.downProbeInterval = time.Millisecond
+	leftOn, err := e.fansOffOnceTheRackIsIdle(context.Background(), io.Discard)
+	if err != nil {
+		t.Fatalf("fansOffOnceTheRackIsIdle on a hand-built Engine: %v", err)
+	}
+	if len(leftOn) == 0 {
+		t.Error("the guard cut the fans with the whole rack answering")
 	}
 }
 

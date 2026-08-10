@@ -104,7 +104,7 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 			misses[name]++
 			if misses[name] >= confirmedDownProbes {
 				fmt.Fprintf(log, "  %s is down\n", name)
-				e.report.HostState(name, HostDone, "powered off")
+				e.reporter().HostState(name, HostDone, "powered off")
 				delete(pending, name)
 			}
 		}
@@ -153,7 +153,7 @@ func (e *Engine) reportUnconfirmed(log io.Writer, pending map[string]inventory.H
 func (e *Engine) reportStillAnswering(log io.Writer, hosts []string) {
 	waited := e.powerDownWait()
 	for _, name := range hosts {
-		e.report.HostState(name, HostFailed,
+		e.reporter().HostState(name, HostFailed,
 			"still answering after "+waited.String()+"; likely hung and not wakeable")
 		fmt.Fprintf(log, "  ! %s accepted the shutdown but is still answering after %s.\n", name, waited)
 	}
@@ -172,7 +172,7 @@ func (e *Engine) reportStillAnswering(log io.Writer, hosts []string) {
 // every host in the run down with it.
 func (e *Engine) reportUnprobed(log io.Writer, hosts []string) {
 	for _, name := range hosts {
-		e.report.HostState(name, HostFailed,
+		e.reporter().HostState(name, HostFailed,
 			"never answered again, but could not be probed either; power-down unconfirmed")
 		fmt.Fprintf(log, "  ! %s accepted the shutdown and then went quiet, but it could not be\n", name)
 		fmt.Fprintf(log, "    probed, so nothing here proves it powered down.\n")

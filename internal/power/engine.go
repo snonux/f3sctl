@@ -41,9 +41,13 @@ type Engine struct {
 	// safety guards must never confuse them: a CGI whose PATH lacked /sbin
 	// made every host report false once already (see pingCandidates), which
 	// through a single-bool probe reads exactly like a rack that is safely
-	// cold. Decisions read this through isRunning, which folds unknown into
-	// "assume it is running"; only status reporting, which describes what was
-	// observed rather than acting on it, looks at the raw pair.
+	// cold. Most decisions read this through isRunning, which folds unknown
+	// into "assume it is running". Two callers deliberately do not: probeOne,
+	// which describes what was observed rather than acting on it and keeps both
+	// halves in HostStatus for whoever does act; and confirmLiveness, the fan
+	// guard's own probe, which needs all three answers because unknown ends its
+	// loop immediately while silence has to be seen confirmedDownProbes times
+	// running. Folding early would cost it exactly that distinction.
 	isUp func(ctx context.Context, ip string) (up, known bool)
 
 	// nfsMounts lists the NFS filesystems mounted on the machine f3sctl runs
@@ -133,6 +137,21 @@ func (e *Engine) powerDownWait() time.Duration {
 	return e.powerDownTimeout
 }
 
+// reporter returns the progress reporter, falling back to a discarding one.
+//
+// Same nil-safety reasoning as liveness, and the same path: report is an
+// interface field on an exported struct, so an Engine built anywhere but New
+// carries a nil there -- and fansOffOnceTheRackIsIdle calls Step twice, which
+// made `(&Engine{cfg: config.Default()}).fansOffOnceTheRackIsIdle(...)` panic on
+// the one path documented as having to neither crash nor fail open. Everything
+// in this package goes through here rather than touching report directly.
+func (e *Engine) reporter() Reporter {
+	if e.report == nil {
+		return nopReporter{}
+	}
+	return e.report
+}
+
 // localMounts lists locally mounted NFS filesystems, falling back to the real
 // lookup when the seam is unset. Same nil-safety reasoning as liveness.
 func (e *Engine) localMounts(ctx context.Context) ([]string, error) {
@@ -173,23 +192,23 @@ func (e *Engine) On(ctx context.Context, log io.Writer) error {
 func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) error {
 	e.logWarnings(log)
 
-	e.report.Step("switching the rack fans on")
+	e.reporter().Step("switching the rack fans on")
 	fmt.Fprintln(log, "Switching the rack fans on...")
 	if _, err := e.FansSet(ctx, true); err != nil {
 		return fmt.Errorf("refusing to wake hosts with the fans off: %w", err)
 	}
 
-	e.report.Step("sending Wake-on-LAN packets")
+	e.reporter().Step("sending Wake-on-LAN packets")
 	for _, h := range hosts {
 		fmt.Fprintf(log, "Sending a magic packet to %s (%s)...\n", h.Name, h.MAC)
 		if err := e.Wake(h); err != nil {
-			e.report.HostState(h.Name, HostFailed, err.Error())
+			e.reporter().HostState(h.Name, HostFailed, err.Error())
 			return err
 		}
-		e.report.HostState(h.Name, HostDone, "magic packet sent")
+		e.reporter().HostState(h.Name, HostDone, "magic packet sent")
 	}
 
-	e.report.Step("waiting for the k3s nodes, then un-muting Gogios")
+	e.reporter().Step("waiting for the k3s nodes, then un-muting Gogios")
 
 	// Un-muting is best-effort: the hosts are already waking, and a monitoring
 	// marker left behind is a smaller problem than reporting the whole wake as
@@ -282,25 +301,25 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	e.logWarnings(log)
 
 	for _, h := range hosts {
-		e.report.HostState(h.Name, HostPending, "")
+		e.reporter().HostState(h.Name, HostPending, "")
 	}
 
 	hosts = e.skipAlreadyOff(ctx, log, hosts)
 
-	e.report.Step("checking for locally mounted NFS filesystems")
+	e.reporter().Step("checking for locally mounted NFS filesystems")
 	fmt.Fprintln(log, "Checking for locally mounted NFS filesystems...")
 	if err := e.checkLocalNFS(ctx, log); err != nil {
 		return err
 	}
 
-	e.report.Step("checking the zusb backup pool")
+	e.reporter().Step("checking the zusb backup pool")
 	fmt.Fprintln(log, "Checking whether the zusb backup pool is imported anywhere...")
 	if err := e.zusbPreflight(ctx, log, hosts); err != nil {
 		return err
 	}
 
 	if clusterWide {
-		e.report.Step("muting Gogios monitoring")
+		e.reporter().Step("muting Gogios monitoring")
 		fmt.Fprintln(log, "Muting Gogios monitoring...")
 		if err := e.MuteGogios(ctx, log); err != nil {
 			// Not fatal: an un-muted alert is noise, and refusing to shut
@@ -324,7 +343,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	// and moved on, and the failure only surfaced later when the host would
 	// not wake. Confirming each host actually goes silent turns that into an
 	// error at the moment it happens.
-	e.report.Step("confirming the hosts actually powered down")
+	e.reporter().Step("confirming the hosts actually powered down")
 	if stuck := e.awaitPowerDown(ctx, log, accepted); len(stuck) > 0 {
 		failed = append(failed, stuck...)
 	}
@@ -371,7 +390,7 @@ func (e *Engine) skipAlreadyOff(ctx context.Context, log io.Writer,
 	})
 	for _, h := range alreadyOff {
 		fmt.Fprintf(log, "%s is already powered off; skipping it\n", h.Name)
-		e.report.HostState(h.Name, HostDone, "already powered off")
+		e.reporter().HostState(h.Name, HostDone, "already powered off")
 	}
 	return live
 }
@@ -420,8 +439,8 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
 	hosts []inventory.Host) (accepted []inventory.Host, failed []string) {
 
 	for _, h := range hosts {
-		e.report.Step("shutting down " + h.Name)
-		e.report.HostState(h.Name, HostWorking, "stopping guests")
+		e.reporter().Step("shutting down " + h.Name)
+		e.reporter().HostState(h.Name, HostWorking, "stopping guests")
 		fmt.Fprintf(log, "Shutting down %s (%s)...\n", h.Name, h.IP)
 		out, diag, err := e.ssh.agentVerbFull(ctx, h, "poweroff")
 		if out != "" {
@@ -429,7 +448,7 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
 		}
 		if err != nil {
 			fmt.Fprintf(log, "  ! %v\n", err)
-			e.report.HostState(h.Name, HostFailed, err.Error())
+			e.reporter().HostState(h.Name, HostFailed, err.Error())
 			failed = append(failed, h.Name)
 			continue
 		}
@@ -444,7 +463,7 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
 			detail = "accepted, but the guests were force-stopped; check etcd on next boot"
 		}
 		fmt.Fprintf(log, "  %s accepted the shutdown\n", h.Name)
-		e.report.HostState(h.Name, HostConfirming, detail)
+		e.reporter().HostState(h.Name, HostConfirming, detail)
 		accepted = append(accepted, h)
 	}
 	return accepted, failed
@@ -491,12 +510,12 @@ const fansLeftOn = "rack fans left ON"
 // before it accepts that a host is off.
 func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) ([]string, error) {
 	if busy := e.RackActivity(ctx); busy.Busy() {
-		e.report.Step(fansLeftOnReason(busy.Hosts()))
+		e.reporter().Step(fansLeftOnReason(busy.Hosts()))
 		fmt.Fprintf(log, "%s: %s.\n", fansLeftOn, busy.Why())
 		return busy.Hosts(), nil
 	}
 
-	e.report.Step("switching the rack fans off")
+	e.reporter().Step("switching the rack fans off")
 	fmt.Fprintln(log, "Switching the rack fans off...")
 	_, err := e.FansSet(ctx, false)
 	return nil, err
@@ -508,13 +527,21 @@ func fansLeftOnReason(hosts []string) string {
 	return fansLeftOn + ": " + strings.Join(hosts, ", ")
 }
 
-// partitionLive splits hosts into those answering ICMP and those already off.
+// partitionLive splits hosts into those that may still be running and those
+// known to be off.
+//
+// The split is deliberately not "answered ICMP": its only caller passes
+// Engine.isRunning, so a host whose probe could not be carried out lands in
+// live. Keeping an unprobeable host in the shutdown is the loud outcome; see
+// skipAlreadyOff.
 //
 // Pulled out as a plain function so the rule can be tested without an SSH
-// client, a Shelly plug or a live rack: isUp is the only thing it touches.
-func partitionLive(hosts []inventory.Host, isUp func(ip string) bool) (live, off []inventory.Host) {
+// client, a Shelly plug or a live rack: the predicate is all it touches.
+func partitionLive(hosts []inventory.Host,
+	mayBeRunning func(ip string) bool) (live, off []inventory.Host) {
+
 	for _, h := range hosts {
-		if isUp(h.IP) {
+		if mayBeRunning(h.IP) {
 			live = append(live, h)
 			continue
 		}
