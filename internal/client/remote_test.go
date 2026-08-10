@@ -43,10 +43,13 @@ func newFakeAPI(t *testing.T, wantKey string) *fakeAPI {
 }
 
 func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
-	// Every route but the root itself requires the key, matching
-	// internal/httpapi.Authenticator: a wrong or missing key is always a 401,
-	// regardless of which resource was asked for.
-	if r.URL.Path != "/" && r.Header.Get("X-API-Key") != f.wantKey {
+	// Every route, root included, requires the key: internal/httpapi/server.go's
+	// Server.serve calls s.auth.Check(req.APIKey) unconditionally before
+	// dispatching to any handler, and docs/CLIENT.md says a client MUST send
+	// X-API-Key on every request with no root exception. Client.do (client.go)
+	// always sets the header regardless of route, so this gate never sees an
+	// unauthenticated request in the correct-key tests below.
+	if r.Header.Get("X-API-Key") != f.wantKey {
 		w.WriteHeader(http.StatusUnauthorized)
 		writeEntity(w, Entity{Properties: map[string]any{"message": "bad API key"}})
 		return

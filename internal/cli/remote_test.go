@@ -172,7 +172,14 @@ func newFakeRemoteAPI(t *testing.T, wantKey string) *fakeRemoteAPI {
 }
 
 func (f *fakeRemoteAPI) handle(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.Header.Get("X-API-Key") != f.wantKey {
+	// Every route, root included, requires the key: internal/httpapi/server.go's
+	// Server.serve calls s.auth.Check(req.APIKey) unconditionally before
+	// dispatching to any handler, and docs/CLIENT.md says a client MUST send
+	// X-API-Key on every request with no root exception. Client.do
+	// (internal/client/client.go) always sets the header regardless of route,
+	// so this gate never sees an unauthenticated request in the correct-key
+	// tests above.
+	if r.Header.Get("X-API-Key") != f.wantKey {
 		w.WriteHeader(http.StatusUnauthorized)
 		writeRemoteEntity(w, client.Entity{Properties: map[string]any{"message": "bad API key"}})
 		return
@@ -327,8 +334,16 @@ func TestRunRemoteWithAWrongAPIKeyIsRejected(t *testing.T) {
 // TestRunVerboseImpliesRemoteAndTraces pins the -v/--verbose rule
 // parseGlobalFlags encodes (remote.go) end to end: passing -v with no
 // --remote must still reach the API (verbose implies remote), and must write
-// a trace to stderr -- the only observable sign that Client.Verbose was ever
-// wired up by runRemote.
+// a trace to stderr.
+//
+// "API base" alone would not prove much: runRemote prints that line
+// unconditionally inside the same `if flags.verbose` block, whether or not
+// the next line (c.Verbose(stderr), wiring the client's own tracer) actually
+// ran -- deleting that call would still leave "API base" in stderr and this
+// test green. The "-> " request-trace line, by contrast, is only ever
+// written by Client.tracef (internal/client/client.go, called from do()), so
+// seeing it here is the one observation that Client.Verbose was genuinely
+// wired up, not just that runRemote's surrounding log line printed.
 func TestRunVerboseImpliesRemoteAndTraces(t *testing.T) {
 	api := newFakeRemoteAPI(t, "correct-key")
 	cfg := remoteConfig(t, api, "correct-key")
@@ -342,5 +357,9 @@ func TestRunVerboseImpliesRemoteAndTraces(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "API base") {
 		t.Errorf("stderr = %q, want a trace showing the API base (Client.Verbose was wired up)", errOut)
+	}
+	if !strings.Contains(errOut, "→ ") {
+		t.Errorf("stderr = %q, want a %q request-trace line: the only output Client.tracef "+
+			"produces, and thus the only proof c.Verbose(stderr) was actually called", errOut, "→ ")
 	}
 }

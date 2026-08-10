@@ -72,24 +72,32 @@ func TestNewRequiresBaseAndKey(t *testing.T) {
 }
 
 // TestNewAppendsATrailingSlashToTheBase pins the URL-joining contract
-// Client.resolve relies on: url.ResolveReference needs the base to end in
-// "/", or resolving a root-relative href like "/status" against
-// "http://host/api" would drop the "/api" segment entirely instead of
-// appending to it. New is the one place this is normalised, so a base
-// supplied without a trailing slash must still resolve hrefs correctly.
+// Client.resolve relies on for the one relative-href case that actually
+// occurs in production: Root's own call, c.do("", ...) (see Root, below in
+// this file's package). Every other href a real server sends is
+// host-absolute (a leading "/", built by httpapi.Router.Href), and for those
+// url.ResolveReference drops the base's own path segment regardless of
+// whether the base ends in "/" -- appending a trailing slash would not
+// rescue that case (verify: ResolveReference("http://h/api", "/status") and
+// ResolveReference("http://h/api/", "/status") both give "http://h/status").
+// What the trailing slash actually buys is href=""'s round trip: resolving
+// an empty reference against a base returns the base unchanged, so without
+// normalising, a base of ".../api" and ".../api/" would resolve Root() to
+// two different URLs depending only on whether the operator's configured
+// api_url happened to end in a slash. New removes that dependency.
 func TestNewAppendsATrailingSlashToTheBase(t *testing.T) {
 	c, err := New("http://example.invalid/api", "some-key", config.Default(), io.Discard)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	got, err := c.resolve("status")
+	got, err := c.resolve("") // the href Root() actually resolves
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	if want := "http://example.invalid/api/status"; got != want {
+	if want := "http://example.invalid/api/"; got != want {
 		t.Errorf("resolve(%q) = %q, want %q: New must append a trailing slash to a base without one",
-			"status", got, want)
+			"", got, want)
 	}
 }
 
