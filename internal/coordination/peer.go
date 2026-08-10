@@ -20,13 +20,6 @@ import (
 	"time"
 )
 
-// runningState is the JSON value a peer's job resource reports while a job is
-// in flight. It intentionally is not shared code with Manager's JobRunning:
-// a peer's job is read out of someone else's JSON response, not constructed
-// here, and TestPeerRunningStateMatchesJobRunning is what keeps the two
-// literals in lockstep instead.
-const runningState = "running"
-
 // PeerSet answers "is the other API node mid-job?" for one node's power
 // actions.
 //
@@ -99,7 +92,7 @@ func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 		if err != nil {
 			continue
 		}
-		if job != nil && job.State == runningState {
+		if job != nil && job.State == string(JobRunning) {
 			return true, job.Node
 		}
 	}
