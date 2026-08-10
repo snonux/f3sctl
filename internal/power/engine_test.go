@@ -674,6 +674,83 @@ func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
 	}
 }
 
+// TestSkipAlreadyOffKeepsHostsItCouldNotProbe pins the second of the three
+// places liveness decides something, and the one with the widest blast radius.
+//
+// skipAlreadyOff drops hosts from the shutdown list. A probe that cannot run
+// therefore does not merely mis-report a host: it removes it from the run, and
+// with every host removed a shutdown shuts nothing down, reports success, and
+// walks straight into the fans-off step -- which is how a broken probe cut the
+// cooling to a fully running rack. Keeping an unprobeable host in the list is
+// the loud outcome: it fails at the zusb pre-flight if it really was off, which
+// undoes nothing and leaves the plug alone.
+//
+// The test engine's injected liveness always answers "known", so before this
+// nothing in the suite drove unknown through here at all.
+func TestSkipAlreadyOffKeepsHostsItCouldNotProbe(t *testing.T) {
+	hosts := inventory.Default().ShutdownOrder()
+
+	t.Run("unprobeable hosts stay in the list", func(t *testing.T) {
+		eng := testEngine(t, newFakeShelly(t, true))
+		eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
+
+		var log bytes.Buffer
+		live := eng.skipAlreadyOff(context.Background(), &log, hosts)
+
+		if !reflect.DeepEqual(names(live), names(hosts)) {
+			t.Errorf("hosts to shut down = %v, want all of %v: nothing is known about them",
+				names(live), names(hosts))
+		}
+		if strings.Contains(log.String(), "already powered off") {
+			t.Errorf("log = %q, want no claim that a host it could not probe is off", log.String())
+		}
+	})
+
+	// The other direction, so a guard that simply never skipped anything would
+	// not pass: a host confirmed silent is still dropped, or a staged shutdown
+	// aborts at the first host that is already down.
+	t.Run("hosts confirmed silent are dropped", func(t *testing.T) {
+		eng := testEngine(t, newFakeShelly(t, true))
+
+		var log bytes.Buffer
+		live := eng.skipAlreadyOff(context.Background(), &log, hosts)
+
+		if len(live) != 0 {
+			t.Errorf("hosts to shut down = %v, want none: every host answered nothing", names(live))
+		}
+	})
+}
+
+// TestAwaitPowerDownNeverConfirmsAHostItCouldNotProbe pins the third site.
+//
+// This step exists to catch a host that accepted a shutdown and then wedged, so
+// recording one as safely powered off on the strength of a probe that never ran
+// is the exact failure it was written to prevent -- and it would also hand the
+// fans-off step a rack it believes is cold. Unknown must never count as a miss.
+//
+// The context is cut short rather than waiting out powerDownTimeout: the point
+// is that these hosts are still pending after several probes, which is decided
+// within milliseconds at the test engine's probe gap.
+func TestAwaitPowerDownNeverConfirmsAHostItCouldNotProbe(t *testing.T) {
+	eng := testEngine(t, newFakeShelly(t, true))
+	eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
+
+	hosts := eng.cfg.Inventory.ShutdownOrder()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	var log bytes.Buffer
+	stuck := eng.awaitPowerDown(ctx, &log, hosts)
+
+	if len(stuck) != len(hosts) {
+		t.Fatalf("unconfirmed hosts = %v, want all of %v: an unprobeable host is "+
+			"not a host that powered down", stuck, names(hosts))
+	}
+	if strings.Contains(log.String(), "is down") {
+		t.Errorf("log = %q, want no host reported as down", log.String())
+	}
+}
+
 // TestAShutdownThatAbortsNeverTouchesTheFans pins the other exit from off():
 // a pre-flight that refuses must return before the fans-off step, not despite
 // it. Here the local NFS listing fails, which is itself a fix -- mount(8) that
