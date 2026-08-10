@@ -89,10 +89,16 @@ type FansBackend interface {
 // Mounts stays behind the nfsMounts field for the same reason Ping stays
 // behind isUp: it is the pre-existing, already-tested seam, and a shutdown
 // test needs to say what is mounted rather than depend on -- and act on --
-// the mount table of whatever machine runs the test. Unmount had no seam at
-// all before this refactor: checkLocalNFS shelled out to umount(8) directly,
-// so a test exercising the "could not unmount, abort" branch had no way to do
-// so without a stuck mount on the test box.
+// the mount table of whatever machine runs the test. checkLocalNFS reaches it
+// through Engine.localMounts directly, and execNFS.Mounts (backends_exec.go)
+// reaches the same field one hop further down rather than calling the free
+// function localNFSMounts itself, so nfsBackend().Mounts() and the mount
+// listing checkLocalNFS actually acts on can never disagree -- a test that
+// stubs nfsMounts but forgets nfs cannot silently fall through to the real
+// mount table via the latter. Unmount had no seam at all before this
+// refactor: checkLocalNFS shelled out to umount(8) directly, so a test
+// exercising the "could not unmount, abort" branch had no way to do so
+// without a stuck mount on the test box.
 type NFSChecker interface {
 	Mounts(ctx context.Context) ([]string, error)
 	Unmount(ctx context.Context, mountpoint string) (out string, err error)

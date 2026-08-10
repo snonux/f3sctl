@@ -73,12 +73,20 @@ func (f execFans) Set(ctx context.Context, on bool) (FansState, error) {
 // Mounts is implemented for completeness, the same reason as execProbe.Ping:
 // checkLocalNFS lists what is mounted through Engine.localMounts/nfsMounts,
 // the pre-existing seam, not through here; see NFSChecker's doc in
-// backends.go. Unmount is new -- checkLocalNFS shelled out to umount(8)
-// inline before this refactor, with no seam a test could substitute.
+// backends.go. It still has to go THROUGH that seam rather than around it --
+// delegating to n.e.localMounts, which falls back to the free function
+// localNFSMounts only when nfsMounts is unset, rather than calling
+// localNFSMounts directly -- so there is exactly one path to "what is
+// mounted", not two that could disagree. A test that overrides eng.nfsMounts
+// to fake the mount table but forgets to also stub eng.nfs would otherwise
+// have nfsBackend().Mounts() silently fall through to the real mount table of
+// whatever machine runs the test. Unmount is new -- checkLocalNFS shelled out
+// to umount(8) inline before this refactor, with no seam a test could
+// substitute.
 type execNFS struct{ e *Engine }
 
 func (n execNFS) Mounts(ctx context.Context) ([]string, error) {
-	return localNFSMounts(ctx)
+	return n.e.localMounts(ctx)
 }
 
 func (n execNFS) Unmount(ctx context.Context, mountpoint string) (out string, err error) {
