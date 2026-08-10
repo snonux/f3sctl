@@ -8,24 +8,34 @@ import (
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/power"
 )
 
 // defaultUnmuteTimeout is config.Default().UnmuteTimeout.D(), used throughout
 // this file so newTestManager's staleCeiling matches the shipped default
-// (20m + staleBuffer's 10m = the historical fixed 30m) unless a test
-// deliberately overrides it to prove the ceiling now tracks UnmuteTimeout.
+// (max(20m, defaultOffWorstCase) + staleBuffer's 10m = the historical fixed
+// 30m, since 20m > defaultOffWorstCase's 18m) unless a test deliberately
+// overrides either input to prove the ceiling now tracks both.
 const defaultUnmuteTimeout = 20 * time.Minute
+
+// defaultOffWorstCase is power.ShutdownWorstCase(config.Default()): 4 hosts
+// (f0-f3, the OffAll case) at the default 240s VMShutdownTimeout each, plus
+// the default 2m confirmation wait -- 18m. Computed once here, the same way
+// every production NewManager call site derives it, rather than hardcoded, so
+// this file does not silently drift from power's own constants.
+var defaultOffWorstCase = power.ShutdownWorstCase(config.Default())
 
 // newTestManager returns a Manager rooted at a fresh temp dir, so tests never
 // touch a real /var/db/f3sctl. Its staleCeiling matches config.Default(), the
-// same UnmuteTimeout every production NewManager call site is built from.
+// same UnmuteTimeout and VMShutdownTimeout every production NewManager call
+// site is built from.
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	if got := config.Default().UnmuteTimeout.D(); got != defaultUnmuteTimeout {
 		t.Fatalf("config.Default().UnmuteTimeout = %s, want %s: defaultUnmuteTimeout "+
 			"must track it or the tests below silently stop meaning what they say", got, defaultUnmuteTimeout)
 	}
-	return NewManager(t.TempDir(), defaultUnmuteTimeout)
+	return NewManager(t.TempDir(), defaultUnmuteTimeout, defaultOffWorstCase)
 }
 
 // TestManagerReadReturnsNilBeforeAnyJob pins the "nothing has ever run" state
@@ -203,9 +213,11 @@ func TestManagerReadDoesNotFlagARecentRunningJobAsStale(t *testing.T) {
 // must not be marked stale at the fixed 30m the old code used. It sits at
 // 35m -- past the old fixed ceiling, but comfortably within
 // 37m+staleBuffer -- so this only passes if stale() actually reads
-// m.staleCeiling instead of a hardcoded 30*time.Minute.
+// m.staleCeiling instead of a hardcoded 30*time.Minute. offWorstCase is the
+// default here: UnmuteTimeout alone already dominates it, so this test is
+// purely about the wake-path half of the formula.
 func TestManagerReadTracksAConfiguredUnmuteTimeout(t *testing.T) {
-	m := NewManager(t.TempDir(), 37*time.Minute)
+	m := NewManager(t.TempDir(), 37*time.Minute, defaultOffWorstCase)
 	old := time.Now().Add(-35 * time.Minute).UTC().Format(time.RFC3339)
 	if err := m.write(Job{ID: "still-going", State: JobRunning, Started: old}); err != nil {
 		t.Fatalf("seeding a running job: %v", err)
@@ -226,7 +238,7 @@ func TestManagerReadTracksAConfiguredUnmuteTimeout(t *testing.T) {
 // not a slow one, and must still be reclassified failed -- preserving the
 // safety direction the staleness check exists for.
 func TestManagerReadStillFlagsStaleBeyondTheConfiguredCeiling(t *testing.T) {
-	m := NewManager(t.TempDir(), 37*time.Minute)
+	m := NewManager(t.TempDir(), 37*time.Minute, defaultOffWorstCase)
 	old := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
 	if err := m.write(Job{ID: "long-gone", State: JobRunning, Started: old}); err != nil {
 		t.Fatalf("seeding a stale job: %v", err)
@@ -239,14 +251,107 @@ func TestManagerReadStillFlagsStaleBeyondTheConfiguredCeiling(t *testing.T) {
 	}
 }
 
-// TestNewManagerDerivesStaleCeilingFromUnmuteTimeout pins the exact formula
-// (UnmuteTimeout + staleBuffer) rather than just its externally visible
-// effect, so a future change to the constant is caught here first.
-func TestNewManagerDerivesStaleCeilingFromUnmuteTimeout(t *testing.T) {
-	m := NewManager(t.TempDir(), 37*time.Minute)
-	want := 37*time.Minute + staleBuffer
-	if got := m.StaleCeiling(); got != want {
-		t.Errorf("StaleCeiling() = %s, want UnmuteTimeout + staleBuffer = %s", got, want)
+// TestManagerReadSurvivesAnOffPathWorstCaseEvenWithASmallUnmuteTimeout is the
+// regression test for the gap a reviewer found in kz0's first fix: deriving
+// staleCeiling from UnmuteTimeout alone reopens the exact false-failure bug
+// kz0 exists to close, just for the Off job type, the moment UnmuteTimeout is
+// configured smaller than the shutdown path's own worst case. UnmuteTimeout
+// bounds an unrelated wake-path wait, so there is nothing stopping an operator
+// from lowering it for reasons that have nothing to do with shutdown timing.
+//
+// UnmuteTimeout here is 2m -- small enough that UnmuteTimeout+staleBuffer
+// (12m) is comfortably below defaultOffWorstCase (18m: 4 hosts * 240s + the
+// 2m confirmation wait). The job sits at 17m: past what the old,
+// UnmuteTimeout-only formula would allow, but still within the real Off-path
+// worst case, so it must still read as running.
+func TestManagerReadSurvivesAnOffPathWorstCaseEvenWithASmallUnmuteTimeout(t *testing.T) {
+	m := NewManager(t.TempDir(), 2*time.Minute, defaultOffWorstCase)
+	old := time.Now().Add(-17 * time.Minute).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "shutting-down", State: JobRunning, Started: old}); err != nil {
+		t.Fatalf("seeding a running job: %v", err)
+	}
+
+	got := m.Read()
+	if got == nil || got.State != JobRunning {
+		t.Errorf("Read() = %+v, want State=%q: a 17m-old Off job must still read as running "+
+			"when UnmuteTimeout=2m but the shutdown path's own worst case "+
+			"(power.ShutdownWorstCase, %s here) is ~18m", got, JobRunning, defaultOffWorstCase)
+	}
+}
+
+// TestManagerReadIsCloseToTheBoundaryEitherWay is an end-to-end sanity check
+// that Read() actually reclassifies near m.staleCeiling rather than at some
+// other threshold entirely: a job a few seconds inside it must still read as
+// running, and one a few seconds past it must read as failed. The margin
+// (3s) is not incidental -- j.Started round-trips through RFC3339, which only
+// has one-second resolution, so anything tighter risks the truncation itself
+// crossing the boundary and making the test flaky regardless of stale()'s
+// comparison operator. That imprecision is exactly why this test cannot, by
+// itself, catch a ">=" vs ">" off-by-one at the exact boundary -- see
+// TestJobIsStaleBoundaryIsExclusive for that.
+func TestManagerReadIsCloseToTheBoundaryEitherWay(t *testing.T) {
+	m := NewManager(t.TempDir(), defaultUnmuteTimeout, defaultOffWorstCase)
+	ceiling := m.StaleCeiling()
+	const margin = 3 * time.Second
+
+	within := time.Now().Add(-(ceiling - margin)).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "within", State: JobRunning, Started: within}); err != nil {
+		t.Fatalf("seeding a running job: %v", err)
+	}
+	if got := m.Read(); got == nil || got.State != JobRunning {
+		t.Errorf("Read() %s inside staleCeiling = %+v, want State=%q", margin, got, JobRunning)
+	}
+
+	past := time.Now().Add(-(ceiling + margin)).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "past", State: JobRunning, Started: past}); err != nil {
+		t.Fatalf("seeding a running job: %v", err)
+	}
+	if got := m.Read(); got == nil || got.State != JobFailed {
+		t.Errorf("Read() %s past staleCeiling = %+v, want State=%q", margin, got, JobFailed)
+	}
+}
+
+// TestJobIsStaleBoundaryIsExclusive pins the exact boundary jobIsStale (and
+// therefore stale()) draws: age == ceiling must NOT count as stale, only
+// age > ceiling. Comparing durations directly, rather than going through a
+// Job's RFC3339 Started timestamp, is what makes hitting the boundary exactly
+// possible at all -- see jobIsStale's doc comment for why the timestamp path
+// cannot. This is the test that actually catches a ">=" vs ">" regression;
+// TestManagerReadIsCloseToTheBoundaryEitherWay only catches a threshold that
+// has drifted by more than a few seconds.
+func TestJobIsStaleBoundaryIsExclusive(t *testing.T) {
+	const ceiling = 30 * time.Minute
+
+	if jobIsStale(ceiling, ceiling) {
+		t.Error("jobIsStale(ceiling, ceiling) = true, want false: exactly at the ceiling " +
+			"is not yet stale (the comparison must be \">\", not \">=\")")
+	}
+	if !jobIsStale(ceiling+time.Nanosecond, ceiling) {
+		t.Error("jobIsStale(ceiling+1ns, ceiling) = false, want true: any age past the ceiling is stale")
+	}
+}
+
+// TestStaleCeilingForTakesTheLargerWorstCase pins the exact formula
+// (max(unmuteTimeout, offWorstCase) + staleBuffer) rather than just its
+// externally visible effect, exercising both directions -- UnmuteTimeout
+// dominant and offWorstCase dominant -- so a future change to either input's
+// handling is caught here first.
+func TestStaleCeilingForTakesTheLargerWorstCase(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		unmuteTimeout, offWorstCase time.Duration
+		want                        time.Duration
+	}{
+		{"unmuteTimeout dominates", 37 * time.Minute, 5 * time.Minute, 37*time.Minute + staleBuffer},
+		{"offWorstCase dominates", 2 * time.Minute, 18 * time.Minute, 18*time.Minute + staleBuffer},
+		{"equal", 10 * time.Minute, 10 * time.Minute, 10*time.Minute + staleBuffer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := staleCeilingFor(tc.unmuteTimeout, tc.offWorstCase); got != tc.want {
+				t.Errorf("staleCeilingFor(%s, %s) = %s, want %s",
+					tc.unmuteTimeout, tc.offWorstCase, got, tc.want)
+			}
+		})
 	}
 }
 

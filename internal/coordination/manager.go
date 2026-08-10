@@ -89,20 +89,49 @@ func newJobID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// staleBuffer is added on top of the configured UnmuteTimeout to get the
-// server's staleness ceiling (Manager.staleCeiling).
+// staleBuffer is the slack added on top of whichever path's worst case is
+// larger to get the server's staleness ceiling (Manager.staleCeiling).
 //
 // It mirrors internal/client.jobWaitBuffer's reasoning (see that constant's
-// doc comment, added by gy0): UnmuteTimeout alone is not a job's full
-// worst-case runtime. On the wake path there is the fan/WoL prelude and the
-// gateway SSH round trips that follow waitForCluster; on the shutdown path
-// there is Off's own worst case (three hosts at VMShutdownTimeout, 240s each
-// by default, ~12m), which has nothing to do with UnmuteTimeout at all. Ten
-// minutes covers either, and keeps the default ceiling unchanged (20m
-// UnmuteTimeout + 10m = the old fixed 30m) while now scaling with an
-// operator-raised UnmuteTimeout instead of silently falling behind it -- see
+// doc comment, added by gy0), but -- unlike UnmuteTimeout alone -- it is
+// layered on top of a ceiling that already accounts for BOTH paths' own
+// worst cases (see staleCeilingFor), not just one of them:
+//
+//   - the wake path's real worst case is UnmuteTimeout itself
+//     (waitForCluster's deadline) plus the fan/WoL prelude and the gateway
+//     SSH round trips that follow it, neither bounded by UnmuteTimeout;
+//   - the shutdown path's real worst case is power.ShutdownWorstCase(cfg) --
+//     every host in the largest shutdown set at VMShutdownTimeout each, plus
+//     one confirmation wait -- which has nothing to do with UnmuteTimeout at
+//     all, and used to be badly underestimated here: an earlier version of
+//     this comment claimed "three hosts at 240s, ~12m" fit inside this same
+//     10-minute buffer, which is arithmetic nonsense (3*240s is already 12
+//     minutes, bigger than the buffer alone) -- see kz0's follow-up fix.
+//
+// Ten minutes of slack on top of max(UnmuteTimeout, ShutdownWorstCase(cfg))
+// is generous for either path's own prelude, and keeps the default ceiling
+// unchanged (20m UnmuteTimeout beats the default ShutdownWorstCase of
+// 4*240s+2m=18m, so 20m+10m = the old fixed 30m) while now scaling with
+// either an operator-raised UnmuteTimeout or an operator-raised
+// VMShutdownTimeout instead of silently falling behind either one -- see
 // kz0.
 const staleBuffer = 10 * time.Minute
+
+// staleCeilingFor derives the server's job-staleness ceiling from the two
+// independent worst cases a running job may actually be experiencing: the
+// wake path (bounded by unmuteTimeout) and the shutdown path (bounded by
+// offWorstCase, see power.ShutdownWorstCase). A job is never both at once, so
+// the ceiling only needs to clear whichever of the two is larger, not their
+// sum -- but it must clear whichever that is, not just unmuteTimeout, or a
+// small unmuteTimeout paired with a large VMShutdownTimeout reintroduces the
+// exact false-failure bug kz0 exists to close, just for the Off job type.
+func staleCeilingFor(unmuteTimeout, offWorstCase time.Duration) time.Duration {
+	worst := unmuteTimeout
+	if offWorstCase > worst {
+		worst = offWorstCase
+	}
+	return worst + staleBuffer
+}
 
 // Manager owns the on-disk lifecycle of one node's power job: claiming the
 // lock, spawning the detached child that actually runs it, recording its
@@ -115,9 +144,11 @@ type Manager struct {
 	dir string
 
 	// staleCeiling is how long a job may claim to be running before Read
-	// reclassifies it as failed -- see stale(). Derived from the configured
-	// UnmuteTimeout at construction time (NewManager) rather than a fixed
-	// constant, so raising UnmuteTimeout raises this ceiling too. See kz0.
+	// reclassifies it as failed -- see stale(). Derived at construction time
+	// (NewManager, via staleCeilingFor) from both the configured UnmuteTimeout
+	// and the shutdown path's own worst case, rather than a fixed constant or
+	// UnmuteTimeout alone, so raising either one raises this ceiling too. See
+	// kz0.
 	staleCeiling time.Duration
 
 	// spawnFunc starts the detached child that actually performs a job's
@@ -130,13 +161,17 @@ type Manager struct {
 
 // NewManager returns a Manager whose state lives under dir.
 //
-// unmuteTimeout is the configured UnmuteTimeout (config.Config.UnmuteTimeout,
-// passed as a plain time.Duration rather than the whole config -- the same
-// minimal-surface pattern NewPeerSet uses for PeerNodes/jobPath). It is used
-// only to derive staleCeiling; see staleBuffer's doc comment for why the
-// ceiling must track it.
-func NewManager(dir string, unmuteTimeout time.Duration) *Manager {
-	return &Manager{dir: dir, staleCeiling: unmuteTimeout + staleBuffer}
+// unmuteTimeout and offWorstCase are, respectively, config.Config's
+// UnmuteTimeout and power.ShutdownWorstCase(cfg) -- passed as plain
+// time.Duration values rather than the whole config, the same minimal-surface
+// pattern NewPeerSet uses for PeerNodes/jobPath. Both callers (httpapi's
+// newServer, coordination.RunJob) already have a full config.Config in hand,
+// so computing offWorstCase is one call at the construction site rather than
+// giving Manager its own opinion about inventory or VMShutdownTimeout. Used
+// only to derive staleCeiling; see staleCeilingFor and staleBuffer's doc
+// comments for why the ceiling must track both.
+func NewManager(dir string, unmuteTimeout, offWorstCase time.Duration) *Manager {
+	return &Manager{dir: dir, staleCeiling: staleCeilingFor(unmuteTimeout, offWorstCase)}
 }
 
 func (m *Manager) statePath() string { return filepath.Join(m.dir, "job.json") }
@@ -165,21 +200,44 @@ func (m *Manager) Read() *Job {
 }
 
 // stale reports whether a job claiming to run has outlived any plausible
-// runtime, judged against m.staleCeiling (UnmuteTimeout + staleBuffer -- see
-// NewManager and staleBuffer's doc comment). Before kz0 this was a fixed 30
-// minutes, which quietly stopped being generous enough the moment an operator
-// raised UnmuteTimeout past ~25m (as happened 2026-08-09, 600s -> 1200s, to
-// survive a slow ntpd_sync_on_start): the server would call a perfectly
-// healthy job "failed" while the client was still patiently waiting on the
-// same, larger, UnmuteTimeout-derived deadline (internal/client.jobWaitTimeout,
-// gy0). Deriving both from the same config value is what keeps them from
-// decoupling again.
+// runtime, judged against m.staleCeiling (max(UnmuteTimeout,
+// ShutdownWorstCase) + staleBuffer -- see NewManager, staleCeilingFor and
+// staleBuffer's doc comments). Before kz0 this was a fixed 30 minutes, which
+// quietly stopped being generous enough the moment an operator raised
+// UnmuteTimeout past ~25m (as happened 2026-08-09, 600s -> 1200s, to survive a
+// slow ntpd_sync_on_start): the server would call a perfectly healthy job
+// "failed" while the client was still patiently waiting on the same, larger,
+// UnmuteTimeout-derived deadline (internal/client.jobWaitTimeout, gy0). A
+// first fix derived the ceiling from UnmuteTimeout alone, which quietly
+// reopened the same bug from the other side: it covered the wake path but not
+// the shutdown path's own, independent worst case (power.ShutdownWorstCase),
+// so lowering UnmuteTimeout while leaving VMShutdownTimeout at its default (or
+// raising it) could again call a healthy job "failed" mid-shutdown. Taking the
+// max of both keeps the ceiling honest about whichever path a job is actually
+// on.
 func (m *Manager) stale(j Job) bool {
 	started, err := time.Parse(time.RFC3339, j.Started)
 	if err != nil {
 		return true
 	}
-	return time.Since(started) > m.staleCeiling
+	return jobIsStale(time.Since(started), m.staleCeiling)
+}
+
+// jobIsStale is stale()'s actual comparison, pulled out to a pure function so
+// a test can pin the exact boundary deterministically. A test driving stale()
+// itself cannot: j.Started round-trips through RFC3339, which only has
+// one-second resolution, so the age Read() later computes from it always
+// carries up to ~1s of truncation noise relative to whatever instant a test
+// intended -- there is no Started value that reliably reproduces
+// age == ceiling to the nanosecond. Comparing durations directly sidesteps
+// that entirely.
+//
+// age must be strictly greater than ceiling to count as stale -- exactly at
+// the ceiling is still within the budget staleCeilingFor computed, not past
+// it -- so an accidental ">=" here would fail a job the instant it reaches
+// its ceiling instead of the instant it exceeds it.
+func jobIsStale(age, ceiling time.Duration) bool {
+	return age > ceiling
 }
 
 // StaleCeiling returns how long a job may run before Read reclassifies it as

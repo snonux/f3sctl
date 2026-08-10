@@ -133,11 +133,17 @@ async function showStatus() {
 // to fetch it.
 const jobWaitBufferMs = 60 * 1000;
 
-// fallbackTimeoutMs is used only against a server old enough not to advertise
-// staleAfterSeconds on the job resource (pre-kz0). It is the same guess this
-// file shipped with before lz0 -- UnmuteTimeout's shipped default (20 min)
-// plus 5 minutes of slack -- kept only as a last resort, not as the primary
-// mechanism anymore.
+// fallbackTimeoutMs is used whenever a poll's response carries no
+// staleAfterSeconds to derive a budget from -- not only a server old enough
+// to predate it (pre-kz0), but also, on an entirely current server, any poll
+// that lands on a node reporting state "none" (no job entity yet, so no
+// staleAfterSeconds on that shape -- see waitForJob's doc comment). It is the
+// same guess this file shipped with before lz0 -- UnmuteTimeout's shipped
+// default (20 min) plus 5 minutes of slack -- kept only as a last resort, not
+// as the primary mechanism anymore. Since it is more generous than a modern
+// server's real staleAfterSeconds-derived budget is ever likely to be, this
+// can only make the client wait longer on a "none" poll, never give up too
+// early.
 const fallbackTimeoutMs = 25 * 60 * 1000;
 
 // waitForJob polls until the job stops running.

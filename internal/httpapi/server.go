@@ -122,7 +122,7 @@ func newServer(cfg config.Config) (*Server, error) {
 	return &Server{
 		cfg:     cfg,
 		engine:  eng,
-		jobs:    coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D()),
+		jobs:    coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)),
 		peers:   coordination.NewPeerSet(cfg.PeerNodes, resolvePeerJobPath(cfg, router)),
 		auth:    NewAuthenticator(cfg.APIKeyFile),
 		router:  router,

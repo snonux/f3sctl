@@ -269,9 +269,12 @@ started, or an older server). Render what is there; do not require any of it.
   job claim to be running before deciding the process behind it is gone (the
   node rebooted mid-shutdown, say) and marking it `failed` on your behalf,
   with a fabricated `"the process that owned this job is gone (node
-  restarted?)"` error. It is derived from that node's configured
-  `UnmuteTimeout` plus a fixed buffer -- **not** a flat 30 minutes -- so it
-  scales automatically whenever `UnmuteTimeout` is raised. Prefer deriving
+  restarted?)"` error. It is derived from the larger of that node's
+  configured `UnmuteTimeout` (the wake path's worst case) and its shutdown
+  path's own worst case (host count times `VMShutdownTimeout`, plus the
+  power-down confirmation wait), plus a fixed buffer -- **not** a flat 30
+  minutes -- so it scales automatically whenever either `UnmuteTimeout` or
+  `VMShutdownTimeout` is raised. Prefer deriving
   your own poll deadline from it (`staleAfterSeconds * 1000` plus a minute or
   so of slack for your own poll interval) over hardcoding a client-side
   guess: a hardcoded number is a second, independent copy of the same value
@@ -280,10 +283,17 @@ started, or an older server). Render what is there; do not require any of it.
   first shipped this field (see `docs/client-reference.js`'s `waitForJob` for
   a worked example, and this repo's history for both the client-side and
   server-side incidents that motivated it).
-- Fall back to a total timeout of at least **25 minutes** only against a
-  server old enough not to send `staleAfterSeconds` (pre-`staleAfterSeconds`
-  servers still enforce their own, un-advertised ceiling internally --
-  historically a flat 30 minutes). That 25-minute floor comes from the Gogios
+- Fall back to a total timeout of at least **25 minutes** whenever a response
+  carries no `staleAfterSeconds` to derive one from -- not only against a
+  server old enough not to send it at all (pre-`staleAfterSeconds` servers
+  still enforce their own, un-advertised ceiling internally -- historically a
+  flat 30 minutes), but also, on an otherwise current server, any poll that
+  lands on the `"state":"none"` shape, which carries no job entity and so no
+  `staleAfterSeconds` either (see the field's note above). That is not a
+  functional problem -- the fallback is the more generous of the two numbers
+  in every realistic configuration, so it can only make a client wait longer,
+  never give up sooner -- but do not assume seeing the fallback trigger means
+  the server is old. That 25-minute floor comes from the Gogios
   un-mute wait (`UnmuteTimeout`, 1200 s / 20 min by default) plus the wake
   prelude (fans, magic packets) and the gateway SSH round trips that follow
   it, which need roughly **5 minutes** of slack on top of `UnmuteTimeout`

@@ -119,7 +119,7 @@ func TestJobEntityAdvertisesStaleAfterSecondsFromTheManager(t *testing.T) {
 	for _, unmute := range []time.Duration{20 * time.Minute, 37 * time.Minute} {
 		t.Run(unmute.String(), func(t *testing.T) {
 			srv := &Server{
-				jobs:   coordination.NewManager(t.TempDir(), unmute),
+				jobs:   coordination.NewManager(t.TempDir(), unmute, power.ShutdownWorstCase(config.Default())),
 				router: NewRouter(""),
 			}
 			want := int(srv.jobs.StaleCeiling().Seconds())

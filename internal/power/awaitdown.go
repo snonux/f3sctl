@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
@@ -22,6 +23,38 @@ import (
 //
 // Engine.powerDownWait reads it, so a test can shorten it; nothing else should.
 const powerDownTimeout = 2 * time.Minute
+
+// ShutdownWorstCase is the longest any shutdown-shaped job (Off, OffAll,
+// OffHost -- see internal/cli.powerActionForSpelling) can plausibly take:
+// every host in the largest set a shutdown ever walks (OffAll's
+// inventory.EveryFHost, f0-f3) processed one at a time by Engine.shutdownEach,
+// each up to cfg.VMShutdownTimeout, plus one round of awaitPowerDown's
+// confirmation wait (powerDownTimeout). awaitPowerDown polls every accepted
+// host concurrently rather than one at a time, so it contributes once, not
+// once per host.
+//
+// It deliberately leaves out the zusb pre-flight, the local NFS unmount and
+// the Gogios mute calls that run before shutdownEach: none of them carries a
+// timeout of its own (each is bounded only by ctx, which every caller here
+// leaves open-ended), so there is no config value to derive a number for.
+// They finish in seconds on a healthy run; coordination.staleBuffer's slack
+// exists to absorb that, not this function.
+//
+// Exported so coordination.NewManager can derive the server's job-staleness
+// ceiling from it -- see kz0. Using cfg.VMShutdownTimeout here is that
+// config field's documented meaning ("bounds how long a host waits for its
+// bhyve guests to power off"), even though the value is not actually threaded
+// to the agent's own wait today -- internal/agent/poweroff.go's
+// vmShutdownTimeout is a separate, hardcoded 240s constant of the same
+// default. That gap is its own latent inconsistency (raising
+// cfg.VMShutdownTimeout currently changes nothing on the wire), not one a
+// staleness ceiling can paper over -- but the ceiling should still track what
+// the config *claims* to bound, since that is the number an operator sees and
+// tunes.
+func ShutdownWorstCase(cfg config.Config) time.Duration {
+	hosts := time.Duration(len(cfg.Inventory.EveryFHost()))
+	return hosts*cfg.VMShutdownTimeout.D() + powerDownTimeout
+}
 
 // confirmedDownProbes is how many consecutive missed pings count as "off".
 //
