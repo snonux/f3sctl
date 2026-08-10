@@ -1,6 +1,7 @@
 package power
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -180,7 +181,7 @@ func (e *Engine) pingWith(ctx context.Context, bin, ip string) (up, known bool) 
 	ctx, cancel := context.WithTimeout(ctx, timeout+time.Second)
 	defer cancel()
 
-	err := exec.CommandContext(ctx, bin, args...).Run()
+	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
 	switch {
 	case err == nil:
 		return true, true
@@ -190,26 +191,42 @@ func (e *Engine) pingWith(ctx context.Context, bin, ip string) (up, known bool) 
 		// first. Either way it never got to report anything about the host.
 		return false, false
 
-	case errors.As(err, new(*exec.ExitError)):
-		// ping ran to completion and exited non-zero: it sent the echo and
-		// heard nothing back within the deadline.
-		//
-		// The exit *code* is deliberately not decoded. The platforms f3sctl
-		// runs on disagree about it -- "no reply" is 1 on Linux and 2 on the
-		// BSDs, where 1 means a hard error -- so a table keyed on GOOS would
-		// have to be right about each of them or it would turn ordinary
-		// powered-off hosts into "unknown", i.e. into a rack that can never be
-		// declared idle. The gap left is a ping that runs but fails for its own
-		// reasons (a raw socket it may not open, say) still reading as down;
-		// that is no worse than before this distinction existed, and unlike a
-		// missing binary it has not actually happened here.
+	case errors.As(err, new(*exec.ExitError)) && probeRan(out):
+		// ping ran to completion, reported its statistics and exited non-zero:
+		// it sent the echo and heard nothing back within the deadline.
 		return false, true
 
 	default:
-		// The binary could not be started at all: not found, not executable,
-		// fork failed. Nothing was measured.
+		// Everything else is "no measurement was taken": the binary could not
+		// be started (not found, not executable, fork failed), or it started
+		// and gave up before sending anything.
 		return false, false
 	}
+}
+
+// probeRan reports whether ping's output contains the summary it prints once it
+// has actually sent packets and counted the replies.
+//
+// This is what separates "the host said nothing" from "the probe never
+// happened", and it replaces decoding the exit code, which cannot be done
+// portably here: "no reply" is 1 on Linux and 2 on the BSDs, where 1 is a hard
+// error, so a table keyed on GOOS would have to be right about every platform
+// or it would turn either ordinary powered-off hosts into "unknown" (a rack
+// that can never be declared idle) or hard errors into "down" (a rack declared
+// idle that is nothing of the sort). The latter is the dangerous one and it was
+// live: every *exec.ExitError counted as a confirmed silence, so any condition
+// hitting all four hosts alike -- no route, ICMP filtered by a switch, a ping(8)
+// that is neither setuid nor setcap and so cannot open its socket -- reported
+// the whole rack down on all three probes and cut the fan plug.
+//
+// Verified on this Linux box: a genuine "no reply" exits 1 having printed
+// "1 packets transmitted, 0 received", while `ping no.such.host.invalid` exits 2
+// printing "Name or service not known" and no statistics at all. Every ping(8)
+// on Linux, NetBSD, FreeBSD, OpenBSD and macOS prints this line when it got as
+// far as transmitting, and none print it when it did not, so matching on it
+// needs no per-platform knowledge.
+func probeRan(out []byte) bool {
+	return bytes.Contains(out, []byte("packets transmitted"))
 }
 
 // dialSSH reports whether the host's sshd is accepting connections. This is

@@ -432,20 +432,68 @@ func TestFansStayOnWhenPingIsMissing(t *testing.T) {
 	}
 }
 
+// TestFansStayOnWhenEveryPingFailsHard drives the same hazard as
+// TestFansStayOnWhenPingIsMissing through a ping(8) that exists and fails.
+//
+// The failure modes that matter here hit every host identically -- no route,
+// ICMP dropped by the switch, a ping(8) that is neither setuid nor setcap and
+// so cannot open its socket -- so the rack does not look partly broken, it
+// looks entirely powered off. While that counted as a confirmed silence, all
+// three of the guard's probes agreed and the plug went off under a running
+// rack.
+func TestFansStayOnWhenEveryPingFailsHard(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	eng := testEngine(t, shelly)
+
+	bin := filepath.Join(t.TempDir(), "ping")
+	script := "#!/bin/sh\necho 'ping: socket: Operation not permitted' >&2\nexit 2\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("writing the ping stub: %v", err)
+	}
+	eng.isUp = func(ctx context.Context, ip string) (bool, bool) {
+		return eng.pingWith(ctx, bin, ip)
+	}
+
+	var log bytes.Buffer
+	leftOn, err := eng.fansOffOnceTheRackIsIdle(context.Background(), &log)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: ping(8) never sent a packet", got)
+	}
+	if len(leftOn) != 4 {
+		t.Errorf("hosts keeping the fans on = %v, want all four f-hosts", leftOn)
+	}
+	if !strings.Contains(log.String(), "could not be probed") {
+		t.Errorf("log = %q, want it to say the hosts could not be probed", log.String())
+	}
+}
+
 // TestPingSeparatesSilenceFromAFailedProbe covers the distinction everything
-// above rests on, with an ordinary executable standing in for ping(8): a
-// non-zero exit is a real answer ("no reply"), while a binary that cannot be
-// run at all, or a probe cut short, is no answer.
+// above rests on, with ordinary executables standing in for ping(8).
+//
+// What makes an answer an answer is the statistics line, not the exit status. A
+// ping that printed "1 packets transmitted, 0 received" measured the host and
+// heard nothing; a ping that exits non-zero having printed no statistics never
+// got as far as measuring anything, and the two are indistinguishable by exit
+// code across the platforms this runs on. The stubs reproduce both shapes,
+// including the real output of `ping no.such.host.invalid`.
 func TestPingSeparatesSilenceFromAFailedProbe(t *testing.T) {
 	dir := t.TempDir()
-	stub := func(exit int) string {
-		p := filepath.Join(dir, fmt.Sprintf("ping%d", exit))
-		script := fmt.Sprintf("#!/bin/sh\nexit %d\n", exit)
+	n := 0
+	stub := func(exit int, output string) string {
+		n++
+		p := filepath.Join(dir, fmt.Sprintf("ping%d", n))
+		script := fmt.Sprintf("#!/bin/sh\ncat <<'EOF'\n%s\nEOF\nexit %d\n", output, exit)
 		if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 			t.Fatalf("writing the ping stub: %v", err)
 		}
 		return p
 	}
+
+	const stats = "--- 192.0.2.1 ping statistics ---\n" +
+		"1 packets transmitted, 0 received, 100% packet loss, time 0ms"
 
 	eng := &Engine{cfg: config.Default()}
 	for _, tc := range []struct {
@@ -454,12 +502,25 @@ func TestPingSeparatesSilenceFromAFailedProbe(t *testing.T) {
 		cancel    bool
 		up, known bool
 	}{
-		{name: "answered", bin: stub(0), up: true, known: true},
-		{name: "no reply (linux code)", bin: stub(1), known: true},
-		{name: "no reply (bsd code)", bin: stub(2), known: true},
+		{name: "answered", bin: stub(0, "64 bytes from 192.0.2.1"), up: true, known: true},
+		{name: "no reply (linux code)", bin: stub(1, stats), known: true},
+		{name: "no reply (bsd code)", bin: stub(2, stats), known: true},
+
+		// The gap this closes. A hard failure exits non-zero and prints no
+		// statistics: it never transmitted, so it says nothing about the host.
+		// Counting it as a confirmed silence is how an unroutable network, a
+		// switch dropping ICMP, or a ping(8) that cannot open its socket used
+		// to report the entire rack down -- on every probe, identically -- and
+		// take the fan plug with it.
+		{name: "name resolution failed",
+			bin: stub(2, "ping: no.such.host.invalid: Name or service not known")},
+		{name: "socket not permitted",
+			bin: stub(2, "ping: socket: Operation not permitted")},
+		{name: "no route to host", bin: stub(1, "ping: connect: Network is unreachable")},
+
 		{name: "no ping(8) at all", bin: ""},
 		{name: "ping(8) cannot be run", bin: filepath.Join(dir, "absent")},
-		{name: "probe cut short", bin: stub(0), cancel: true},
+		{name: "probe cut short", bin: stub(0, ""), cancel: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
