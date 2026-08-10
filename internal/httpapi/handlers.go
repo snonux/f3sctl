@@ -106,17 +106,54 @@ func (s *Server) handleFansOn(state State, _ request) (Entity, int, error) {
 }
 
 // handleFansOff switches the plug off, requiring explicit confirmation while
-// any host is still drawing power.
+// anything in the rack may still be drawing power.
 //
-// The check mirrors the `force` field the registry advertises, so a client
-// that renders what it was given never hits this path.
+// The check mirrors the `force` field the registry advertises, so a client that
+// renders what it was given normally never hits this path -- normally, because
+// this one is the stricter of the two. See rackStillBusy.
 func (s *Server) handleFansOff(state State, req request) (Entity, int, error) {
-	if state.anyFHostUp() && !req.boolField("force") {
-		return Entity{}, http.StatusConflict, fmt.Errorf(
-			"hosts are still running and the rack fans cool them; " +
-				"re-send with force=true if you really mean to switch the plug off")
+	if !req.boolField("force") {
+		if busy := s.rackStillBusy(state); busy.Busy() {
+			return Entity{}, http.StatusConflict, fmt.Errorf(
+				"the rack may still be drawing power (%s) and the rack fans cool it; "+
+					"re-send with force=true if you really mean to switch the plug off",
+				busy.Why())
+		}
 	}
 	return s.setFans(state, false)
+}
+
+// rackStillBusy is the enforcement half of the fan guard: the same question the
+// registry asks to decide whether to advertise `force`, answered on the best
+// evidence available rather than on the cheapest.
+//
+// The snapshot is consulted first because it is already taken and because it
+// can only say "busy" for a reason the strict probe would also find. Only when
+// it says the rack is cold -- the one answer that would actually cut cooling --
+// is the confirming probe worth its cost, and that cost is real: it wants
+// several consecutive silences per host, so a rack that really is idle takes
+// the better part of a minute to prove it. That is precisely what
+// `f3sctl fans off` pays locally, and paying it here too is the point. Before
+// this, the local command refused while the same command with --remote went
+// ahead.
+func (s *Server) rackStillBusy(state State) power.RackActivity {
+	if busy := state.rackBusy(); busy.Busy() {
+		return busy
+	}
+	return s.confirmRack(context.Background())
+}
+
+// confirmRack runs the strict probe, falling back to the engine's.
+//
+// A seam for the same reason power.Engine.isUp is one: without it this path can
+// only be tested by sending real ICMP to the real rack, so it would not be
+// tested at all -- and it is the last thing standing between a remote client
+// and the cooling.
+func (s *Server) confirmRack(ctx context.Context) power.RackActivity {
+	if s.rackConfirm != nil {
+		return s.rackConfirm(ctx)
+	}
+	return s.engine.RackActivity(ctx)
 }
 
 func (s *Server) setFans(state State, on bool) (Entity, int, error) {

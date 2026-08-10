@@ -28,24 +28,43 @@ func (e *Engine) ProbeAll(ctx context.Context) []HostStatus {
 //
 // "May still be" rather than "are": a host whose liveness could not be
 // determined is included, because both consumers are cooling guards and an
-// unprobeable host is not a host that is known to be off. See rackStillBusy.
+// unprobeable host is not a host that is known to be off. See RackActivity.
 //
 // ICMP rather than SSH on purpose: this answers "is anything drawing power in
 // that rack", which is what the fan guards need to know. A host mid-boot has
 // no sshd yet but is very much running and generating heat.
 //
-// Both fan guards consult this and no other source -- the CLI's `fans off`
-// refusal (cli.fansOff) and the fans-off step of a shutdown
-// (Engine.fansOffOnceTheRackIsIdle, through rackStillBusy) -- so the everyday
-// command and the explicit one cannot disagree about when the rack is cold
-// enough to cut cooling.
+// This is the CLI's view of the guard (cli.fansOff). It is one of three; see
+// RackActivity for the rule they share and for what separates them.
 func (e *Engine) LiveHosts(ctx context.Context) []string {
-	return e.rackStillBusy(ctx).names()
+	return e.RackActivity(ctx).Hosts()
 }
 
-// rackActivity is what the fan guards decide on: which f-hosts may still be
+// RackActivity is what the fan guards decide on: which f-hosts may still be
 // drawing power, and why they might be.
-type rackActivity struct {
+//
+// There are three guards, and this type is the single rule behind all of them:
+//
+//   - `f3sctl fans off` refuses while the rack is busy (cli.fansOff, via
+//     Engine.LiveHosts),
+//   - the last step of a rack-wide shutdown leaves the plug alone while the
+//     rack is busy (Engine.fansOffOnceTheRackIsIdle),
+//   - and the HTTP API both advertises its `force` field and enforces it on
+//     POST /fans/off (httpapi, via RackActivityFrom and Engine.RackActivity).
+//
+// They used to be three separate readings of "is anything up", and the third
+// one disagreed: it read HostStatus.Ping, which had already thrown away whether
+// the probe ran at all, so `f3sctl fans off` and `f3sctl fans off --remote`
+// gave opposite answers in exactly the environment the whole guard was written
+// for. Sharing the rule is what stops that recurring; the comment that used to
+// assert they could not disagree did not.
+//
+// What still differs is the *evidence*, not the rule. Engine.RackActivity
+// probes on demand and wants confirmedDownProbes consecutive silences per host;
+// RackActivityFrom folds an already-taken snapshot, one probe per host. The API
+// advertises from the cheap one and enforces with the strict one, so it can
+// only ever be more cautious than a client expects, never less.
+type RackActivity struct {
 	// running is every host that may still be drawing power, in inventory
 	// order. It is the union of up and unknown; kept separately because the
 	// order is what the operator sees and the two sub-lists are not
@@ -60,15 +79,56 @@ type rackActivity struct {
 	unknown []string
 }
 
-func (a rackActivity) any() bool       { return len(a.running) > 0 }
-func (a rackActivity) names() []string { return a.running }
+// Busy reports whether anything in the rack may still be drawing power, and so
+// whether the fans must stay on.
+func (a RackActivity) Busy() bool { return len(a.running) > 0 }
 
-// why explains what is keeping the fans on, distinguishing hosts that answered
+// Hosts names those hosts, in inventory order.
+func (a RackActivity) Hosts() []string { return a.running }
+
+// add records one host's probed liveness. Down contributes nothing: the whole
+// type is a list of reasons to leave the cooling alone.
+func (a *RackActivity) add(name string, l hostLiveness) {
+	switch l {
+	case livenessUp:
+		a.up = append(a.up, name)
+		a.running = append(a.running, name)
+	case livenessUnknown:
+		a.unknown = append(a.unknown, name)
+		a.running = append(a.running, name)
+	}
+}
+
+// RackActivityFrom applies the same rule to probe results that have already
+// been gathered, rather than probing again.
+//
+// This is what the HTTP API judges its per-request snapshot with. It exists
+// because that snapshot (Engine.ProbeAll) is taken once for the whole response
+// and every availability predicate is judged against that one instant -- and
+// because re-probing per request would make a watchface poll wait out the
+// confirmation gaps. The evidence is therefore weaker than Engine.RackActivity
+// gives, one probe per host; the rule applied to it is identical, including
+// that an unprobeable host counts as running.
+//
+// Non-f hosts are ignored: the plug cools the rack, and the k3s guests in a
+// ProbeAll are not in it.
+func RackActivityFrom(statuses []HostStatus) RackActivity {
+	var a RackActivity
+	for _, st := range statuses {
+		if st.Role != string(inventory.RoleF) {
+			continue
+		}
+		a.add(st.Name, st.liveness())
+	}
+	return a
+}
+
+// Why explains what is keeping the fans on, distinguishing hosts that answered
 // from hosts nothing could be learned about. The difference matters to whoever
 // reads it: the first is the rack working as intended, the second means this
 // machine cannot probe the rack and every other liveness answer it gives is
 // equally worthless.
-func (a rackActivity) why() string {
+func (a RackActivity) Why() string {
 	var parts []string
 	if len(a.up) > 0 {
 		parts = append(parts, strings.Join(a.up, ", ")+" still running")
@@ -80,8 +140,9 @@ func (a rackActivity) why() string {
 	return strings.Join(parts, "; ")
 }
 
-// rackStillBusy probes every f-host and reports which of them may still be
-// drawing power.
+// RackActivity probes every f-host and reports which of them may still be
+// drawing power. This is the strict half of the guard: each host that stays
+// silent is probed confirmedDownProbes times before it counts as off.
 //
 // It pings directly instead of going through Probe because Probe also dials
 // port 22 on every host, and a host that is off makes that dial wait out the
@@ -90,7 +151,7 @@ func (a rackActivity) why() string {
 // Concurrently, because a host that is off costs several ProbeTimeouts (see
 // confirmLiveness) and the caller is usually a person waiting at a terminal or
 // a shutdown holding the rack in an undefined state.
-func (e *Engine) rackStillBusy(ctx context.Context) rackActivity {
+func (e *Engine) RackActivity(ctx context.Context) RackActivity {
 	hosts := e.cfg.Inventory.ByRole(inventory.RoleF)
 
 	state := make([]hostLiveness, len(hosts))
@@ -104,16 +165,9 @@ func (e *Engine) rackStillBusy(ctx context.Context) rackActivity {
 	}
 	wg.Wait()
 
-	var a rackActivity
+	var a RackActivity
 	for i, h := range hosts {
-		switch state[i] {
-		case livenessUp:
-			a.up = append(a.up, h.Name)
-			a.running = append(a.running, h.Name)
-		case livenessUnknown:
-			a.unknown = append(a.unknown, h.Name)
-			a.running = append(a.running, h.Name)
-		}
+		a.add(h.Name, state[i])
 	}
 	return a
 }

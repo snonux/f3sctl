@@ -249,6 +249,12 @@ started, or an older server). Render what is there; do not require any of it.
 `fans-on` and `fans-off` are **synchronous**: they return `200` with the plug's
 state read back from the device. No job, no polling.
 
+`fans-off` is the one slow request in this API. Before it cuts the cooling it
+re-probes the rack, and proving that a silent host really is powered off takes
+several pings spaced ten seconds apart — so a request that is about to succeed
+can take the better part of a minute. Allow **60 s** for it. (`fans-off` with
+`force=true`, and every other route, answers in the usual few seconds.)
+
 ---
 
 ## 6. Rendering fields
@@ -281,13 +287,26 @@ Worked example. While a host is running, `fans-off` arrives as:
   "type": "application/x-www-form-urlencoded",
   "fields": [{ "name": "force", "type": "checkbox", "value": false,
                "required": true,
-               "title": "Hosts are still running: the rack fans keep them cool, so switching the plug off now risks overheating. Confirm to proceed." }] }
+               "title": "Hosts may still be running (f3 still running): the rack fans keep them cool, so switching the plug off now risks overheating. Confirm to proceed." }] }
 ```
 
 A correct client shows a confirmation with that sentence as its text, and sends
 `force=true` only if the user agrees. When the rack is cold the same action
 arrives with no `fields` at all, and the client shows a plain button — with no
 code that knows the word "force".
+
+The parenthesis is the reason, and it varies. `f3 still running` is the rack
+working as intended. `f3 could not be probed, so assumed running` means the
+server could not establish anything about that host and is refusing to guess —
+in that state the `ping` flags in `/status` are not evidence of an idle rack
+either, so do not present it as one. This is why §6 says to render the title as
+given instead of writing your own.
+
+A `fans-off` sent **without** `force` can still come back `409` even though the
+action was offered with no field: the advertisement is judged on the single
+probe taken to build the response, while the switch itself is judged on a
+slower, more sceptical one. Treat it like any other 409 — re-fetch and
+re-render, and the field will be there.
 
 ---
 

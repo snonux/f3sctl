@@ -68,12 +68,14 @@ func TestRoutesAreUnique(t *testing.T) {
 // on instead of hard-coding rules. If any of these flip, every client silently
 // changes behaviour, so they are worth asserting explicitly.
 func TestActionAvailability(t *testing.T) {
+	// PingKnown is set throughout: these states describe a rack that was
+	// successfully probed, so "not answering" means off rather than unknown.
 	fHost := func(name string, ping bool) power.HostStatus {
-		return power.HostStatus{Name: name, Role: "f", Ping: ping, SSH: ping}
+		return power.HostStatus{Name: name, Role: "f", Ping: ping, PingKnown: true, SSH: ping}
 	}
 	// A host that answers ICMP but has no sshd yet: mid-boot, or mid-shutdown.
 	booting := func(name string) power.HostStatus {
-		return power.HostStatus{Name: name, Role: "f", Ping: true, SSH: false}
+		return power.HostStatus{Name: name, Role: "f", Ping: true, PingKnown: true, SSH: false}
 	}
 
 	allUp := State{
@@ -164,15 +166,21 @@ func TestActionAvailability(t *testing.T) {
 }
 
 // TestFansOffForceField pins the guard that keeps the rack from being left
-// without cooling: the confirmation field appears only while a host is up.
+// without cooling: the confirmation field appears only while a host may be up.
 func TestFansOffForceField(t *testing.T) {
 	r, ok := routeByName("fans-off")
 	if !ok {
 		t.Fatal("no fans-off route")
 	}
 
-	hot := State{Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true}}, Fans: power.FansState{On: true}}
-	cold := State{Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: false}}, Fans: power.FansState{On: true}}
+	hot := State{
+		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true}},
+		Fans:  power.FansState{On: true},
+	}
+	cold := State{
+		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: false, PingKnown: true}},
+		Fans:  power.FansState{On: true},
+	}
 
 	fields := r.fields(hot)
 	if len(fields) != 1 || fields[0].Name != "force" {
@@ -184,9 +192,67 @@ func TestFansOffForceField(t *testing.T) {
 	if fields[0].Title == "" {
 		t.Error("the force field needs a title: clients are told to show it rather than invent their own wording")
 	}
+	if !strings.Contains(fields[0].Title, "f0") {
+		t.Errorf("title = %q, want it to name the host keeping the fans on", fields[0].Title)
+	}
 
 	if got := r.fields(cold); len(got) != 0 {
 		t.Errorf("expected no fields when the rack is cold, got %+v", got)
+	}
+}
+
+// TestFansOffForceFieldWhenTheRackCouldNotBeProbed is the advertisement half of
+// the third fan guard's failure.
+//
+// A host whose probe never ran arrives here as ping=false, exactly like a host
+// that is off -- and that is not a hypothetical: bozohttpd hands the CGI a PATH
+// with no /sbin in it, so no ping(8) is found and every f-host looks silent.
+// The API then advertised fans-off with no confirmation field at all, which a
+// well-behaved client renders as a plain button, over a rack that may be fully
+// running. Unknown has to produce the field, and the title has to say which of
+// the two reasons it is: "still running" and "could not be probed" call for
+// completely different reactions from whoever reads it.
+func TestFansOffForceFieldWhenTheRackCouldNotBeProbed(t *testing.T) {
+	r, ok := routeByName("fans-off")
+	if !ok {
+		t.Fatal("no fans-off route")
+	}
+
+	// Ping false, PingKnown false: the probe never reached a conclusion.
+	unprobed := State{
+		Hosts: []power.HostStatus{{Name: "f0", Role: "f"}, {Name: "f3", Role: "f"}},
+		Fans:  power.FansState{On: true},
+	}
+
+	fields := r.fields(unprobed)
+	if len(fields) != 1 || fields[0].Name != "force" {
+		t.Fatalf("expected a 'force' field when the rack could not be probed, got %+v", fields)
+	}
+	if !strings.Contains(fields[0].Title, "could not be probed") {
+		t.Errorf("title = %q, want it to distinguish an unprobeable rack from a running one",
+			fields[0].Title)
+	}
+}
+
+// TestFansOffIgnoresNonFHosts pins that the k3s guests in a status snapshot do
+// not keep the rack fans on. They are not in the rack, and counting them would
+// make the fans un-cuttable for as long as anything answers anywhere.
+func TestFansOffIgnoresNonFHosts(t *testing.T) {
+	r, ok := routeByName("fans-off")
+	if !ok {
+		t.Fatal("no fans-off route")
+	}
+
+	s := State{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", Ping: false, PingKnown: true},
+			{Name: "r0", Role: "cluster", Ping: true, PingKnown: true},
+			{Name: "r1", Role: "cluster"}, // not probed at all
+		},
+		Fans: power.FansState{On: true},
+	}
+	if got := r.fields(s); len(got) != 0 {
+		t.Errorf("fields = %+v, want none: only f-hosts are in the rack", got)
 	}
 }
 

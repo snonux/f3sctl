@@ -26,12 +26,35 @@ import (
 //	               and Wake-on-LAN will not wake it. Worth knowing before
 //	               pressing "on" again and concluding the button is broken.
 type HostStatus struct {
-	Name string  `json:"name"`
-	Role string  `json:"role"`
-	IP   string  `json:"ip"`
-	Ping bool    `json:"ping"`
-	SSH  bool    `json:"ssh"`
-	MS   float64 `json:"ms"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+	IP   string `json:"ip"`
+	Ping bool   `json:"ping"`
+	// PingKnown says whether the ICMP probe reached a conclusion at all. False
+	// means it never ran -- no ping(8), a binary that could not be started, a
+	// context cut short -- which is NOT the same as a host that said nothing.
+	//
+	// It is a separate field rather than a third state of Ping because Ping is
+	// what gets displayed, and a display wants two columns. Anything that
+	// *decides* something must read both, through liveness(): the zero value of
+	// this struct is therefore "silent, and we do not know why", which is the
+	// safe reading for a HostStatus that some other package built by hand.
+	PingKnown bool    `json:"pingKnown"`
+	SSH       bool    `json:"ssh"`
+	MS        float64 `json:"ms"`
+}
+
+// liveness folds the two ping fields back into the tri-state the fan guards
+// decide on. See RackActivityFrom, which is the only caller that matters.
+func (h HostStatus) liveness() hostLiveness {
+	switch {
+	case h.Ping:
+		return livenessUp
+	case !h.PingKnown:
+		return livenessUnknown
+	default:
+		return livenessDown
+	}
 }
 
 // Probe returns the status of every host in hosts, probed concurrently.
@@ -60,16 +83,19 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// Only the "did it answer" half is reported. HostStatus describes what was
-	// observed rather than deciding anything with it, and a host that could
-	// not be probed did not answer. The safety guards must not read it this
-	// way, and do not: they go through Engine.isRunning, which keeps unknown
-	// apart from silent.
+	// Both halves are recorded, not just "did it answer".
+	//
+	// Discarding the second one was a real hole: HostStatus is the evidence the
+	// HTTP API's fan guard reads, and with `known` thrown away a probe that
+	// could not run looked exactly like a silent host -- so the CGI whose PATH
+	// lacked /sbin (see pingCandidates) advertised fans-off, unforced, against a
+	// fully running rack. Anything deciding on this must go through
+	// HostStatus.liveness rather than Ping alone.
 	go func() {
 		defer wg.Done()
 		start := time.Now()
-		up, _ := e.liveness()(ctx, h.IP)
-		st.Ping = up
+		up, known := e.liveness()(ctx, h.IP)
+		st.Ping, st.PingKnown = up, known
 		if st.Ping {
 			st.MS = float64(time.Since(start).Microseconds()) / 1000
 		}

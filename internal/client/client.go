@@ -63,7 +63,14 @@ func New(base, key string, stdout io.Writer) (*Client, error) {
 		key:  key,
 		// Generous but bounded: the API answers a status request by probing
 		// seven hosts, and a phone-tethered link is not fast.
-		http:   &http.Client{Timeout: 30 * time.Second},
+		//
+		// A minute rather than the obvious thirty seconds because of one route:
+		// POST /fans/off confirms the rack is idle before it cuts the cooling,
+		// and confirming a silence takes several probes spaced ten seconds
+		// apart (power.confirmLiveness). Timing that request out client-side
+		// would leave the operator with no idea whether the plug was switched --
+		// the one outcome worth being sure about here.
+		http:   &http.Client{Timeout: 60 * time.Second},
 		stdout: stdout,
 	}, nil
 }

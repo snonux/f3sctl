@@ -25,6 +25,12 @@ type Server struct {
 	// client never has to know how the API is mounted.
 	base string
 	node string
+
+	// rackConfirm re-probes what is running in the rack, with the consecutive
+	// -silence evidence the fan guard demands before anything cuts cooling.
+	// Nil means the engine's own probe; only tests substitute anything else.
+	// See Server.confirmRack.
+	rackConfirm func(context.Context) power.RackActivity
 }
 
 // request is the parsed CGI request.

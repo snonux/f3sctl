@@ -115,12 +115,12 @@ func describeFields(r route) map[string]any {
 }
 
 // widestState is a synthetic state chosen to make every conditional field
-// appear: an f-host up (which is what adds the fans-off confirmation) and no
-// job running.
+// appear: an f-host known to be up (which is what adds the fans-off
+// confirmation) and no job running.
 func widestState() State {
 	return State{
 		Hosts: []power.HostStatus{
-			{Name: "f0", Role: "f", Ping: true, SSH: true},
+			{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
 		},
 	}
 }

@@ -477,6 +477,92 @@ func TestPingSeparatesSilenceFromAFailedProbe(t *testing.T) {
 	}
 }
 
+// TestProbeKeepsWhetherTheProbeRanAtAll pins that probeOne carries both halves
+// of the liveness answer into HostStatus.
+//
+// It used to keep only "did it answer" and throw the rest away, and HostStatus
+// is the evidence the HTTP API's fan guard reads -- so a probe that could not
+// run arrived there as an ordinary powered-off host, and POST /fans/off cut the
+// cooling to a running rack without even offering the confirmation field. The
+// SSH half is irrelevant here and is pointed at TEST-NET-1 so it fails fast.
+func TestProbeKeepsWhetherTheProbeRanAtAll(t *testing.T) {
+	cfg := config.Default()
+	cfg.ProbeTimeout = config.Duration(10 * time.Millisecond)
+	e := &Engine{cfg: cfg}
+	e.isUp = func(context.Context, string) (bool, bool) { return false, false }
+
+	st := e.probeOne(context.Background(), inventory.Host{
+		Name: "f0", Role: inventory.RoleF, IP: "192.0.2.1", SSHPort: 22,
+	})
+
+	if st.Ping {
+		t.Errorf("Ping = true, want false: nothing answered")
+	}
+	if st.PingKnown {
+		t.Error("PingKnown = true, want false: the probe never reached a conclusion")
+	}
+	if !RackActivityFrom([]HostStatus{st}).Busy() {
+		t.Error("a host whose probe never ran does not keep the rack fans on")
+	}
+}
+
+// TestBothHalvesOfTheGuardAgree is the invariant behind having one rack-activity
+// rule instead of three readings of "is anything up".
+//
+// The HTTP API judges a snapshot it already holds (RackActivityFrom); the CLI
+// and the shutdown's last step probe on demand (Engine.RackActivity). They are
+// allowed to differ in how much evidence they gather -- one probe versus
+// several -- but never in what they conclude from it. They did: the snapshot
+// side read Ping alone, so "the probe could not run" came out as an idle rack
+// there and as a busy one everywhere else, and `f3sctl fans off` and
+// `f3sctl fans off --remote` gave opposite answers on the same Pi.
+func TestBothHalvesOfTheGuardAgree(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		up, known  bool
+		wantBusy   bool
+		wantReason string
+	}{
+		{name: "answering", up: true, known: true, wantBusy: true, wantReason: "still running"},
+		{name: "silent", known: true},
+		{name: "unprobeable", wantBusy: true, wantReason: "could not be probed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shelly := newFakeShelly(t, true)
+			eng := testEngine(t, shelly)
+			eng.isUp = func(context.Context, string) (bool, bool) { return tc.up, tc.known }
+
+			probed := eng.RackActivity(context.Background())
+
+			var snapshot []HostStatus
+			for _, h := range eng.cfg.Inventory.ByRole(inventory.RoleF) {
+				snapshot = append(snapshot, HostStatus{
+					Name: h.Name, Role: string(h.Role), IP: h.IP,
+					Ping: tc.up, PingKnown: tc.known,
+				})
+			}
+			folded := RackActivityFrom(snapshot)
+
+			if probed.Busy() != tc.wantBusy {
+				t.Errorf("Engine.RackActivity busy = %v, want %v", probed.Busy(), tc.wantBusy)
+			}
+			if folded.Busy() != probed.Busy() {
+				t.Errorf("RackActivityFrom busy = %v, but the live probe says %v",
+					folded.Busy(), probed.Busy())
+			}
+			if !reflect.DeepEqual(folded.Hosts(), probed.Hosts()) {
+				t.Errorf("hosts differ: folded %v, probed %v", folded.Hosts(), probed.Hosts())
+			}
+			if folded.Why() != probed.Why() {
+				t.Errorf("reason differs: folded %q, probed %q", folded.Why(), probed.Why())
+			}
+			if tc.wantReason != "" && !strings.Contains(folded.Why(), tc.wantReason) {
+				t.Errorf("reason = %q, want it to mention %q", folded.Why(), tc.wantReason)
+			}
+		})
+	}
+}
+
 // TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown pins that the guard
 // holds to the same evidence standard as awaitPowerDown.
 //

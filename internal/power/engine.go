@@ -470,13 +470,13 @@ const fansLeftOn = "rack fans left ON"
 // that could not be found, a cancelled context -- each one used to subtract a
 // host from the live set and so bring the rack one host closer to "idle", i.e.
 // the guard failed in the direction of cutting cooling to a running rack. See
-// rackStillBusy, which counts unknown as running and wants consecutive misses
+// RackActivity, which counts unknown as running and wants consecutive misses
 // before it accepts that a host is off.
 func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) ([]string, error) {
-	if busy := e.rackStillBusy(ctx); busy.any() {
-		e.report.Step(fansLeftOnReason(busy.names()))
-		fmt.Fprintf(log, "%s: %s.\n", fansLeftOn, busy.why())
-		return busy.names(), nil
+	if busy := e.RackActivity(ctx); busy.Busy() {
+		e.report.Step(fansLeftOnReason(busy.Hosts()))
+		fmt.Fprintf(log, "%s: %s.\n", fansLeftOn, busy.Why())
+		return busy.Hosts(), nil
 	}
 
 	e.report.Step("switching the rack fans off")

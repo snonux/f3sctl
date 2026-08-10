@@ -101,15 +101,23 @@ func (s State) everyFHostUp() (up, sshUp, total int) {
 	return up, sshUp, total
 }
 
-// anyFHostUp reports whether anything in the rack is drawing power. This is
-// what gates switching the fans off.
-func (s State) anyFHostUp() bool {
-	for _, h := range s.Hosts {
-		if h.Role == "f" && h.Ping {
-			return true
-		}
-	}
-	return false
+// rackBusy reports which f-hosts may still be drawing power, judged against
+// this request's snapshot. This is what gates switching the fans off.
+//
+// The rule is power's, not this package's, and deliberately so: the CLI's
+// `fans off` and the fans-off step of a shutdown decide with the same code (see
+// power.RackActivity). This used to be a local loop over HostStatus.Ping, and
+// it disagreed with the other two in the one way that matters -- a probe that
+// could not run reads as ping=false, so on the PATH-lacking-/sbin CGI the API
+// advertised fans-off without a `force` field, and executed it, against a fully
+// running rack.
+//
+// The snapshot is a single probe per host, so this is the *cheap* half of the
+// guard: it is what an advertisement is judged against, and every response can
+// afford it. handleFansOff confirms with the strict half before it switches
+// anything.
+func (s State) rackBusy() power.RackActivity {
+	return power.RackActivityFrom(s.Hosts)
 }
 
 // route is one entry in the API surface.
@@ -244,11 +252,17 @@ func routes() []route {
 			Method: http.MethodPost, Path: "/fans/off", Action: true,
 			Available: func(s State) bool { return s.FansErr == nil && s.Fans.On },
 			// The guard is expressed as a field rather than documented as a
-			// rule: while a host is up the client is handed a confirmation
-			// toggle with the reason in its title, and when the rack is cold
-			// the field simply is not there.
+			// rule: while the rack may be busy the client is handed a
+			// confirmation toggle with the reason in its title, and when the
+			// rack is cold the field simply is not there.
+			//
+			// The reason is spelled out rather than fixed, because "f3 still
+			// running" and "f3 could not be probed, so assumed running" call for
+			// very different reactions from whoever is reading it, and clients
+			// are told to render this title verbatim (docs/CLIENT.md §6).
 			Fields: func(s State) []Field {
-				if !s.anyFHostUp() {
+				busy := s.rackBusy()
+				if !busy.Busy() {
 					return nil
 				}
 				return []Field{{
@@ -256,8 +270,9 @@ func routes() []route {
 					Type:     "checkbox",
 					Value:    false,
 					Required: true,
-					Title: "Hosts are still running: the rack fans keep them cool, " +
-						"so switching the plug off now risks overheating. Confirm to proceed.",
+					Title: "Hosts may still be running (" + busy.Why() + "): the rack fans " +
+						"keep them cool, so switching the plug off now risks overheating. " +
+						"Confirm to proceed.",
 				}}
 			},
 			Handle: (*Server).handleFansOff,
