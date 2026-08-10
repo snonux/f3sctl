@@ -43,12 +43,15 @@ type Engine struct {
 	// made every host report false once already (see pingCandidates), which
 	// through a single-bool probe reads exactly like a rack that is safely
 	// cold. Most decisions read this through isRunning, which folds unknown
-	// into "assume it is running". Two callers deliberately do not: probeOne,
+	// into "assume it is running". Three callers deliberately do not: probeOne,
 	// which describes what was observed rather than acting on it and keeps both
-	// halves in HostStatus for whoever does act; and confirmLiveness, the fan
+	// halves in HostStatus for whoever does act; confirmLiveness, the fan
 	// guard's own probe, which needs all three answers because unknown ends its
 	// loop immediately while silence has to be seen confirmedDownProbes times
-	// running. Folding early would cost it exactly that distinction.
+	// running; and awaitPowerDown, which needs up on its own to record whether a
+	// host was ever heard from, so it can tell a hung host apart from one it
+	// simply could not probe. Folding early would cost them exactly that
+	// distinction.
 	isUp func(ctx context.Context, ip string) (up, known bool)
 
 	// nfsMounts lists the NFS filesystems mounted on the machine f3sctl runs

@@ -27,7 +27,7 @@ func (e *Engine) ProbeAll(ctx context.Context) []HostStatus {
 // in inventory order.
 //
 // "May still be" rather than "are": a host whose liveness could not be
-// determined is included, because both consumers are cooling guards and an
+// determined is included, because this feeds a cooling guard and an
 // unprobeable host is not a host that is known to be off. See RackActivity.
 //
 // ICMP rather than SSH on purpose: this answers "is anything drawing power in
