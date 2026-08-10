@@ -6,14 +6,20 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/magefile/mage/mg"
+	"github.com/magefile/mage/sh"
 )
 
-// entry is the main package built by every target.
-const entry = "cmd/f3sctl/main.go"
+// binaryName is the output binary name, used both for the local build and
+// the ~/bin install target.
+const binaryName = "f3sctl"
+
+// pkgPath is the main package built by every target. It names the package
+// directory (not a single file inside it) so `go build` compiles every file
+// in cmd/f3sctl, not just main.go.
+const pkgPath = "./cmd/f3sctl"
 
 // crossTargets are the platforms shipped through pkgrepo.f3s.buetow.org:
 // netbsd/arm64 for pi0/pi1 (CGI + CLI) and freebsd/amd64 for f0-f3 (agent).
@@ -27,60 +33,56 @@ var crossTargets = []struct{ goos, goarch string }{
 	{"freebsd", "amd64"},
 }
 
-func run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func runEnv(env []string, name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Env = append(os.Environ(), env...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
+// Default is what a bare `mage` invocation runs. Without it, mage falls back
+// to listing targets instead of doing anything useful.
+//
+// This must be a package-level var referencing the target function (not a
+// func named Default) -- mage's parser only recognizes `var Default = ...`
+// when picking the no-args target, per mage/parse.setDefault.
+var Default = Build
 
 // Build builds the f3sctl binary for the current platform.
 func Build() error {
 	fmt.Println("Building...")
-	return run("go", "build", "-o", "f3sctl", entry)
+	return sh.RunV("go", "build", "-o", binaryName, pkgPath)
 }
 
 // Dev builds the f3sctl binary with race detection.
 func Dev() error {
 	mg.Deps(Vet, Lint)
 	fmt.Println("Building with race detector...")
-	return run("go", "build", "-race", "-o", "f3sctl", entry)
+	return sh.RunV("go", "build", "-race", "-o", binaryName, pkgPath)
 }
 
 // Vet runs go vet on all go files.
 func Vet() error {
 	fmt.Println("Vetting...")
-	return run("go", "vet", "./...")
+	return sh.RunV("go", "vet", "./...")
 }
 
 // Lint runs golangci-lint.
 func Lint() error {
 	fmt.Println("Linting...")
-	return run("golangci-lint", "run")
+	return sh.RunV("golangci-lint", "run")
 }
 
 // LintInstall installs golangci-lint.
 func LintInstall() error {
 	fmt.Println("Installing golangci-lint...")
-	return run("go", "install", "github.com/golangci/golangci-lint/cmd/golangci-lint@latest")
+	return sh.RunV("go", "install", "github.com/golangci/golangci-lint/cmd/golangci-lint@latest")
 }
 
 // Test runs all unit tests.
+//
+// This deliberately does NOT clean the test cache first: go's own test
+// caching is what makes repeated `mage test` runs fast, and there was no
+// recorded reason (git blame: added alongside the rest of the file in its
+// initial commit, no follow-up explaining a need for forced re-runs) to pay
+// that cost on every invocation. Run `go clean -testcache` by hand if a
+// forced re-run is ever actually needed.
 func Test() error {
-	fmt.Println("Cleaning test cache...")
-	if err := run("go", "clean", "-testcache"); err != nil {
-		return err
-	}
 	fmt.Println("Running tests...")
-	return run("go", "test", "./...")
+	return sh.RunV("go", "test", "./...")
 }
 
 // Install builds for the host platform and installs into ~/bin, which is how
@@ -91,7 +93,7 @@ func Install() error {
 	if err != nil {
 		return err
 	}
-	dst := filepath.Join(home, "bin", "f3sctl")
+	dst := filepath.Join(home, "bin", binaryName)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
@@ -100,7 +102,7 @@ func Install() error {
 	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return run("cp", "f3sctl", dst)
+	return sh.RunV("cp", binaryName, dst)
 }
 
 // Cross cross-compiles for every packaged platform into ./dist.
@@ -112,10 +114,10 @@ func Cross() error {
 		return err
 	}
 	for _, t := range crossTargets {
-		out := filepath.Join("dist", fmt.Sprintf("f3sctl-%s-%s", t.goos, t.goarch))
+		out := filepath.Join("dist", fmt.Sprintf("%s-%s-%s", binaryName, t.goos, t.goarch))
 		fmt.Printf("Cross-compiling %s/%s...\n", t.goos, t.goarch)
-		env := []string{"CGO_ENABLED=0", "GOOS=" + t.goos, "GOARCH=" + t.goarch}
-		if err := runEnv(env, "go", "build", "-o", out, entry); err != nil {
+		env := map[string]string{"CGO_ENABLED": "0", "GOOS": t.goos, "GOARCH": t.goarch}
+		if err := sh.RunWithV(env, "go", "build", "-o", out, pkgPath); err != nil {
 			return err
 		}
 	}
@@ -143,8 +145,8 @@ func Publish() error {
 
 	for _, target := range []string{"pkg-netbsd", "pkg-freebsd"} {
 		fmt.Printf("Running make %s...\n", target)
-		err := run("make", "-C", pkgDir, target,
-			"NAME=f3sctl",
+		err := sh.RunV("make", "-C", pkgDir, target,
+			"NAME="+binaryName,
 			"SRC="+src,
 			"COMMENT=f3s homelab control tool",
 			"DESC=Power, status and rack-fan control for the f3s homelab, as a CLI and a self-describing HTTP API.",
