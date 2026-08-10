@@ -97,6 +97,29 @@ type Engine struct {
 // It cannot fail: the SSH identity is resolved lazily, on the first operation
 // that actually needs it, so status probing works on a machine that has no
 // f3sctl key at all.
+//
+// This is the one place in the package allowed to name a concrete adapter --
+// execPower, execProbe, execFans, execNFS, execZusb -- for the same reason a
+// composition root always is: something has to choose the real mechanism
+// before the interfaces in backends.go can be used for anything. That is not
+// a gap in the OCP story backends.go describes, it is the other half of it:
+// off, on, shutdownEach, fansOffOnceTheRackIsIdle and the rest of Engine's
+// policy methods depend only on PowerBackend/ProbeBackend/FansBackend/
+// NFSChecker/ZusbChecker, never on shellyRPC, magicPacket or ssh(1) directly,
+// so a second fan switch or wake mechanism (IPMI, say) is a new type
+// implementing the relevant interface plus a few lines here choosing it --
+// never an edit to those policy methods. Exactly this seam is what
+// backends_test.go/engine_test.go already exercise, substituting fakes for
+// every one of these fields; nothing about a real second implementation
+// would work any differently.
+//
+// New deliberately takes no options to pick among adapters: this project has
+// exactly one fan switch (a Shelly plug) and one wake mechanism (WoL), and no
+// second implementation of either is asked for anywhere in this codebase.
+// Adding a functional-options API (or a config-driven switch) here now would
+// be a seam built for a hypothetical that does not exist -- were a second
+// implementation ever actually needed, wiring it in is the few lines this
+// comment describes, not a redesign.
 func New(cfg config.Config) (*Engine, error) {
 	e := &Engine{
 		cfg:               cfg,
