@@ -10,6 +10,13 @@
 // implemented by docs/client-reference.js: it knows the base URL and the API
 // key, and discovers everything else. There are no literal API paths in this
 // file, which is the property that lets the server move things around.
+//
+// One opportunistic exception: Entity.ActionForVerb also matches on
+// Action.CLIVerb, an additive Siren field that docs/CLIENT.md does not
+// document (the contract still only promises rel-based links and name-based
+// actions). It is used only as a preferred shortcut when a server advertises
+// it, with a fallback to the documented name-based lookup for one that
+// doesn't -- see ActionForVerb and sy0.
 package client
 
 import (
@@ -157,21 +164,69 @@ func (e Entity) Action(name string) (Action, bool) {
 // ActionForVerb returns the offered action whose declared CLIVerb equals
 // verb -- the CLI words a command was typed with, e.g. "power f3 on".
 //
-// This is how the client recognises what to invoke: the server is the single
-// source for the verb-to-action-name mapping (route.CLIVerb in
-// internal/httpapi/registry.go), and matching against what it just
+// Primary path: matches against Action.CLIVerb, the server's single source
+// for the verb-to-action-name mapping (route.CLIVerb in
+// internal/httpapi/registry.go). Matching against what the server just
 // advertised replaces a client-local table that had to be kept in step by
-// hand. Absent means the same thing it means for Action: either verb names
-// nothing the server knows, or it names something currently withheld -- the
-// two are indistinguishable here on purpose, since only possible actions are
-// ever advertised (see httpapi.Router.Actions).
+// hand -- see sy0.
+//
+// Fallback path: CLIVerb is an additive Siren field (json:"cliVerb,omitempty"),
+// so a server built before sy0 (09a5262-6dea943) never sends it, and it
+// decodes as "" on every action -- the primary match can then never succeed,
+// which used to make every remote command report "not available right now"
+// against an un-upgraded server. That is not a rare edge case here: this
+// project has no unified deploy step (mage cross/publish only pushes
+// packages; upgrading the CGI on pi0/pi1 is a separate manual step), so a
+// freshly built client talking to an older server is routine. When no action's
+// CLIVerb matches, legacyActionName recovers the pre-sy0 derivation (the
+// actionFor/actionName logic this file used to carry) and looks the result up
+// by Action.Name -- the one lookup docs/CLIENT.md actually documents.
+//
+// Absent (both paths exhausted) still means what it always meant for Action:
+// either verb names nothing the server knows, or it names something currently
+// withheld -- the two are indistinguishable here on purpose, since only
+// possible actions are ever advertised (see httpapi.Router.Actions).
 func (e Entity) ActionForVerb(verb string) (Action, bool) {
 	for _, a := range e.Actions {
-		if a.CLIVerb == verb {
+		if a.CLIVerb != "" && a.CLIVerb == verb {
 			return a, true
 		}
 	}
+	if name, ok := legacyActionName(verb); ok {
+		return e.Action(name)
+	}
 	return Action{}, false
+}
+
+// legacyActionFor maps a CLI verb onto the action name a pre-sy0 server
+// advertised it under. It exists only as ActionForVerb's compatibility
+// fallback: a server that declares CLIVerb makes this table redundant for
+// that route, so a newly added route needs a CLIVerb on it
+// (internal/httpapi/registry.go), not a new entry here.
+var legacyActionFor = map[string]string{
+	"power on":          "power-on",
+	"power off":         "power-off",
+	"fans on":           "fans-on",
+	"fans off":          "fans-off",
+	"monitoring mute":   "monitoring-mute",
+	"monitoring unmute": "monitoring-unmute",
+}
+
+// legacyActionName reconstructs the action name a command used to resolve to
+// before sy0 introduced Action.CLIVerb, for ActionForVerb's fallback path.
+// Per-host commands ("power f1 off") are derived rather than listed, so the
+// fallback keeps working for hosts added to the inventory after this code was
+// last touched.
+func legacyActionName(cmd string) (string, bool) {
+	if name, ok := legacyActionFor[cmd]; ok {
+		return name, true
+	}
+
+	fields := strings.Fields(cmd)
+	if len(fields) == 3 && fields[0] == "power" && (fields[2] == "on" || fields[2] == "off") {
+		return fields[1] + "-" + fields[2], true
+	}
+	return "", false
 }
 
 // resolve turns a root-relative href from a response into an absolute URL.

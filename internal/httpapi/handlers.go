@@ -347,7 +347,7 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 
 // jobArgs maps a job action identifier to the CLI invocation the detached
 // child runs. It is jobArgsFrom bound to the real route table; see that
-// function for the derivation and registry_test.go's consistency tests for
+// function for the derivation and consistency_test.go's consistency tests for
 // what it guards against.
 func jobArgs(action string) []string {
 	return jobArgsFrom(routes(), action)
