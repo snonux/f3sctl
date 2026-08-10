@@ -53,6 +53,28 @@ type Config struct {
 	// StateDir holds the job lock, job state and job log.
 	StateDir string `json:"state_dir"`
 
+	// PeerNodes are f3sctl's own other API-serving hosts (pi0 and pi1),
+	// consulted by internal/coordination.PeerSet before a job starts.
+	//
+	// The job lock in StateDir only serialises requests that reach one node,
+	// and relayd load-balances pi0 and pi1, so two clicks seconds apart can
+	// land on different nodes and start two conflicting jobs -- observed on
+	// 2026-08-08. Living here, rather than as a package-level var inside the
+	// coordination package, is what lets that package be constructed and
+	// tested without hardcoding which two hosts run f3sctl.
+	PeerNodes []string `json:"peer_nodes"`
+	// PeerJobPath is the full URL path (including the CGI mount point) a
+	// peer's current job is read from over plain HTTP, e.g.
+	// "/cgi-bin/f3sctl/job".
+	//
+	// This is deliberately a separate literal from httpapi's own "/job" route
+	// path (PATH_INFO, as CGI sees it, never includes SCRIPT_NAME) rather
+	// than the two being reassembled from one another: the peer is a
+	// different process on a different host, reached over a real HTTP
+	// connection where the mount point matters, and config is where a value
+	// that has to be the same on both nodes belongs.
+	PeerJobPath string `json:"peer_job_path"`
+
 	// APIURL is the endpoint --remote talks to. Set on clients (earth), unset
 	// on the Pis, which serve the API rather than call it.
 	APIURL string `json:"api_url"`
@@ -101,6 +123,8 @@ func Default() Config {
 		},
 		APIKeyFile:        "/var/db/f3sctl/apikey",
 		StateDir:          "/var/db/f3sctl",
+		PeerNodes:         []string{"192.168.1.125", "192.168.1.126"},
+		PeerJobPath:       "/cgi-bin/f3sctl/job",
 		VMShutdownTimeout: Duration(240 * time.Second),
 		UnmuteTimeout:     Duration(1200 * time.Second),
 		ProbeTimeout:      Duration(2 * time.Second),
