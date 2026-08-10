@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -386,7 +385,7 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 // fully running rack -- while the same broken probe had already told
 // partitionLive that there was nothing to shut down. That is not hypothetical:
 // a CGI whose PATH lacked /sbin made every host report false once already, in
-// the very environment `power off` runs in (see pingCandidates).
+// the very environment `power off` runs in (see infra.pingCandidates).
 //
 // Unknown must therefore count as running, and nothing may be switched.
 func TestFansStayOnWhenLivenessCannotBeProbed(t *testing.T) {
@@ -477,73 +476,17 @@ func TestFansStayOnWhenEveryPingFailsHard(t *testing.T) {
 	}
 }
 
-// TestPingSeparatesSilenceFromAFailedProbe covers the distinction everything
-// above rests on, with ordinary executables standing in for ping(8).
-//
-// What makes an answer an answer is the statistics line, not the exit status. A
-// ping that printed "1 packets transmitted, 0 received" measured the host and
-// heard nothing; a ping that exits non-zero having printed no statistics never
-// got as far as measuring anything, and the two are indistinguishable by exit
-// code across the platforms this runs on. The stubs reproduce both shapes,
-// including the real output of `ping no.such.host.invalid`.
-func TestPingSeparatesSilenceFromAFailedProbe(t *testing.T) {
-	dir := t.TempDir()
-	n := 0
-	stub := func(exit int, output string) string {
-		n++
-		p := filepath.Join(dir, fmt.Sprintf("ping%d", n))
-		script := fmt.Sprintf("#!/bin/sh\ncat <<'EOF'\n%s\nEOF\nexit %d\n", output, exit)
-		if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
-			t.Fatalf("writing the ping stub: %v", err)
-		}
-		return p
-	}
-
-	const stats = "--- 192.0.2.1 ping statistics ---\n" +
-		"1 packets transmitted, 0 received, 100% packet loss, time 0ms"
-
-	eng := &Engine{cfg: config.Default()}
-	for _, tc := range []struct {
-		name      string
-		bin       string
-		cancel    bool
-		up, known bool
-	}{
-		{name: "answered", bin: stub(0, "64 bytes from 192.0.2.1"), up: true, known: true},
-		{name: "no reply (linux code)", bin: stub(1, stats), known: true},
-		{name: "no reply (bsd code)", bin: stub(2, stats), known: true},
-
-		// The gap this closes. A hard failure exits non-zero and prints no
-		// statistics: it never transmitted, so it says nothing about the host.
-		// Counting it as a confirmed silence is how an unroutable network, a
-		// switch dropping ICMP, or a ping(8) that cannot open its socket used
-		// to report the entire rack down -- on every probe, identically -- and
-		// take the fan plug with it.
-		{name: "name resolution failed",
-			bin: stub(2, "ping: no.such.host.invalid: Name or service not known")},
-		{name: "socket not permitted",
-			bin: stub(2, "ping: socket: Operation not permitted")},
-		{name: "no route to host", bin: stub(1, "ping: connect: Network is unreachable")},
-
-		{name: "no ping(8) at all", bin: ""},
-		{name: "ping(8) cannot be run", bin: filepath.Join(dir, "absent")},
-		{name: "probe cut short", bin: stub(0, ""), cancel: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			if tc.cancel {
-				cancel()
-			}
-
-			up, known := eng.pingWith(ctx, tc.bin, "192.0.2.1")
-			if up != tc.up || known != tc.known {
-				t.Errorf("pingWith = (up=%v, known=%v), want (up=%v, known=%v)",
-					up, known, tc.up, tc.known)
-			}
-		})
-	}
-}
+// The tri-state ping classification itself -- "what makes an answer an
+// answer is the statistics line, not the exit status" -- used to be pinned
+// here as TestPingSeparatesSilenceFromAFailedProbe, driven through
+// Engine.pingWith with stub executables standing in for ping(8). That logic
+// moved to internal/power/infra (see infra.Ping), and the test moved with
+// it, as TestPingSeparatesSilenceFromAFailedProbe in
+// internal/power/infra/ping_test.go. pingWith itself is now a one-line seam
+// over infra.Ping plus this Engine's configured timeout, and the tests below
+// that still call it (TestFansStayOnWhenPingIsMissing,
+// TestFansStayOnWhenEveryPingFailsHard) are exercising the fan-guard policy
+// built on top of it, not the classification, so they stayed here.
 
 // TestProbeKeepsWhetherTheProbeRanAtAll pins that probeOne carries both halves
 // of the liveness answer into HostStatus.

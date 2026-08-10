@@ -1,18 +1,14 @@
 package power
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"net"
-	"os"
-	"os/exec"
-	"runtime"
 	"strconv"
 	"sync"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/power/infra"
 )
 
 // HostStatus is one host's observed state.
@@ -89,8 +85,8 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 	// Discarding the second one was a real hole: HostStatus is the evidence the
 	// HTTP API's fan guard reads, and with `known` thrown away a probe that
 	// could not run looked exactly like a silent host -- so the CGI whose PATH
-	// lacked /sbin (see pingCandidates) advertised fans-off, unforced, against a
-	// fully running rack. Anything deciding on this must go through
+	// lacked /sbin (see infra.pingCandidates) advertised fans-off, unforced,
+	// against a fully running rack. Anything deciding on this must go through
 	// HostStatus.liveness rather than Ping alone.
 	go func() {
 		defer wg.Done()
@@ -111,122 +107,29 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 	return st
 }
 
-// pingCandidates are where ping(8) lives, most likely first.
-//
-// It is looked up by absolute path rather than through PATH because the CGI
-// runs with the environment bozohttpd hands it -- on NetBSD that is
-// /usr/bin:/bin:/usr/pkg/bin:/usr/local/bin, which does NOT include /sbin
-// where ping actually is. Relying on PATH made every host report ping=false
-// while plainly answering on port 22, which in turn withheld the power-off
-// action entirely.
-//
-// That incident is also why a missing ping(8) reports unknown rather than
-// down: it is a whole-fleet false negative, in the environment `power off`
-// actually runs in, and read as "every host is silent" it says the rack is
-// cold and its cooling can go.
-var pingCandidates = []string{"/sbin/ping", "/usr/sbin/ping", "/bin/ping", "/usr/bin/ping"}
-
-// pingPath resolves ping(8) once per process.
-var pingPath = sync.OnceValue(func() string {
-	for _, p := range pingCandidates {
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	// Last resort, for a platform that keeps it somewhere else entirely.
-	if p, err := exec.LookPath("ping"); err == nil {
-		return p
-	}
-	return ""
-})
-
 // pingOnce sends a single ICMP echo and reports whether it was answered, and
 // whether the probe reached a conclusion at all.
 //
-// This shells out to ping(8) instead of building an ICMP socket in Go. An
-// unprivileged ICMP datagram socket exists on Linux but not on NetBSD, so a
-// native implementation would need a raw socket and thus root -- which the CGI
-// (running as _httpd under bozohttpd) does not have and should not get.
-// NetBSD's /sbin/ping is setuid root, so shelling out gives real ICMP with no
-// privilege grant at all. Verified working as _httpd on pi0.
+// The actual mechanism -- locating ping(8) (which differs per OS: see
+// infra.pingCandidates) and shelling out to it rather than building an ICMP
+// socket in Go -- is platform detail with no policy attached, so it lives in
+// internal/power/infra. What stays here is that this IS the seam Engine.isUp
+// defaults to (see New and the isUp field's doc in engine.go): three
+// safety-critical decisions read isUp/liveness rather than infra.Ping
+// directly, and this function is what ties the two together for real use.
 func (e *Engine) pingOnce(ctx context.Context, ip string) (up, known bool) {
-	return e.pingWith(ctx, pingPath(), ip)
+	return e.pingWith(ctx, infra.PingPath(), ip)
 }
 
 // pingWith is pingOnce against an explicitly named ping(8).
 //
 // Split out so the part that matters most -- telling "the host said nothing"
 // apart from "the probe never happened" -- can be tested with an ordinary
-// executable standing in for ping, without ICMP, root, or a network.
+// executable standing in for ping, without ICMP, root, or a network. The
+// tri-state contract (see infra.Ping's doc) is enforced there, not here; this
+// is only the seam plus the timeout this Engine is configured with.
 func (e *Engine) pingWith(ctx context.Context, bin, ip string) (up, known bool) {
-	if bin == "" {
-		return false, false
-	}
-
-	timeout := e.cfg.ProbeTimeout.D()
-	secs := strconv.Itoa(int(timeout.Seconds()))
-
-	// The per-packet deadline flag differs per platform and there is no
-	// portable spelling: -w on NetBSD and Linux, -t on FreeBSD/OpenBSD/macOS.
-	var args []string
-	switch runtime.GOOS {
-	case "freebsd", "openbsd", "darwin":
-		args = []string{"-c", "1", "-t", secs, ip}
-	default: // netbsd, linux
-		args = []string{"-c", "1", "-w", secs, ip}
-	}
-
-	// The context deadline is a backstop in case ping ignores its own flag;
-	// without it a wedged ping would hold the whole probe open.
-	ctx, cancel := context.WithTimeout(ctx, timeout+time.Second)
-	defer cancel()
-
-	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
-	switch {
-	case err == nil:
-		return true, true
-
-	case ctx.Err() != nil:
-		// ping was killed by the backstop above, or the caller went away
-		// first. Either way it never got to report anything about the host.
-		return false, false
-
-	case errors.As(err, new(*exec.ExitError)) && probeRan(out):
-		// ping ran to completion, reported its statistics and exited non-zero:
-		// it sent the echo and heard nothing back within the deadline.
-		return false, true
-
-	default:
-		// Everything else is "no measurement was taken": the binary could not
-		// be started (not found, not executable, fork failed), or it started
-		// and gave up before sending anything.
-		return false, false
-	}
-}
-
-// probeRan reports whether ping's output contains the summary it prints once it
-// has actually sent packets and counted the replies.
-//
-// This is what separates "the host said nothing" from "the probe never
-// happened", and it replaces decoding the exit code, which cannot be done
-// portably here: "no reply" is 1 on Linux and 2 on the BSDs, where 1 is a hard
-// error, so a table keyed on GOOS would have to be right about every platform
-// or it would turn either ordinary powered-off hosts into "unknown" (a rack
-// that can never be declared idle) or hard errors into "down" (a rack declared
-// idle that is nothing of the sort). The latter is the dangerous one and it was
-// live: every *exec.ExitError counted as a confirmed silence, so any condition
-// hitting all four hosts alike -- no route, ICMP filtered by a switch, a ping(8)
-// that is neither setuid nor setcap and so cannot open its socket -- reported
-// the whole rack down on all three probes and cut the fan plug.
-//
-// Verified on this Linux box: a genuine "no reply" exits 1 having printed
-// "1 packets transmitted, 0 received", while `ping no.such.host.invalid` exits 2
-// printing "Name or service not known" and no statistics at all. Every ping(8)
-// on Linux, NetBSD, FreeBSD, OpenBSD and macOS prints this line when it got as
-// far as transmitting, and none print it when it did not, so matching on it
-// needs no per-platform knowledge.
-func probeRan(out []byte) bool {
-	return bytes.Contains(out, []byte("packets transmitted"))
+	return infra.Ping(ctx, bin, ip, e.cfg.ProbeTimeout.D())
 }
 
 // dialSSH reports whether the host's sshd is accepting connections. This is

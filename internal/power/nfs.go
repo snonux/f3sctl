@@ -1,15 +1,11 @@
 package power
 
 import (
-	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"runtime"
-	"strings"
+
+	"github.com/snonux/f3sctl/internal/power/infra"
 )
 
 // checkLocalNFS unmounts every NFS filesystem mounted on the machine f3sctl is
@@ -73,66 +69,15 @@ func (e *Engine) checkLocalNFS(ctx context.Context, log io.Writer) error {
 
 // localNFSMounts returns the mount points of every locally mounted NFS
 // filesystem.
-func localNFSMounts(ctx context.Context) ([]string, error) {
-	if runtime.GOOS == "linux" {
-		return linuxNFSMounts()
-	}
-	return bsdNFSMounts(ctx)
-}
-
-// linuxNFSMounts reads /proc/mounts, whose third field is the filesystem type
-// (nfs or nfs4).
-func linuxNFSMounts() ([]string, error) {
-	f, err := os.Open("/proc/mounts")
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	var out []string
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) >= 3 && strings.HasPrefix(fields[2], "nfs") {
-			out = append(out, fields[1])
-		}
-	}
-	return out, sc.Err()
-}
-
-// bsdNFSMounts parses `mount -t nfs`, whose lines read
-// "server:/export on /mountpoint (nfs, ...)" on all the BSDs here.
 //
-// A non-zero exit means "nothing of that type is mounted" on some of them, so
-// that is treated as an empty list rather than a failure. Failing to run
-// mount(8) at all is a different matter and is reported: it is not evidence
-// that nothing is mounted, and an empty list here lets a shutdown proceed with
-// the NFS share still mounted locally -- the exact hung mount and lost writes
-// checkLocalNFS exists to prevent.
-func bsdNFSMounts(ctx context.Context) ([]string, error) {
-	out, err := exec.CommandContext(ctx, "mount", "-t", "nfs").Output()
-	if err != nil {
-		if errors.As(err, new(*exec.ExitError)) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var mounts []string
-	for _, line := range strings.Split(string(out), "\n") {
-		_, rest, ok := strings.Cut(line, " on ")
-		if !ok {
-			continue
-		}
-		mp, _, ok := strings.Cut(rest, " (")
-		if !ok {
-			continue
-		}
-		if mp = strings.TrimSpace(mp); mp != "" {
-			mounts = append(mounts, mp)
-		}
-	}
-	return mounts, nil
+// The actual parsing -- /proc/mounts on Linux, `mount -t nfs` on the BSDs --
+// is platform detail with no policy of its own, so it lives in
+// internal/power/infra (see infra.NFSMounts) rather than here. This stays a
+// thin wrapper so the rest of the package, and the doc comments on New's
+// nfsMounts field and on execNFS.Mounts, keep pointing at a name that lives
+// in internal/power.
+func localNFSMounts(ctx context.Context) ([]string, error) {
+	return infra.NFSMounts(ctx)
 }
 
 func contains(haystack []string, needle string) bool {

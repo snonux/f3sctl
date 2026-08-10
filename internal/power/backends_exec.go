@@ -15,6 +15,13 @@ import (
 // ssh.go, shelly.go, probe.go, nfs.go) before this refactor. Each adapter
 // delegates rather than reimplements; see backends.go for what each
 // interface promises and why.
+//
+// The platform-specific parsing behind two of these mechanisms -- which
+// ping(8) flags this OS wants, how to read the local NFS mount table -- has
+// since moved one layer further down, into internal/power/infra (see nfs.go
+// and probe.go, which now delegate to it). This file is unaffected: it still
+// reaches those mechanisms through the same power-package functions/methods
+// as before, which are themselves now thin wrappers over infra.
 
 // execPower is the PowerBackend adapter: Wake.go's magic packet and the SSH
 // agent verbs, poweroff included.

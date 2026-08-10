@@ -40,7 +40,7 @@ type Engine struct {
 	// The second result exists because "the host is silent" and "the probe
 	// could not be carried out" are indistinguishable in a bare bool, and the
 	// safety guards must never confuse them: a CGI whose PATH lacked /sbin
-	// made every host report false once already (see pingCandidates), which
+	// made every host report false once already (see infra.pingCandidates), which
 	// through a single-bool probe reads exactly like a rack that is safely
 	// cold. Most decisions read this through isRunning, which folds unknown
 	// into "assume it is running". Three callers deliberately do not: probeOne,

@@ -168,7 +168,7 @@ func (e *Engine) reportStillAnswering(log io.Writer, hosts []string) {
 //
 // Pointing at the probe rather than at the host is the whole point. The likely
 // cause is local and already documented -- no usable ping(8) here, which is why
-// pingCandidates exists -- and it is a whole-fleet fault, so it will have taken
+// infra.pingCandidates exists -- and it is a whole-fleet fault, so it will have taken
 // every host in the run down with it.
 func (e *Engine) reportUnprobed(log io.Writer, hosts []string) {
 	for _, name := range hosts {
