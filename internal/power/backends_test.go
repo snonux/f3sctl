@@ -558,10 +558,13 @@ func TestNFSBackendMountsUsesTheSameSeamAsCheckLocalNFS(t *testing.T) {
 // trackedLiveness wires eng.isUp to a map seeded true for upHosts, and
 // returns the onPowerOff callback fakePower needs to flip a host silent once
 // its scripted PowerOff succeeds -- the mechanism awaitPowerDown depends on to
-// confirm a shutdown actually completed, without a real ping. Pulled out
-// because driving Off/OffAll all the way through awaitPowerDown needs this
-// exact wiring, and it was starting to be copied by hand into every test that
-// does.
+// confirm a shutdown actually completed, without a real ping. Driving
+// Off/OffAll all the way through awaitPowerDown needs this exact wiring;
+// TestOffRunsThroughFakeBackendsEndToEnd and
+// TestOffExportsZusbBeforeAnyHostIsPoweredOff still inline their own copy of
+// it rather than calling this -- worth consolidating onto this helper next
+// time either of them is touched, but not redone here to keep this change
+// small.
 func trackedLiveness(t *testing.T, eng *Engine, upHosts ...string) func(inventory.Host) {
 	t.Helper()
 	var mu sync.Mutex
