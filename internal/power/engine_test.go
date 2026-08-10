@@ -935,6 +935,27 @@ func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
 		t.Error("reporter() on a hand-built Engine is nil")
 	}
 
+	// The backend accessors follow the exact same pattern: a nil field falls
+	// back to the exec-backed adapter rather than a nil interface value, which
+	// is what stops off()/on() from panicking on an Engine nobody built with
+	// New. Identity, not just non-nilness, is what proves it is the real
+	// adapter and not some other stand-in.
+	if got, want := reflect.TypeOf(e.powerBackend()), reflect.TypeOf(execPower{}); got != want {
+		t.Errorf("powerBackend() = %v, want %v", got, want)
+	}
+	if got, want := reflect.TypeOf(e.probeBackend()), reflect.TypeOf(execProbe{}); got != want {
+		t.Errorf("probeBackend() = %v, want %v", got, want)
+	}
+	if got, want := reflect.TypeOf(e.fansBackend()), reflect.TypeOf(execFans{}); got != want {
+		t.Errorf("fansBackend() = %v, want %v", got, want)
+	}
+	if got, want := reflect.TypeOf(e.nfsBackend()), reflect.TypeOf(execNFS{}); got != want {
+		t.Errorf("nfsBackend() = %v, want %v", got, want)
+	}
+	if got, want := reflect.TypeOf(e.zusbBackend()), reflect.TypeOf(execZusb{}); got != want {
+		t.Errorf("zusbBackend() = %v, want %v", got, want)
+	}
+
 	// And the path the whole fallback exists for, driven for real. The probe
 	// is the only seam substituted, because the point is that nothing else had
 	// to be: this must run on an Engine somebody built with a struct literal.
