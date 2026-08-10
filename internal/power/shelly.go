@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/util"
 )
 
 // FansState is the rack-fan plug's reported state.
@@ -192,7 +194,7 @@ func digestAuth(challenge, user, password, method, uri string) (string, error) {
 
 	return fmt.Sprintf(
 		`Digest username="%s", realm="%s", nonce="%s", uri="%s", algorithm=%s, qop=auth, nc=%s, cnonce="%s", response="%s"`,
-		user, realm, nonce, uri, orDefault(p["algorithm"], "MD5"), nc, cnonce, response), nil
+		user, realm, nonce, uri, util.OrDefault(p["algorithm"], "MD5"), nc, cnonce, response), nil
 }
 
 // pickHash returns the digest function named by the challenge's algorithm
@@ -251,11 +253,4 @@ func randomHex(n int) (string, error) {
 		return "", fmt.Errorf("generating cnonce: %w", err)
 	}
 	return hex.EncodeToString(b), nil
-}
-
-func orDefault(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
 }

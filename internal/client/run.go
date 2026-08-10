@@ -1,11 +1,13 @@
 package client
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"strings"
-	"text/tabwriter"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/presenter"
 )
 
 // jobWaitBuffer is added on top of the server's worst-case UnmuteTimeout to
@@ -250,46 +252,25 @@ func (c *Client) waitForJob(root Entity, id string) error {
 
 // showStatus renders the remote status in the same shape as the local CLI, so
 // --remote is a routing detail rather than a different tool.
+//
+// The table itself is built by internal/presenter, shared with the local CLI
+// (internal/cli.printStatus) so the two cannot drift the way they had before
+// this was unified -- see ry0. ShowRole is deliberately false: see
+// presenter.Options.ShowRole for why the remote client does not reach into a
+// host entity's "class" array for the role hiding there.
 func (c *Client) showStatus() error {
 	root, err := c.Root()
 	if err != nil {
 		return err
 	}
-	status, err := c.Follow(root, "status")
+	statusEntity, err := c.Follow(root, "status")
 	if err != nil {
 		return err
 	}
 
-	w := tabwriter.NewWriter(c.stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "HOST\tADDRESS\tPING\tSSH\tRTT\tSTATE")
-
-	var fans *Entity
-	for i, e := range status.Entities {
-		if hasClass(e, "fans") {
-			fans = &status.Entities[i]
-			continue
-		}
-		name, _ := e.Properties["name"].(string)
-		if name == "" {
-			continue
-		}
-		ip, _ := e.Properties["ip"].(string)
-		ping, _ := e.Properties["ping"].(bool)
-		ssh, _ := e.Properties["ssh"].(bool)
-		ms, _ := e.Properties["ms"].(float64)
-
-		rtt := "-"
-		if ping {
-			rtt = fmt.Sprintf("%.1fms", ms)
-		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, ip, yesNo(ping), yesNo(ssh), rtt, describe(ping, ssh))
-	}
-	if err := w.Flush(); err != nil {
+	statuses, fans, fansErr := parseStatus(statusEntity)
+	if err := presenter.Status(c.stdout, statuses, presenter.Options{ShowRole: false}, fans, fansErr); err != nil {
 		return err
-	}
-
-	if fans != nil {
-		printFans(c.stdout, *fans)
 	}
 
 	// Showing what can be done next is the point of a hypermedia client: this
@@ -304,33 +285,74 @@ func (c *Client) showStatus() error {
 	return nil
 }
 
-func printFans(out io.Writer, fans Entity) {
-	if msg, _ := fans.Properties["error"].(string); msg != "" {
-		// Unreachable is not the same as off, and saying "off" here would
-		// send someone to the garage for nothing.
-		fmt.Fprintf(out, "\nrack fans: unknown (%s)\n", msg)
-		return
+// parseStatus turns a /status entity into the presenter's inputs: one
+// power.HostStatus per host entity (in response order), plus the fan state.
+//
+// This is where hz0 was fixed: the old code built its own table row here and
+// read only ping/ssh, never pingKnown, so an unmeasured host rendered as
+// "off". Routing through power.HostStatus -- which has always carried
+// PingKnown -- and presenter.Describe -- which has always read it -- means
+// the remote client gets that check by construction rather than by
+// remembering to add it a second time.
+func parseStatus(status Entity) (statuses []power.HostStatus, fans power.FansState, fansErr error) {
+	for _, e := range status.Entities {
+		if hasClass(e, "fans") {
+			fans, fansErr = parseFans(e)
+			continue
+		}
+		if st, ok := parseHost(e); ok {
+			statuses = append(statuses, st)
+		}
 	}
-	on, _ := fans.Properties["on"].(bool)
-	fmt.Fprintf(out, "\nrack fans: %s\n", onOff(on))
+	return statuses, fans, fansErr
 }
 
-// describe turns the two probe signals into the state they imply.
+// parseHost turns one host entity's properties into a power.HostStatus. ok is
+// false for an entity with no name, which is not a host this response meant
+// to describe.
 //
-// The middle case is deliberately not called "booting": answering ICMP with no
-// sshd means the host is in transition, and from a single observation there is
-// no way to tell a host coming up from one going down. Only the job that is
-// running says which, and that is the client's to combine, not this label's to
-// guess.
-func describe(ping, ssh bool) string {
-	switch {
-	case ping && ssh:
-		return "up"
-	case ping:
-		return "in transition"
-	default:
-		return "off (or hung in single-user)"
+// pingKnown defaults to true when the property is absent, matching
+// docs/client-reference.js's describe(): an older server that predates the
+// field is assumed to have completed the probe, not to have skipped it.
+func parseHost(e Entity) (power.HostStatus, bool) {
+	name, _ := e.Properties["name"].(string)
+	if name == "" {
+		return power.HostStatus{}, false
 	}
+
+	pingKnown := true
+	if v, ok := e.Properties["pingKnown"].(bool); ok {
+		pingKnown = v
+	}
+
+	ip, _ := e.Properties["ip"].(string)
+	ping, _ := e.Properties["ping"].(bool)
+	ssh, _ := e.Properties["ssh"].(bool)
+	ms, _ := e.Properties["ms"].(float64)
+
+	return power.HostStatus{
+		Name:      name,
+		IP:        ip,
+		Ping:      ping,
+		PingKnown: pingKnown,
+		SSH:       ssh,
+		MS:        ms,
+	}, true
+}
+
+// parseFans turns a "fans" entity into a power.FansState, or an error when
+// the server reported the plug as unreachable rather than a state -- see
+// httpapi.fansEntity and presenter.Status.
+func parseFans(e Entity) (power.FansState, error) {
+	if msg, _ := e.Properties["error"].(string); msg != "" {
+		// Unreachable is not the same as off, and saying "off" here would
+		// send someone to the garage for nothing. presenter.Status renders
+		// this error as "unknown (<msg>)", never as a state.
+		return power.FansState{}, errors.New(msg)
+	}
+	on, _ := e.Properties["on"].(bool)
+	ip, _ := e.Properties["ip"].(string)
+	return power.FansState{On: on, IP: ip}, nil
 }
 
 func hasClass(e Entity, want string) bool {
@@ -340,18 +362,4 @@ func hasClass(e Entity, want string) bool {
 		}
 	}
 	return false
-}
-
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}
-
-func onOff(b bool) string {
-	if b {
-		return "on"
-	}
-	return "off"
 }

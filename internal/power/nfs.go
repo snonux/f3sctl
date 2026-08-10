@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 
 	"github.com/snonux/f3sctl/internal/power/infra"
 )
@@ -51,7 +52,7 @@ func (e *Engine) checkLocalNFS(ctx context.Context, log io.Writer) error {
 		// branch controls this re-check too, rather than racing the real mount
 		// table of whatever machine runs the test.
 		still, lerr := e.localMounts(ctx)
-		if lerr == nil && !contains(still, mp) {
+		if lerr == nil && !slices.Contains(still, mp) {
 			fmt.Fprintf(log, "  %s was already unmounted\n", mp)
 			continue
 		}
@@ -78,13 +79,4 @@ func (e *Engine) checkLocalNFS(ctx context.Context, log io.Writer) error {
 // in internal/power.
 func localNFSMounts(ctx context.Context) ([]string, error) {
 	return infra.NFSMounts(ctx)
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }

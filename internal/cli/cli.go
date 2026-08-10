@@ -17,6 +17,7 @@ import (
 	"github.com/snonux/f3sctl/internal"
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/presenter"
 )
 
 const usage = `f3sctl - control the f3s homelab
@@ -345,7 +346,7 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "rack fans: %s (%s)\n", onOff(st.On), st.IP)
+		fmt.Fprintf(stdout, "rack fans: %s (%s)\n", presenter.OnOff(st.On), st.IP)
 		return nil
 
 	case "on":
@@ -353,7 +354,7 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "rack fans: %s\n", onOff(st.On))
+		fmt.Fprintf(stdout, "rack fans: %s\n", presenter.OnOff(st.On))
 		return nil
 
 	case "off":
@@ -445,7 +446,7 @@ func fansOff(ctx context.Context, eng *power.Engine, force bool,
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "rack fans: %s\n", onOff(st.On))
+	fmt.Fprintf(stdout, "rack fans: %s\n", presenter.OnOff(st.On))
 	return nil
 }
 
@@ -465,13 +466,6 @@ func retiredVerbHint(v string) string {
 		return "f3sctl does not power the Raspberry Pis. Shut them down by hand if you need to."
 	}
 	return ""
-}
-
-func onOff(on bool) string {
-	if on {
-		return "on"
-	}
-	return "off"
 }
 
 // errUsage signals that usage has already been printed.

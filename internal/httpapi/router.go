@@ -1,6 +1,9 @@
 package httpapi
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+)
 
 // Router owns the HTTP-facing side of the route registry: matching a request
 // to a route, telling a 404 from a 405, and turning a route's Path into the
@@ -84,7 +87,7 @@ func (rt *Router) Actions(state State) []Action {
 func (rt *Router) ActionsFor(state State, names ...string) []Action {
 	var out []Action
 	for _, r := range routes() {
-		if !r.Action || !r.available(state) || !contains(names, r.Name) {
+		if !r.Action || !r.available(state) || !slices.Contains(names, r.Name) {
 			continue
 		}
 		out = append(out, rt.action(r, state))
@@ -104,13 +107,4 @@ func (rt *Router) action(r route, state State) Action {
 		a.Type = "application/x-www-form-urlencoded"
 	}
 	return a
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }

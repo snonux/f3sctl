@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/snonux/f3sctl/internal/util"
 )
 
 // maxBodyBytes caps how much of a request body is read. Every action here
@@ -20,7 +22,7 @@ const maxBodyBytes = 64 << 10
 // stdin. See the f3s-raspberry-pi skill, references/bootstrap-netbsd-pi.md.
 func parseCGIRequest(stdin io.Reader) (request, error) {
 	req := request{
-		Method: strings.ToUpper(orDefault(os.Getenv("REQUEST_METHOD"), "GET")),
+		Method: strings.ToUpper(util.OrDefault(os.Getenv("REQUEST_METHOD"), "GET")),
 		Path:   normalisePath(os.Getenv("PATH_INFO")),
 		// bozohttpd exports X-API-Key as HTTP_X_API_KEY.
 		APIKey: os.Getenv("HTTP_X_API_KEY"),
@@ -77,11 +79,4 @@ func normalisePath(p string) string {
 		return "/"
 	}
 	return strings.TrimSuffix(p, "/")
-}
-
-func orDefault(s, def string) string {
-	if s == "" {
-		return def
-	}
-	return s
 }
