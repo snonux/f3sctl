@@ -105,6 +105,28 @@ func TestResolvePeerJobPathHonoursExplicitOverride(t *testing.T) {
 	}
 }
 
+// TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty is the
+// regression test for the HIGH-severity finding on uy0: this node's own
+// SCRIPT_NAME going missing (a bozohttpd quirk, a proxy stripping the
+// header, ServeCGI invoked outside its normal CGI harness) must not be
+// silently read as "the API is mounted at the root". Deriving anyway would
+// hand PeerSet a bare "/job", which almost certainly 404s on the peer --
+// fetchPeerJob errors, and PeerSet.Busy reads that as "peer idle", the
+// unreachable-peer-reads-as-idle failure mode this whole feature exists to
+// prevent. With an empty router base and no explicit override,
+// resolvePeerJobPath must fall back to defaultCGIMount instead.
+func TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty(t *testing.T) {
+	router := NewRouter("") // SCRIPT_NAME empty or unset
+	cfg := config.Default()
+	cfg.PeerJobPath = ""
+
+	want := defaultCGIMount + jobPath
+	if got := resolvePeerJobPath(cfg, router); got != want {
+		t.Errorf("resolvePeerJobPath(empty base) = %q, want %q (the safe fallback, not a bare %q)",
+			got, want, jobPath)
+	}
+}
+
 // TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt is the regression test
 // for jy0: serve() used to call s.snapshot(ctx) unconditionally, which ran
 // Engine.ProbeAll (7 concurrent ping+TCP probes, ~3s) and Engine.FansStatus

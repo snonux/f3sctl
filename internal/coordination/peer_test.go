@@ -196,3 +196,64 @@ func TestNewPeerSetStoresNodesAndPath(t *testing.T) {
 		t.Fatal("precondition failed")
 	}
 }
+
+// TestPeerSetBusyWarnsOnFetchFailure is the regression test for the second
+// half of uy0: a fetch failure used to be swallowed by Busy's `continue` with
+// nothing left behind to debug it -- indistinguishable in the field from a
+// peer that is genuinely down. Busy must now report every fetch failure
+// through ps.warn (the same nil-means-real seam as fetch/localAddrs/
+// lookupHost), so a test -- or, in production, warnPeerFetchFailed's stderr
+// write -- has something to go on.
+func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
+	wantErr := errors.New("connection refused")
+	fetch, _ := fakeFetcher(map[string]struct {
+		job *peerJob
+		err error
+	}{
+		"192.168.1.126": {err: wantErr},
+	})
+
+	type warnCall struct {
+		addr string
+		err  error
+	}
+	var warns []warnCall
+	ps := &PeerSet{
+		Nodes:   []string{"192.168.1.126"},
+		JobPath: "/job",
+		fetch:   fetch,
+		warn:    func(addr string, err error) { warns = append(warns, warnCall{addr, err}) },
+	}
+
+	ps.Busy("pi0", "k")
+
+	if len(warns) != 1 {
+		t.Fatalf("warn called %d times, want exactly 1", len(warns))
+	}
+	if warns[0].addr != "192.168.1.126" {
+		t.Errorf("warn addr = %q, want %q", warns[0].addr, "192.168.1.126")
+	}
+	if warns[0].err != wantErr {
+		t.Errorf("warn err = %v, want %v", warns[0].err, wantErr)
+	}
+}
+
+// TestPeerFetchFailureKindDistinguishesHTTPStatusFromConnectionFailure pins
+// warnPeerFetchFailed's classification: a *peerHTTPStatusError (the peer
+// answered, just not with 200 -- e.g. a 404 from a mis-derived JobPath, see
+// httpapi.resolvePeerJobPath) must read as "HTTP error", while a plain
+// error (the request never completed at all) must read as "connection
+// failure". An operator debugging "peer coordination isn't working" needs
+// exactly this distinction: the former points at this node's own
+// configuration, the latter at the peer actually being down.
+func TestPeerFetchFailureKindDistinguishesHTTPStatusFromConnectionFailure(t *testing.T) {
+	httpErr := &peerHTTPStatusError{addr: "192.168.1.126", status: "404 Not Found"}
+	if got := peerFetchFailureKind(httpErr); got != "HTTP error" {
+		t.Errorf("peerFetchFailureKind(%v) = %q, want %q", httpErr, got, "HTTP error")
+	}
+
+	connErr := errors.New("dial tcp 192.168.1.126:80: connect: connection refused")
+	if got := peerFetchFailureKind(connErr); got != "connection failure" {
+		t.Errorf("peerFetchFailureKind(%v) = %q, want %q", connErr, got, "connection failure")
+	}
+}

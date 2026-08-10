@@ -11,6 +11,7 @@ package coordination
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -58,6 +59,13 @@ type PeerSet struct {
 	// lookupHost resolves a hostname to addresses. Nil means the real
 	// net.LookupHost; only tests substitute anything else.
 	lookupHost func(host string) ([]string, error)
+
+	// warn reports a peer fetch failure somewhere an operator can find it.
+	// Nil means warnPeerFetchFailed (stderr -- see its doc comment for why);
+	// only tests substitute anything else, so a test can assert a fetch
+	// failure was reported without capturing the real process's stderr. Same
+	// nil-means-real seam pattern as fetch, localAddrs and lookupHost above.
+	warn func(addr string, err error)
 }
 
 // NewPeerSet returns a PeerSet that consults nodes for the job resource at
@@ -80,6 +88,13 @@ type peerJob struct {
 // are the machines that answer this API, and if one is unreachable the other
 // must still be able to power the cluster on. Refusing to act because a peer
 // is down would make the tool useless exactly when it is most needed.
+//
+// A fetch failure is still reported (see ps.warnFunc / warnPeerFetchFailed)
+// rather than swallowed outright: silently continuing past every error here
+// is exactly what let a mis-derived JobPath (see httpapi.resolvePeerJobPath)
+// look identical, from the field, to a peer that is genuinely down. The
+// behaviour -- treat as idle -- does not change; only whether anything is
+// left behind to debug it with.
 func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 	selfHost := shortHost(self)
 
@@ -90,6 +105,7 @@ func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 
 		job, err := ps.fetchPeer(addr, apiKey)
 		if err != nil {
+			ps.warnFunc()(addr, err)
 			continue
 		}
 		if job != nil && job.State == string(JobRunning) {
@@ -104,6 +120,68 @@ func (ps *PeerSet) fetchPeer(addr, apiKey string) (*peerJob, error) {
 		return ps.fetch(addr, ps.JobPath, apiKey)
 	}
 	return fetchPeerJob(addr, ps.JobPath, apiKey)
+}
+
+// warnFunc returns the peer-fetch-failure reporter, falling back to the real
+// stderr write. Same nil-safety pattern as fetchPeer/addrs/lookup.
+func (ps *PeerSet) warnFunc() func(addr string, err error) {
+	if ps.warn != nil {
+		return ps.warn
+	}
+	return warnPeerFetchFailed
+}
+
+// warnPeerFetchFailed reports a peer fetch failure to this process's stderr.
+//
+// A CGI request (see httpapi.ServeCGI) has no log stream of its own -- its
+// only output channel carries the HTTP response body, and writing a warning
+// into that would corrupt it -- so stderr is the one channel left. Under
+// bozohttpd (this deployment's CGI host) a CGI child's stderr is captured
+// into the web server's own error log, matching the
+// fmt.Fprintf(os.Stderr, ...) pattern this project already uses for
+// out-of-band diagnostics that have nowhere else to go (see
+// cmd/f3sctl/main.go and internal/coordination/run.go).
+//
+// The message distinguishes a connection-level failure (peer down,
+// unreachable, timed out -- *peerHTTPStatusError is not among err's chain)
+// from an HTTP-level one (the peer answered, but not with 200 --
+// *peerHTTPStatusError is), because the two point at very different
+// problems: the former is a peer that is plausibly actually down, which is
+// the case Busy's "treat as idle" is designed for; the latter -- e.g. a 404
+// -- is much more likely this node asking the wrong path, such as the
+// empty-SCRIPT_NAME derivation bug resolvePeerJobPath guards against.
+func warnPeerFetchFailed(addr string, err error) {
+	fmt.Fprintf(os.Stderr, "f3sctl: peer %s fetch failed (%s, treating peer as idle): %v\n",
+		addr, peerFetchFailureKind(err), err)
+}
+
+// peerFetchFailureKind classifies a peer fetch error for warnPeerFetchFailed:
+// "HTTP error" when the peer answered but not with 200 (a *peerHTTPStatusError
+// is in err's chain), "connection failure" otherwise -- the request never
+// completed at all (dial refused, timed out, DNS failure, ...). Split out
+// from warnPeerFetchFailed so the classification can be tested without
+// capturing the real process's stderr.
+func peerFetchFailureKind(err error) string {
+	var statusErr *peerHTTPStatusError
+	if errors.As(err, &statusErr) {
+		return "HTTP error"
+	}
+	return "connection failure"
+}
+
+// peerHTTPStatusError means the peer answered over HTTP but not with 200,
+// as opposed to the request never completing at all (dial refused, timed
+// out, DNS failure, ...). warnPeerFetchFailed distinguishes the two: this
+// one means the peer is reachable but something about the request was
+// wrong -- e.g. the path this node asked for is not served there, which is
+// what a mis-derived JobPath (see httpapi.resolvePeerJobPath) would produce.
+type peerHTTPStatusError struct {
+	addr   string
+	status string
+}
+
+func (e *peerHTTPStatusError) Error() string {
+	return fmt.Sprintf("peer %s returned %s", e.addr, e.status)
 }
 
 // fetchPeerJob reads the peer's current job.
@@ -130,7 +208,7 @@ func fetchPeerJob(addr, path, apiKey string) (*peerJob, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("peer %s returned %s", addr, resp.Status)
+		return nil, &peerHTTPStatusError{addr: addr, status: resp.Status}
 	}
 
 	var e struct {

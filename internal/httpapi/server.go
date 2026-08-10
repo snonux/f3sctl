@@ -132,6 +132,13 @@ func newServer(cfg config.Config) (*Server, error) {
 	}, nil
 }
 
+// defaultCGIMount is this project's own documented CGI mount convention (see
+// README.md's example config, and config.Default() before uy0). It is the
+// last-resort fallback resolvePeerJobPath uses when this node's own router
+// has no base to derive anything from -- see that function's doc comment for
+// why an empty base cannot be trusted as "mounted at the root".
+const defaultCGIMount = "/cgi-bin/f3sctl"
+
 // resolvePeerJobPath returns the URL path this node asks a peer for its
 // current job.
 //
@@ -144,9 +151,28 @@ func newServer(cfg config.Config) (*Server, error) {
 // this, an operator who moves the mount point but forgets the separate
 // peer_job_path config value gets a peer check that silently reads back as
 // idle forever, which is the dangerous failure mode -- two jobs can start.
+//
+// The one case that derivation must NOT be trusted for: router.base itself
+// being empty. That happens whenever this node's own SCRIPT_NAME was empty or
+// missing when the Router was built (bozohttpd not setting it, a proxy that
+// strips the header, ServeCGI invoked outside its normal CGI harness) -- and
+// an empty SCRIPT_NAME is far more likely to be a broken environment than a
+// deliberate "the API is mounted at the filesystem root". Deriving anyway
+// would silently hand PeerSet a bare "/job", which almost certainly 404s on
+// the peer; fetchPeerJob then errors, and PeerSet.Busy treats every fetch
+// error as "peer not busy" -- an unreachable-reads-as-idle failure with
+// nothing to distinguish "the peer is genuinely down" from "this node
+// mis-derived the URL it asked at". Falling back to this project's own
+// documented CGI mount convention (defaultCGIMount, the literal that was
+// hardcoded here before this derivation existed) is a safer bet than trusting
+// an empty base at face value, and matches what every real deployment of this
+// project actually uses.
 func resolvePeerJobPath(cfg config.Config, router *Router) string {
 	if cfg.PeerJobPath != "" {
 		return cfg.PeerJobPath
+	}
+	if router.base == "" {
+		return defaultCGIMount + jobPath
 	}
 	return router.Href(jobPath)
 }

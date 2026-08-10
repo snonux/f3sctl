@@ -10,9 +10,14 @@ import (
 )
 
 // jobPath is PATH_INFO for the job route, as CGI sees it -- i.e. without the
-// SCRIPT_NAME mount point. This is a different value from
-// config.Config.PeerJobPath, which is the *full* URL path a peer's job is
-// fetched from over a real HTTP connection; see that field's doc comment.
+// SCRIPT_NAME mount point. config.Config.PeerJobPath is the *full* URL path
+// (mount point included) a peer's job is fetched from over a real HTTP
+// connection; as of uy0 the two are the SAME value by construction in the
+// default case -- resolvePeerJobPath (server.go) builds PeerJobPath from
+// this node's own router.Href(jobPath), i.e. this constant plus this node's
+// own SCRIPT_NAME -- and only diverge when config explicitly sets
+// PeerJobPath to override that derivation (the asymmetric-mount case; see
+// that field's doc comment).
 //
 // Named so Server.serve can exclude it from triggering a peer check of its
 // own: a peer check that recurses into another peer check makes each node's
