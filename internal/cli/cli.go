@@ -144,12 +144,14 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 		return errUsage
 	}
 
-	eng, err := power.New(cfg)
+	// Resolve before building an Engine or touching the SSH identity: what was
+	// asked for is decided from the arguments alone, and a spelling nobody
+	// accepts must cost nothing and change nothing.
+	act, err := powerActionFor(args)
 	if err != nil {
+		fmt.Fprint(stderr, usage)
 		return err
 	}
-	eng.WithReporter(reporter)
-	ctx := context.Background()
 
 	// A local shutdown needs a key the f-hosts will accept, and that key is
 	// pinned to pi0/pi1. Say so up front rather than letting it surface as an
@@ -163,38 +165,89 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 		}
 	}
 
-	switch args[0] {
-	case "status":
-		return printStatus(ctx, eng, stdout)
-	case "on":
-		return eng.On(ctx, stdout)
-	case "off":
-		return eng.Off(ctx, stdout)
+	eng, err := power.New(cfg)
+	if err != nil {
+		return err
 	}
+	eng.WithReporter(reporter)
+	return act(context.Background(), eng, stdout)
+}
 
-	// `f3sctl power all on|off` -- every f-host including f3. Matched before
-	// the per-host branch below, since "all" is a group, not a host name.
-	if len(args) == 2 && args[0] == "all" {
-		switch args[1] {
+// powerAction is one resolved power operation, ready to run against an Engine.
+//
+// printStatus has exactly this shape, so the read-only verb needs no adapter.
+type powerAction func(ctx context.Context, eng *power.Engine, out io.Writer) error
+
+// rackOp adapts a whole-rack Engine method (On, Off, OnAll, OffAll) to a
+// powerAction. A method expression keeps the table in powerActionFor to one
+// line per accepted spelling.
+func rackOp(op func(*power.Engine, context.Context, io.Writer) error) powerAction {
+	return func(ctx context.Context, eng *power.Engine, out io.Writer) error {
+		return op(eng, ctx, out)
+	}
+}
+
+// hostOp adapts a single-host Engine method (OnHost, OffHost) to a powerAction,
+// binding the host name the command named.
+func hostOp(op func(*power.Engine, context.Context, io.Writer, string) error, name string) powerAction {
+	return func(ctx context.Context, eng *power.Engine, out io.Writer) error {
+		return op(eng, ctx, out, name)
+	}
+}
+
+// powerActionFor resolves a `power` argument list to the one operation it
+// names, or reports that it names none.
+//
+// Arity is part of every match, and that is the whole reason this is a function
+// rather than a switch on args[0]: dispatching on the first word alone made
+// `power on f3` run the CLUSTER-WIDE wake and silently drop "f3" on the floor,
+// and `power off f2` power the whole cluster off. The documented per-host
+// spelling is `power f3 on`, so writing the words the other way round is an
+// easy mistake to make -- and it was answered by doing something far larger
+// than asked, with no warning. A near-miss is a usage error here, never a
+// cluster-wide action.
+//
+// Trailing junk is rejected for the same reason: `power status f0` asks for
+// something this tool does not do (printStatus always probes the whole
+// inventory), so it must say so rather than quietly print the full table.
+func powerActionFor(args []string) (powerAction, error) {
+	switch len(args) {
+	case 1:
+		switch args[0] {
+		case "status":
+			return printStatus, nil
 		case "on":
-			return eng.OnAll(ctx, stdout)
+			return rackOp((*power.Engine).On), nil
 		case "off":
-			return eng.OffAll(ctx, stdout)
+			return rackOp((*power.Engine).Off), nil
+		}
+
+	case 2:
+		// "all" is a group, not a host name, so it is matched before the
+		// per-host spellings below.
+		switch {
+		case args[0] == "all" && args[1] == "on":
+			return rackOp((*power.Engine).OnAll), nil
+		case args[0] == "all" && args[1] == "off":
+			return rackOp((*power.Engine).OffAll), nil
+		case isPowerVerb(args[0]):
+			// A verb where a host name belongs: `power off on`, `power status
+			// on`. Deliberately matched and left to fall through to the usage
+			// error below, so it is reported as the malformed spelling it is
+			// rather than as `unknown host "off"` from the engine.
+		case args[1] == "on":
+			return hostOp((*power.Engine).OnHost, args[0]), nil
+		case args[1] == "off":
+			return hostOp((*power.Engine).OffHost, args[0]), nil
 		}
 	}
 
-	// `f3sctl power <host> on|off`.
-	if len(args) == 2 {
-		switch args[1] {
-		case "on":
-			return eng.OnHost(ctx, stdout, args[0])
-		case "off":
-			return eng.OffHost(ctx, stdout, args[0])
-		}
-	}
+	return nil, fmt.Errorf("unknown power command %q", strings.Join(args, " "))
+}
 
-	fmt.Fprint(stderr, usage)
-	return fmt.Errorf("unknown power command %q", strings.Join(args, " "))
+// isPowerVerb reports whether w names an operation rather than a host.
+func isPowerVerb(w string) bool {
+	return w == "on" || w == "off" || w == "status"
 }
 
 // runFans reads or switches the rack-fan plug.

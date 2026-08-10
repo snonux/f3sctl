@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -376,5 +377,217 @@ func TestParseGlobalFlagsConsumesForce(t *testing.T) {
 	}
 	if want := []string{"fans", "off"}; !slices.Equal(rest, want) {
 		t.Errorf("rest = %v, want %v: --force must not reach the command", rest, want)
+	}
+}
+
+// powerConfig is testConfig with what the wake path needs to run to completion.
+//
+// Two f-hosts, because f0 and f3 are what tell the three wake spellings apart:
+// `power on` takes the power group (f0, no f3), `power all on` every f-host,
+// `power f3 on` just the one named. MACs so Engine.Wake has a packet to build,
+// and a loopback broadcast address so the packet goes to 127.0.0.1:9 instead of
+// out of the machine -- UDP to a discard port nobody listens on, needing no
+// privileges and reaching no host.
+//
+// Everything else on that path is inert with this inventory: no RoleCluster
+// hosts, so UnmuteGogios's wait for the k3s nodes returns immediately, and no
+// RoleGateway hosts, so it has nobody to SSH to.
+func powerConfig(t *testing.T, s *fakeShelly) config.Config {
+	t.Helper()
+	cfg := testConfig(t, s)
+	cfg.Inventory.Broadcast = "127.0.0.1"
+	cfg.Inventory.Hosts = []inventory.Host{
+		{Name: "f0", Role: inventory.RoleF, IP: fHostIP, MAC: "00:11:22:33:44:50", SSHPort: 22, SSHUser: "f3sctl"},
+		{Name: "f3", Role: inventory.RoleF, IP: fHostIP, MAC: "00:11:22:33:44:53", SSHPort: 22, SSHUser: "f3sctl"},
+	}
+	return cfg
+}
+
+// TestPowerRejectsMalformedSpellings is the regression test for the bug where
+// `power` dispatched on its first word alone and dropped whatever followed:
+// `power on f3` ran the CLUSTER-WIDE wake and discarded "f3", and
+// `power off f2` powered the whole cluster off. The documented per-host
+// spelling is `power f3 on`, so writing the words the other way round is an
+// ordinary slip -- and it was answered by doing something far larger than
+// asked, silently.
+//
+// Each case asserts both halves: a usage error comes back, AND nothing was
+// done. "Nothing was done" is checked at the plug and at stdout, which is what
+// gives the test its teeth -- every cluster-wide verb touches the fan plug
+// (on before waking, off once the rack is idle), and every per-host verb and
+// the status table print. A build with the old dispatch fails on those, not
+// merely on the error text.
+func TestPowerRejectsMalformedSpellings(t *testing.T) {
+	// None of these route to the API: isShutdown only matches `power off` and
+	// `power <host> off`, so they all reach runPower locally, which is exactly
+	// where the misreading used to happen.
+	for _, args := range [][]string{
+		{"on", "f3"},
+		{"off", "f2"},
+		{"on", "all"},
+		{"off", "all"},
+		{"status", "f0"},
+		{"status", "all"},
+		{"on", "f0", "f1"},
+		{"f0", "on", "off"},
+		{"all", "on", "off"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			shelly := newFakeShelly(t, true)
+			cfg := powerConfig(t, shelly)
+
+			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"power"}, args...)...)
+			if err == nil {
+				t.Fatalf("power %s succeeded; a malformed spelling must be a usage error",
+					strings.Join(args, " "))
+			}
+			want := fmt.Sprintf("unknown power command %q", strings.Join(args, " "))
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %q", err, want)
+			}
+			if !strings.Contains(errOut, "f3sctl power f0|f1|f2|f3 on") {
+				t.Errorf("stderr = %q, want the usage text showing the per-host spelling", errOut)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing: no power action may have run", out)
+			}
+			if got := shelly.setCalls(); len(got) != 0 {
+				t.Errorf("Switch.Set calls = %v, want none: the fan plug must be untouched", got)
+			}
+		})
+	}
+}
+
+// TestPowerOnWakesThePowerGroupOnly pins the bare cluster wake: fans first,
+// then a magic packet to every host of the power group -- which excludes f3.
+func TestPowerOnWakesThePowerGroupOnly(t *testing.T) {
+	shelly := newFakeShelly(t, false)
+	cfg := powerConfig(t, shelly)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "power", "on")
+	if err != nil {
+		t.Fatalf("power on: %v", err)
+	}
+	if got := shelly.setCalls(); len(got) != 1 || !got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=true: fans go on first", got)
+	}
+	if !strings.Contains(out, "magic packet to f0") {
+		t.Errorf("output = %q, want f0 woken", out)
+	}
+	if strings.Contains(out, "magic packet to f3") {
+		t.Errorf("output = %q, want f3 left alone: it is not in the power group", out)
+	}
+}
+
+// TestPowerAllOnWakesEveryFHost pins that the two-word group spelling still
+// resolves to the whole-rack wake, f3 included -- the case `power on f3` used
+// to be silently confused with.
+func TestPowerAllOnWakesEveryFHost(t *testing.T) {
+	shelly := newFakeShelly(t, false)
+	cfg := powerConfig(t, shelly)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "power", "all", "on")
+	if err != nil {
+		t.Fatalf("power all on: %v", err)
+	}
+	if got := shelly.setCalls(); len(got) != 1 || !got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=true: fans go on first", got)
+	}
+	for _, host := range []string{"f0", "f3"} {
+		if !strings.Contains(out, "magic packet to "+host) {
+			t.Errorf("output = %q, want %s woken too", out, host)
+		}
+	}
+}
+
+// TestPowerHostOnWakesThatHostAlone pins the documented per-host spelling: one
+// packet, to the host named, and the fan plug untouched.
+func TestPowerHostOnWakesThatHostAlone(t *testing.T) {
+	shelly := newFakeShelly(t, false)
+	cfg := powerConfig(t, shelly)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "power", "f3", "on")
+	if err != nil {
+		t.Fatalf("power f3 on: %v", err)
+	}
+	if !strings.Contains(out, "magic packet to f3") {
+		t.Errorf("output = %q, want f3 woken", out)
+	}
+	if strings.Contains(out, "magic packet to f0") {
+		t.Errorf("output = %q, want only the named host woken", out)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none: a single host does not own the rack fans", got)
+	}
+}
+
+// TestPowerHostOnRejectsAnUnknownHost pins that the host name reaches the
+// engine rather than being dropped: a name no inventory knows must fail, and
+// name it.
+func TestPowerHostOnRejectsAnUnknownHost(t *testing.T) {
+	shelly := newFakeShelly(t, false)
+	cfg := powerConfig(t, shelly)
+
+	_, _, err := runCLI(t, cfg, hostsUp(), "power", "f9", "on")
+	if err == nil {
+		t.Fatal("power f9 on succeeded; f9 is in no inventory")
+	}
+	if !strings.Contains(err.Error(), `unknown host "f9"`) {
+		t.Errorf("error = %v, want it to name the unknown host", err)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none", got)
+	}
+}
+
+// TestPowerStatusPrintsTheTable pins the read-only verb in its only accepted
+// arity. The inventory is emptied so ProbeAll has no host to ping: the table
+// header and the fan line are what this is about, and nothing leaves the box.
+func TestPowerStatusPrintsTheTable(t *testing.T) {
+	shelly := newFakeShelly(t, true)
+	cfg := powerConfig(t, shelly)
+	cfg.Inventory.Hosts = nil
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "power", "status")
+	if err != nil {
+		t.Fatalf("power status: %v", err)
+	}
+	if !strings.Contains(out, "HOST") {
+		t.Errorf("output = %q, want the status table", out)
+	}
+	if !strings.Contains(out, "rack fans: on") {
+		t.Errorf("output = %q, want the fan state", out)
+	}
+	if got := shelly.setCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none: status must not switch", got)
+	}
+}
+
+// TestPowerActionForCoversEveryAcceptedSpelling is the table's own test: the
+// off spellings cannot be driven end to end from here (they SSH into the rack),
+// so this at least pins that each one still resolves to an action and that no
+// arity around them does.
+func TestPowerActionForCoversEveryAcceptedSpelling(t *testing.T) {
+	for _, args := range [][]string{
+		{"status"}, {"on"}, {"off"},
+		{"all", "on"}, {"all", "off"},
+		{"f0", "on"}, {"f0", "off"}, {"f3", "on"}, {"f3", "off"},
+	} {
+		act, err := powerActionFor(args)
+		if err != nil {
+			t.Errorf("powerActionFor(%v) = %v, want it accepted", args, err)
+		}
+		if err == nil && act == nil {
+			t.Errorf("powerActionFor(%v) returned no action and no error", args)
+		}
+	}
+
+	for _, args := range [][]string{
+		{}, {"onn"}, {"on", "off"}, {"all"}, {"f0"}, {"status", "f0"},
+		{"on", "f3"}, {"off", "f2"}, {"all", "on", "off"},
+	} {
+		if _, err := powerActionFor(args); err == nil {
+			t.Errorf("powerActionFor(%v) accepted a spelling nothing documents", args)
+		}
 	}
 }
