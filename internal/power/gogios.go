@@ -142,7 +142,7 @@ func (e *Engine) eachGateway(ctx context.Context, log io.Writer, verb, past stri
 	var failed []string
 
 	for _, gw := range gateways {
-		if _, err := e.ssh.agentVerb(ctx, gw, verb); err != nil {
+		if _, err := e.powerBackend().AgentVerb(ctx, gw, verb); err != nil {
 			fmt.Fprintf(log, "  ! %v\n", err)
 			failed = append(failed, gw.Name)
 			continue

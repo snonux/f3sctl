@@ -104,7 +104,7 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 
 	go func() {
 		defer wg.Done()
-		st.SSH = e.dialSSH(ctx, h)
+		st.SSH = e.probeBackend().SSH(ctx, h)
 	}()
 
 	wg.Wait()

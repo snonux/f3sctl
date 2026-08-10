@@ -74,6 +74,22 @@ type Engine struct {
 	// take two real minutes. Read it through powerDownWait. New wires it to
 	// powerDownTimeout.
 	powerDownTimeout time.Duration
+
+	// power, probe, fans, nfs and zusb are the abstractions Engine's policy
+	// methods (off, on, awaitPowerDown, zusbPreflight, eachGateway, and the
+	// smaller steps they call) act through, rather than shelling out to
+	// ssh(1), dialling the Shelly plug's HTTP RPC or exec'ing umount(8)
+	// themselves. See backends.go for what each interface promises and why
+	// the boundary sits where it does; see powerBackend, probeBackend,
+	// fansBackend, nfsBackend and zusbBackend below for the nil-safe
+	// accessors, following the same pattern as isUp, nfsMounts and report
+	// above. New wires each of them to an adapter that performs the real
+	// mechanism.
+	power PowerBackend
+	probe ProbeBackend
+	fans  FansBackend
+	nfs   NFSChecker
+	zusb  ZusbChecker
 }
 
 // New returns an Engine.
@@ -91,6 +107,11 @@ func New(cfg config.Config) (*Engine, error) {
 		powerDownTimeout:  powerDownTimeout,
 	}
 	e.isUp = e.pingOnce
+	e.power = execPower{e}
+	e.probe = execProbe{e}
+	e.fans = execFans{e}
+	e.nfs = execNFS{e}
+	e.zusb = execZusb{e}
 	return e, nil
 }
 
@@ -165,6 +186,58 @@ func (e *Engine) localMounts(ctx context.Context) ([]string, error) {
 	return e.nfsMounts(ctx)
 }
 
+// powerBackend returns the backend that reaches a host to wake it, run an
+// agent verb, or power it off, falling back to the real ssh(1)/UDP mechanism
+// when the seam is unset (a hand-built Engine). Same nil-safety reasoning as
+// liveness.
+func (e *Engine) powerBackend() PowerBackend {
+	if e.power == nil {
+		return execPower{e}
+	}
+	return e.power
+}
+
+// probeBackend returns the backend for the SSH-reachability half of a probe.
+// Ping deliberately stays behind isUp/liveness rather than being read from
+// here; see ProbeBackend's doc in backends.go. Same nil-safety reasoning as
+// liveness.
+func (e *Engine) probeBackend() ProbeBackend {
+	if e.probe == nil {
+		return execProbe{e}
+	}
+	return e.probe
+}
+
+// fansBackend returns the backend for the rack-fan Shelly plug, falling back
+// to the real HTTP RPC when the seam is unset. Same nil-safety reasoning as
+// liveness.
+func (e *Engine) fansBackend() FansBackend {
+	if e.fans == nil {
+		return execFans{e}
+	}
+	return e.fans
+}
+
+// nfsBackend returns the backend for local NFS mounts, falling back to the
+// real mount table and umount(8) when the seam is unset. Same nil-safety
+// reasoning as liveness.
+func (e *Engine) nfsBackend() NFSChecker {
+	if e.nfs == nil {
+		return execNFS{e}
+	}
+	return e.nfs
+}
+
+// zusbBackend returns the backend for the zusb backup pool's import state,
+// falling back to the real agent verbs when the seam is unset. Same
+// nil-safety reasoning as liveness.
+func (e *Engine) zusbBackend() ZusbChecker {
+	if e.zusb == nil {
+		return execZusb{e}
+	}
+	return e.zusb
+}
+
 // Config exposes the resolved configuration to callers that need the
 // inventory (the CLI's status table, the API's registry).
 func (e *Engine) Config() config.Config { return e.cfg }
@@ -198,14 +271,14 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 
 	e.reporter().Step("switching the rack fans on")
 	fmt.Fprintln(log, "Switching the rack fans on...")
-	if _, err := e.FansSet(ctx, true); err != nil {
+	if _, err := e.fansBackend().Set(ctx, true); err != nil {
 		return fmt.Errorf("refusing to wake hosts with the fans off: %w", err)
 	}
 
 	e.reporter().Step("sending Wake-on-LAN packets")
 	for _, h := range hosts {
 		fmt.Fprintf(log, "Sending a magic packet to %s (%s)...\n", h.Name, h.MAC)
-		if err := e.Wake(h); err != nil {
+		if err := e.powerBackend().Wake(h); err != nil {
 			e.reporter().HostState(h.Name, HostFailed, err.Error())
 			return err
 		}
@@ -277,7 +350,7 @@ func (e *Engine) OnHost(ctx context.Context, log io.Writer, name string) error {
 		return err
 	}
 	fmt.Fprintf(log, "Sending a magic packet to %s (%s)...\n", h.Name, h.MAC)
-	return e.Wake(h)
+	return e.powerBackend().Wake(h)
 }
 
 // OffHost shuts down a single named host.
@@ -446,7 +519,7 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer,
 		e.reporter().Step("shutting down " + h.Name)
 		e.reporter().HostState(h.Name, HostWorking, "stopping guests")
 		fmt.Fprintf(log, "Shutting down %s (%s)...\n", h.Name, h.IP)
-		out, diag, err := e.ssh.agentVerbFull(ctx, h, "poweroff")
+		out, diag, err := e.powerBackend().PowerOff(ctx, h)
 		if out != "" {
 			fmt.Fprintf(log, "  %s\n", indent(out))
 		}
@@ -521,7 +594,7 @@ func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) ([
 
 	e.reporter().Step("switching the rack fans off")
 	fmt.Fprintln(log, "Switching the rack fans off...")
-	_, err := e.FansSet(ctx, false)
+	_, err := e.fansBackend().Set(ctx, false)
 	return nil, err
 }
 

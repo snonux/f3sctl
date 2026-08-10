@@ -43,20 +43,24 @@ func (e *Engine) checkLocalNFS(ctx context.Context, log io.Writer) error {
 
 	var stuck []string
 	for _, mp := range mounts {
-		out, err := exec.CommandContext(ctx, "umount", mp).CombinedOutput()
+		out, err := e.nfsBackend().Unmount(ctx, mp)
 		if err == nil {
 			fmt.Fprintf(log, "  Unmounted %s\n", mp)
 			continue
 		}
 
-		// It may have gone away between listing and unmounting.
-		still, lerr := localNFSMounts(ctx)
+		// It may have gone away between listing and unmounting. Re-checked
+		// through the same seam as the initial listing (e.localMounts, not the
+		// bare package function) so a test driving the "could not unmount"
+		// branch controls this re-check too, rather than racing the real mount
+		// table of whatever machine runs the test.
+		still, lerr := e.localMounts(ctx)
 		if lerr == nil && !contains(still, mp) {
 			fmt.Fprintf(log, "  %s was already unmounted\n", mp)
 			continue
 		}
 
-		fmt.Fprintf(log, "  ! Could not unmount %s: %s\n", mp, strings.TrimSpace(string(out)))
+		fmt.Fprintf(log, "  ! Could not unmount %s: %s\n", mp, out)
 		stuck = append(stuck, mp)
 	}
 

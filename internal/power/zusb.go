@@ -30,7 +30,7 @@ import (
 // still is, which is why that distinction is drawn by ping before we get here.
 func (e *Engine) zusbPreflight(ctx context.Context, log io.Writer, hosts []inventory.Host) error {
 	for _, h := range hosts {
-		state, err := e.ssh.agentVerb(ctx, h, "zusb-status")
+		state, err := e.zusbBackend().Status(ctx, h)
 		if err != nil {
 			return fmt.Errorf("could not check the zusb pool on %s: %w", h.Name, err)
 		}
@@ -40,7 +40,7 @@ func (e *Engine) zusbPreflight(ctx context.Context, log io.Writer, hosts []inven
 		}
 
 		fmt.Fprintf(log, "  zusb is imported on %s; exporting it before shutdown...\n", h.Name)
-		out, err := e.ssh.agentVerb(ctx, h, "zusb-unload")
+		out, err := e.zusbBackend().Unload(ctx, h)
 		if out != "" {
 			fmt.Fprintf(log, "  %s\n", indent(out))
 		}
