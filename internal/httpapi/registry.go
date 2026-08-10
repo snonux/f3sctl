@@ -353,27 +353,6 @@ func hostRoutes(name string) []route {
 	}
 }
 
-// lookup finds the route serving method and path.
-func lookup(method, path string) (route, bool) {
-	for _, r := range routes() {
-		if r.Method == method && r.Path == path {
-			return r, true
-		}
-	}
-	return route{}, false
-}
-
-// pathExists reports whether any route serves this path, regardless of method.
-// It is what separates a 404 from a 405.
-func pathExists(path string) bool {
-	for _, r := range routes() {
-		if r.Path == path {
-			return true
-		}
-	}
-	return false
-}
-
 // available reports whether a route may be used now.
 func (r route) available(s State) bool {
 	if r.Available == nil {

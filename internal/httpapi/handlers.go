@@ -25,8 +25,8 @@ func (s *Server) handleRoot(state State, _ request) (Entity, int, error) {
 			"version":    internal.Version,
 			"node":       s.node,
 		},
-		Links:   s.links(),
-		Actions: s.actions(state),
+		Links:   s.router.Links(),
+		Actions: s.router.Actions(state),
 	}, http.StatusOK, nil
 }
 
@@ -38,10 +38,10 @@ func (s *Server) handleStatus(state State, _ request) (Entity, int, error) {
 		Title:      "Host and rack status",
 		Properties: map[string]any{"node": s.node},
 		Links: []Link{
-			{Rel: []string{"self"}, Href: s.href("/status")},
-			{Rel: []string{"up"}, Href: s.href("/")},
+			{Rel: []string{"self"}, Href: s.router.Href("/status")},
+			{Rel: []string{"up"}, Href: s.router.Href("/")},
 		},
-		Actions: s.actions(state),
+		Actions: s.router.Actions(state),
 	}
 
 	for _, h := range state.Hosts {
@@ -94,7 +94,7 @@ func (s *Server) fansEntity(state State) Entity {
 		Class:      []string{"fans"},
 		Rel:        []string{"item"},
 		Properties: props,
-		Links:      []Link{{Rel: []string{"self"}, Href: s.href("/fans")}},
+		Links:      []Link{{Rel: []string{"self"}, Href: s.router.Href("/fans")}},
 	}
 }
 
@@ -103,10 +103,10 @@ func (s *Server) handleFans(state State, _ request) (Entity, int, error) {
 	e.Rel = nil
 	e.Title = "Rack fan plug"
 	e.Links = []Link{
-		{Rel: []string{"self"}, Href: s.href("/fans")},
-		{Rel: []string{"up"}, Href: s.href("/")},
+		{Rel: []string{"self"}, Href: s.router.Href("/fans")},
+		{Rel: []string{"up"}, Href: s.router.Href("/")},
 	}
-	e.Actions = s.actionsFor(state, "fans-on", "fans-off")
+	e.Actions = s.router.ActionsFor(state, "fans-on", "fans-off")
 	return e, http.StatusOK, nil
 }
 
@@ -210,10 +210,10 @@ func (s *Server) handleMonitoring(state State, _ request) (Entity, int, error) {
 		},
 		Entities: gateways,
 		Links: []Link{
-			{Rel: []string{"self"}, Href: s.href("/monitoring")},
-			{Rel: []string{"up"}, Href: s.href("/")},
+			{Rel: []string{"self"}, Href: s.router.Href("/monitoring")},
+			{Rel: []string{"up"}, Href: s.router.Href("/")},
 		},
-		Actions: s.actionsFor(state, "monitoring-mute", "monitoring-unmute"),
+		Actions: s.router.ActionsFor(state, "monitoring-mute", "monitoring-unmute"),
 	}, http.StatusOK, nil
 }
 
@@ -255,15 +255,15 @@ func (s *Server) handleJob(state State, _ request) (Entity, int, error) {
 			Title:      "No power operation has run on this node",
 			Properties: map[string]any{"state": "none", "node": s.node},
 			Links: []Link{
-				{Rel: []string{"self"}, Href: s.href("/job")},
-				{Rel: []string{"up"}, Href: s.href("/")},
+				{Rel: []string{"self"}, Href: s.router.Href("/job")},
+				{Rel: []string{"up"}, Href: s.router.Href("/")},
 			},
 		}, http.StatusOK, nil
 	}
 
 	e := s.jobEntity(*state.Job)
 	e.Rel = nil
-	e.Links = append(e.Links, Link{Rel: []string{"up"}, Href: s.href("/")})
+	e.Links = append(e.Links, Link{Rel: []string{"up"}, Href: s.router.Href("/")})
 	return e, http.StatusOK, nil
 }
 
@@ -304,7 +304,7 @@ func (s *Server) jobEntity(j coordination.Job) Entity {
 		Rel:        []string{"item"},
 		Title:      "Power operation",
 		Properties: props,
-		Links:      []Link{{Rel: []string{"self"}, Href: s.href("/job")}},
+		Links:      []Link{{Rel: []string{"self"}, Href: s.router.Href("/job")}},
 	}
 }
 
@@ -358,66 +358,7 @@ func jobArgs(action string) []string {
 	return nil
 }
 
-// links renders every resource as a navigable link.
-func (s *Server) links() []Link {
-	var out []Link
-	for _, r := range routes() {
-		if r.Action || r.Method != http.MethodGet {
-			continue
-		}
-		out = append(out, Link{Rel: []string{r.Name}, Href: s.href(r.Path), Title: r.Title})
-	}
-	return out
-}
-
-// actions renders every action that is possible right now.
-//
-// Actions that are not possible are omitted entirely rather than marked
-// disabled. That is the core of the contract: a client renders what it is
-// given, and never needs to encode a rule about when something is allowed.
-func (s *Server) actions(state State) []Action {
-	var out []Action
-	for _, r := range routes() {
-		if !r.Action || !r.available(state) {
-			continue
-		}
-		out = append(out, s.action(r, state))
-	}
-	return out
-}
-
-// actionsFor is actions() narrowed to the named routes, for resources that
-// should only advertise their own controls.
-func (s *Server) actionsFor(state State, names ...string) []Action {
-	var out []Action
-	for _, r := range routes() {
-		if !r.Action || !r.available(state) || !contains(names, r.Name) {
-			continue
-		}
-		out = append(out, s.action(r, state))
-	}
-	return out
-}
-
-func (s *Server) action(r route, state State) Action {
-	a := Action{
-		Name:   r.Name,
-		Title:  r.Title,
-		Method: r.Method,
-		Href:   s.href(r.Path),
-		Fields: r.fields(state),
-	}
-	if len(a.Fields) > 0 {
-		a.Type = "application/x-www-form-urlencoded"
-	}
-	return a
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
-}
+// links, actions and actionsFor -- rendering every resource as a navigable
+// link, and every currently-possible action -- now live on Router, since they
+// depend only on the route registry and a base href, not on anything else
+// Server carries. See Router.Links, Router.Actions, Router.ActionsFor.

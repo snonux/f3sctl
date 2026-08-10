@@ -2,8 +2,6 @@ package httpapi
 
 import (
 	"context"
-	"crypto/subtle"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,11 +16,14 @@ import (
 
 // Server answers one CGI request.
 //
-// It owns no coordination logic of its own: whether a job may start, whether
-// the peer node is busy, and the job's lifecycle all live in
-// internal/coordination, injected here as jobs and peers. Server's job is
-// HTTP transport and rendering -- parse the request, ask engine/jobs/peers
-// what is true, render the answer as Siren.
+// It owns no coordination logic of its own, and increasingly little else:
+// whether a job may start, whether the peer node is busy, and the job's
+// lifecycle all live in internal/coordination, injected here as jobs and
+// peers; the API key check, route matching/href-building, and response
+// serialisation live in Authenticator, Router and SirenRenderer,
+// respectively. Server's own job is to compose these -- parse the request,
+// ask engine/jobs/peers/auth/router what is true, hand the answer to siren to
+// render.
 type Server struct {
 	cfg    config.Config
 	engine *power.Engine
@@ -34,11 +35,19 @@ type Server struct {
 	// so a client is never offered an action that job would conflict with.
 	// See internal/coordination.PeerSet.
 	peers *coordination.PeerSet
-	// base is the URL prefix every href is built from -- bozohttpd's
-	// SCRIPT_NAME, e.g. "/cgi-bin/f3sctl". Hrefs are absolute paths so a
-	// client never has to know how the API is mounted.
-	base string
-	node string
+	// auth checks a request's API key against the one configured for this
+	// node. See Authenticator.
+	auth *Authenticator
+	// router matches a request to a route and builds the absolute hrefs
+	// handed back to clients. See Router.
+	router *Router
+	// openapi generates the OpenAPI document served at /openapi.json, from
+	// the same route declarations router uses. See OpenAPIBuilder.
+	openapi *OpenAPIBuilder
+	// siren writes every response -- Siren entity, plain JSON, or error --
+	// in the CGI wire format. See SirenRenderer.
+	siren SirenRenderer
+	node  string
 
 	// rackConfirm re-probes what is running in the rack, with the consecutive
 	// -silence evidence the fan guard demands before anything cuts cooling.
@@ -70,16 +79,21 @@ func (r request) boolField(name string) bool {
 // ServeCGI answers a single CGI request read from the process environment and
 // stdin, writing the response to out.
 func ServeCGI(cfg config.Config, out io.Writer) error {
+	// SirenRenderer is stateless, so it is safe to use ahead of a Server --
+	// the two error paths below can fire before one exists at all (a
+	// malformed request, or a Server that failed to construct).
+	siren := NewSirenRenderer()
+
 	req, err := parseCGIRequest(os.Stdin)
 	if err != nil {
-		return writeError(out, http.StatusBadRequest, err.Error())
+		return siren.WriteError(out, http.StatusBadRequest, err.Error())
 	}
 
 	srv, err := newServer(cfg)
 	if err != nil {
 		// A misconfigured server (unreadable SSH key, say) is a server fault,
 		// not the client's. Report it as one so a client does not retry.
-		return writeError(out, http.StatusInternalServerError, err.Error())
+		return siren.WriteError(out, http.StatusInternalServerError, err.Error())
 	}
 
 	return srv.serve(out, req)
@@ -91,35 +105,76 @@ func newServer(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	node, _ := os.Hostname()
+	router := NewRouter(strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/"))
 	return &Server{
-		cfg:    cfg,
-		engine: eng,
-		jobs:   coordination.NewManager(cfg.StateDir),
-		peers:  coordination.NewPeerSet(cfg.PeerNodes, cfg.PeerJobPath),
-		base:   strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/"),
-		node:   node,
+		cfg:     cfg,
+		engine:  eng,
+		jobs:    coordination.NewManager(cfg.StateDir),
+		peers:   coordination.NewPeerSet(cfg.PeerNodes, cfg.PeerJobPath),
+		auth:    NewAuthenticator(cfg.APIKeyFile),
+		router:  router,
+		openapi: NewOpenAPIBuilder(router),
+		siren:   NewSirenRenderer(),
+		node:    node,
 	}, nil
 }
 
 func (s *Server) serve(out io.Writer, req request) error {
-	if err := s.authenticate(req); err != nil {
+	if err := s.auth.Check(req.APIKey); err != nil {
 		// Deliberately identical for a missing and a wrong key: telling an
 		// attacker which of the two they got is free information.
-		return writeError(out, http.StatusUnauthorized, "unauthorized")
+		return s.siren.WriteError(out, http.StatusUnauthorized, "unauthorized")
 	}
 
-	r, ok := lookup(req.Method, req.Path)
+	r, ok := s.router.Lookup(req.Method, req.Path)
 	if !ok {
-		if pathExists(req.Path) {
-			return writeError(out, http.StatusMethodNotAllowed,
+		if s.router.PathExists(req.Path) {
+			return s.siren.WriteError(out, http.StatusMethodNotAllowed,
 				fmt.Sprintf("%s is not allowed on %s", req.Method, req.Path))
 		}
-		return writeError(out, http.StatusNotFound, "no such resource: "+req.Path)
+		return s.siren.WriteError(out, http.StatusNotFound, "no such resource: "+req.Path)
 	}
 
 	ctx := context.Background()
-	state := s.snapshot(ctx)
+	state := s.enrichState(ctx, s.snapshot(ctx), req)
 
+	// An action that is not currently available is refused here, before any
+	// handler runs. A well-written client never reaches this: it was not
+	// offered the action in the first place. This is the backstop for a
+	// client racing another, or one that ignored the contract.
+	if r.Action && !r.available(state) {
+		return s.siren.WriteError(out, http.StatusConflict,
+			fmt.Sprintf("%q is not available right now; re-fetch the resource and read its actions", r.Name))
+	}
+
+	entity, status, err := r.Handle(s, state, req)
+	if err != nil {
+		return s.siren.WriteError(out, status, err.Error())
+	}
+
+	// The OpenAPI document is served as itself rather than wrapped in Siren:
+	// a tool that reads OpenAPI expects the document at the top level.
+	if req.Path == openAPIPath {
+		return s.siren.WriteJSON(out, status, entity.Properties)
+	}
+	return s.siren.WriteEntity(out, status, entity)
+}
+
+// snapshot probes everything the availability predicates need, once.
+func (s *Server) snapshot(ctx context.Context) State {
+	st := State{
+		Hosts: s.engine.ProbeAll(ctx),
+		Job:   s.jobs.Read(),
+	}
+	st.Fans, st.FansErr = s.engine.FansStatus(ctx)
+	return st
+}
+
+// enrichState adds the request-scoped facts that cost more than the local
+// probes in snapshot() to gather -- the peer node's job state, and, only for
+// /monitoring routes, the Gogios mute -- so serve() pays for them only when a
+// route actually needs them.
+func (s *Server) enrichState(ctx context.Context, state State, req request) State {
 	// Ask the other node whether it is mid-job, so actions this node advertises
 	// account for a job running over there.
 	//
@@ -142,121 +197,11 @@ func (s *Server) serve(out io.Writer, req request) error {
 	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
 	// trip each to read, so it is fetched only for the routes that actually
 	// render or change it. Every other response would pay ~2s for a value it
-	// never shows. This runs before the availability check below because
+	// never shows. This runs before the availability check in serve() because
 	// monitoring-mute/unmute are judged against exactly this state.
 	if strings.HasPrefix(req.Path, "/monitoring") {
 		state.Monitoring = s.engine.MonitoringStatus(ctx)
 	}
 
-	// An action that is not currently available is refused here, before any
-	// handler runs. A well-written client never reaches this: it was not
-	// offered the action in the first place. This is the backstop for a
-	// client racing another, or one that ignored the contract.
-	if r.Action && !r.available(state) {
-		return writeError(out, http.StatusConflict,
-			fmt.Sprintf("%q is not available right now; re-fetch the resource and read its actions", r.Name))
-	}
-
-	entity, status, err := r.Handle(s, state, req)
-	if err != nil {
-		return writeError(out, status, err.Error())
-	}
-
-	// The OpenAPI document is served as itself rather than wrapped in Siren:
-	// a tool that reads OpenAPI expects the document at the top level.
-	if req.Path == openAPIPath {
-		return writeJSON(out, status, entity.Properties)
-	}
-	return writeEntity(out, status, entity)
-}
-
-// authenticate checks the X-API-Key header against the configured key.
-//
-// The key is never accepted in the query string: bozohttpd logs request URIs
-// to syslog and relayd logs connections, so a key in a URL would end up in two
-// logs on three machines.
-func (s *Server) authenticate(req request) error {
-	want, err := os.ReadFile(s.cfg.APIKeyFile)
-	if err != nil {
-		return fmt.Errorf("reading the API key file: %w", err)
-	}
-
-	wantTrimmed := strings.TrimSpace(string(want))
-	if wantTrimmed == "" {
-		return fmt.Errorf("the API key file is empty")
-	}
-
-	// Constant-time so the comparison cannot be turned into an oracle for
-	// guessing the key one byte at a time.
-	if subtle.ConstantTimeCompare([]byte(req.APIKey), []byte(wantTrimmed)) != 1 {
-		return fmt.Errorf("bad API key")
-	}
-	return nil
-}
-
-// snapshot probes everything the availability predicates need, once.
-func (s *Server) snapshot(ctx context.Context) State {
-	st := State{
-		Hosts: s.engine.ProbeAll(ctx),
-		Job:   s.jobs.Read(),
-	}
-	st.Fans, st.FansErr = s.engine.FansStatus(ctx)
-	return st
-}
-
-// href builds an absolute path for a route.
-func (s *Server) href(path string) string {
-	if path == "/" {
-		return s.base + "/"
-	}
-	return s.base + path
-}
-
-// writeEntity emits a Siren entity as a CGI response.
-func writeEntity(out io.Writer, status int, e Entity) error {
-	body, err := json.MarshalIndent(e, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeResponse(out, status, sirenMediaType, append(body, '\n'))
-}
-
-// writeJSON emits a plain JSON document, for the one route that is not Siren.
-func writeJSON(out io.Writer, status int, doc any) error {
-	body, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeResponse(out, status, "application/json", append(body, '\n'))
-}
-
-// writeError emits a problem response. It carries the same shape as any other
-// entity so a client needs only one parser.
-func writeError(out io.Writer, status int, msg string) error {
-	e := Entity{
-		Class:      []string{"error"},
-		Properties: map[string]any{"status": status, "message": msg},
-	}
-	body, err := json.MarshalIndent(e, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeResponse(out, status, sirenMediaType, append(body, '\n'))
-}
-
-func writeResponse(out io.Writer, status int, contentType string, body []byte) error {
-	// X-F3sctl-Node names the node that served this response, on EVERY reply
-	// including errors. relayd load-balances pi0 and pi1, so "which node
-	// answered" explains a great deal -- a job the other node knows nothing
-	// about, most of all -- and it cannot be read off the URL. Putting it in a
-	// header rather than only in the entity means it is present even when the
-	// body is an error, which has no node property to carry it.
-	node, _ := os.Hostname()
-
-	// CGI headers use CRLF and a blank line before the body. bozohttpd turns
-	// the Status header into the HTTP status line.
-	_, err := fmt.Fprintf(out,
-		"Status: %d %s\r\nContent-Type: %s\r\nCache-Control: no-store\r\nX-F3sctl-Node: %s\r\n\r\n%s",
-		status, http.StatusText(status), contentType, node, body)
-	return err
+	return state
 }

@@ -79,7 +79,7 @@ func testServer(t *testing.T, plug *fakePlug, confirm func(context.Context) powe
 	if err != nil {
 		t.Fatalf("power.New: %v", err)
 	}
-	return &Server{cfg: cfg, engine: eng, node: "test", rackConfirm: confirm}
+	return &Server{cfg: cfg, engine: eng, node: "test", router: NewRouter(""), rackConfirm: confirm}
 }
 
 // fState builds one f-host's probe result. known=false is the probe that never

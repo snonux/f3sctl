@@ -21,13 +21,31 @@ import (
 // it useless to every tool that reads OpenAPI. serve() recognises it by path
 // and writes Properties out as the whole body.
 func (s *Server) handleOpenAPI(_ State, _ request) (Entity, int, error) {
-	return Entity{Properties: s.openAPIDoc()}, http.StatusOK, nil
+	return Entity{Properties: s.openapi.Build()}, http.StatusOK, nil
 }
 
 // openAPIPath is the route whose body is emitted raw rather than as Siren.
 const openAPIPath = "/openapi.json"
 
-func (s *Server) openAPIDoc() map[string]any {
+// OpenAPIBuilder generates the OpenAPI 3.1 document for the API surface.
+//
+// It is generated from the same route declarations (routes()) that drive
+// Router's Siren rendering, so the static document and what a client is
+// actually offered at runtime can never describe two different APIs. It
+// depends only on a Router for href resolution, not on Server, so the whole
+// document can be built and asserted on in a test without an engine, jobs or
+// peers.
+type OpenAPIBuilder struct {
+	router *Router
+}
+
+// NewOpenAPIBuilder returns a builder that resolves hrefs through router.
+func NewOpenAPIBuilder(router *Router) *OpenAPIBuilder {
+	return &OpenAPIBuilder{router: router}
+}
+
+// Build renders the complete OpenAPI document.
+func (b *OpenAPIBuilder) Build() map[string]any {
 	paths := map[string]any{}
 
 	for _, r := range routes() {
@@ -35,43 +53,12 @@ func (s *Server) openAPIDoc() map[string]any {
 			continue
 		}
 
-		op := map[string]any{
-			"operationId": r.Name,
-			"summary":     r.Title,
-			"responses": map[string]any{
-				"200": map[string]any{"description": "Siren entity"},
-				"401": map[string]any{"description": "missing or bad X-API-Key"},
-			},
-		}
-
-		if r.Action {
-			// Availability is state-dependent and therefore cannot be
-			// expressed here; it is described in prose so a reader of the
-			// static document is not misled into thinking every action is
-			// always callable.
-			op["description"] = "Advertised in the parent entity's actions only when currently available. " +
-				"A 409 means it was attempted when it was not."
-			op["responses"].(map[string]any)["202"] = map[string]any{"description": "accepted; poll the job resource"}
-			op["responses"].(map[string]any)["409"] = map[string]any{"description": "not available now, or another job is running"}
-
-			if fields := describeFields(r); len(fields) > 0 {
-				op["requestBody"] = map[string]any{
-					"required": false,
-					"content": map[string]any{
-						"application/x-www-form-urlencoded": map[string]any{
-							"schema": map[string]any{"type": "object", "properties": fields},
-						},
-					},
-				}
-			}
-		}
-
-		key := s.href(r.Path)
+		key := b.router.Href(r.Path)
 		entry, _ := paths[key].(map[string]any)
 		if entry == nil {
 			entry = map[string]any{}
 		}
-		entry[strings.ToLower(r.Method)] = op
+		entry[strings.ToLower(r.Method)] = operationFor(r)
 		paths[key] = entry
 	}
 
@@ -90,6 +77,41 @@ func (s *Server) openAPIDoc() map[string]any {
 		"security": []any{map[string]any{"apiKey": []any{}}},
 		"paths":    paths,
 	}
+}
+
+// operationFor renders one route's OpenAPI Operation Object.
+func operationFor(r route) map[string]any {
+	op := map[string]any{
+		"operationId": r.Name,
+		"summary":     r.Title,
+		"responses": map[string]any{
+			"200": map[string]any{"description": "Siren entity"},
+			"401": map[string]any{"description": "missing or bad X-API-Key"},
+		},
+	}
+
+	if r.Action {
+		// Availability is state-dependent and therefore cannot be expressed
+		// here; it is described in prose so a reader of the static document
+		// is not misled into thinking every action is always callable.
+		op["description"] = "Advertised in the parent entity's actions only when currently available. " +
+			"A 409 means it was attempted when it was not."
+		op["responses"].(map[string]any)["202"] = map[string]any{"description": "accepted; poll the job resource"}
+		op["responses"].(map[string]any)["409"] = map[string]any{"description": "not available now, or another job is running"}
+
+		if fields := describeFields(r); len(fields) > 0 {
+			op["requestBody"] = map[string]any{
+				"required": false,
+				"content": map[string]any{
+					"application/x-www-form-urlencoded": map[string]any{
+						"schema": map[string]any{"type": "object", "properties": fields},
+					},
+				},
+			}
+		}
+	}
+
+	return op
 }
 
 // describeFields renders a route's parameters for the static document.

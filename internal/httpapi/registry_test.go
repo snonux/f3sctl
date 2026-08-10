@@ -31,8 +31,8 @@ func TestPeerJobPathMatchesTheJobRoute(t *testing.T) {
 // OpenAPI document a generator reads must both come from routes(), with
 // neither inventing nor omitting an endpoint.
 func TestOpenAPICoversEveryRoute(t *testing.T) {
-	s := &Server{base: "/cgi-bin/f3sctl"}
-	doc := s.openAPIDoc()
+	router := NewRouter("/cgi-bin/f3sctl")
+	doc := NewOpenAPIBuilder(router).Build()
 
 	paths, ok := doc["paths"].(map[string]any)
 	if !ok {
@@ -43,7 +43,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 		if r.Path == openAPIPath {
 			continue
 		}
-		entry, ok := paths[s.href(r.Path)].(map[string]any)
+		entry, ok := paths[router.Href(r.Path)].(map[string]any)
 		if !ok {
 			t.Errorf("route %q (%s %s) is missing from the OpenAPI document", r.Name, r.Method, r.Path)
 			continue
@@ -57,7 +57,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 	for path := range paths {
 		found := false
 		for _, r := range routes() {
-			if s.href(r.Path) == path {
+			if router.Href(r.Path) == path {
 				found = true
 				break
 			}
@@ -331,7 +331,7 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 			if _, ok := routeByName(name); !ok {
 				t.Errorf("no %q action; %s cannot be powered individually", name, h.Name)
 			}
-			if _, ok := lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
+			if _, ok := NewRouter("").Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
 				t.Errorf("no route serving POST /power/%s/%s", h.Name, verb)
 			}
 		}
