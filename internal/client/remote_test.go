@@ -30,6 +30,16 @@ type fakeAPI struct {
 	srv     *httptest.Server
 	wantKey string
 
+	// coldSnapshot, when true, reproduces the gz0 disagreement: handleFans
+	// omits the "force" checkbox from the fans-off advertisement, as
+	// registry.go's cheap single-probe rackBusy() does when it reads the rack
+	// as idle, while handleFansOff still 409s without force=true, as
+	// handlers.go's stricter multi-probe rackStillBusy() does when it
+	// disagrees and finds a host up within the same request. When false (the
+	// zero value, used by every test predating gz0), the field is always
+	// advertised and never enforced without being offered first.
+	coldSnapshot bool
+
 	mu        sync.Mutex
 	forceSent []string // the "force" form value on every POST /fans/off, in order
 }
@@ -83,34 +93,50 @@ func (f *fakeAPI) handleRoot(w http.ResponseWriter) {
 
 // handleFans answers GET /fans, advertising fans-off with a required force
 // checkbox -- the same shape internal/httpapi/registry.go's real advertising
-// takes, which is what makes Client.Perform decide whether to fill the field.
+// takes, which is what makes Client.Perform decide whether to fill the
+// field -- unless coldSnapshot is set, in which case the field is omitted
+// entirely, mirroring a cheap snapshot that read the rack as idle.
 func (f *fakeAPI) handleFans(w http.ResponseWriter) {
-	writeEntity(w, Entity{
-		Class: []string{"fans"},
-		Actions: []Action{{
-			Name:    "fans-off",
-			Title:   "Switch the rack fans off",
-			Method:  http.MethodPost,
-			Href:    "/fans/off",
-			CLIVerb: "fans off",
-			Fields: []Field{
-				{Name: "force", Type: "checkbox", Title: "hosts may still be running", Required: true},
-			},
-		}},
-	})
+	action := Action{
+		Name:    "fans-off",
+		Title:   "Switch the rack fans off",
+		Method:  http.MethodPost,
+		Href:    "/fans/off",
+		CLIVerb: "fans off",
+	}
+	if !f.coldSnapshot {
+		action.Fields = []Field{
+			{Name: "force", Type: "checkbox", Title: "hosts may still be running", Required: true},
+		}
+	}
+	writeEntity(w, Entity{Class: []string{"fans"}, Actions: []Action{action}})
 }
 
 // handleFansOff answers POST /fans/off, recording the "force" form value the
 // tests assert on and reporting a synchronous state change -- fans-off never
 // runs as a background job on the real server either.
+//
+// In coldSnapshot mode it also enforces the stricter half of the real gate:
+// a request without force=true is 409ed, standing in for handlers.go's
+// rackStillBusy finding a host up even though the (omitted) advertisement
+// above was built from a snapshot that read the rack as cold.
 func (f *fakeAPI) handleFansOff(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	force := r.PostForm.Get("force")
 	f.mu.Lock()
-	f.forceSent = append(f.forceSent, r.PostForm.Get("force"))
+	f.forceSent = append(f.forceSent, force)
 	f.mu.Unlock()
+
+	if f.coldSnapshot && force != "true" {
+		w.WriteHeader(http.StatusConflict)
+		writeEntity(w, Entity{Properties: map[string]any{
+			"message": "the rack may still be drawing power; re-send with force=true",
+		}})
+		return
+	}
 	writeEntity(w, Entity{Properties: map[string]any{"on": false}})
 }
 
@@ -184,6 +210,53 @@ func TestRunFansOffWithoutForceIsRefusedBeforeAnyRequestIsSent(t *testing.T) {
 	}
 	if got := api.forceValues(); len(got) != 0 {
 		t.Errorf("POST /fans/off calls = %v, want none: refused before the request went out", got)
+	}
+}
+
+// TestRunFansOffForceIsSentEvenWhenTheColdSnapshotOmittedTheField is the gz0
+// regression: the cheap snapshot behind /fans's advertisement read the rack
+// as cold, so the "force" checkbox is not offered at all, but the caller
+// passed --force anyway. Before the fix, Client.Perform only ever filled
+// fields the advertisement listed, so this posted an empty form and got the
+// same 409 handleFansOff (fake and real) returns for an unconfirmed request
+// -- even though the user did everything right. The fix (client.go's
+// Perform) sends "force=true" whenever confirm is true, regardless of
+// whether the field was advertised, so this must now succeed in one request
+// with no retry.
+func TestRunFansOffForceIsSentEvenWhenTheColdSnapshotOmittedTheField(t *testing.T) {
+	api := newFakeAPI(t, "correct-key")
+	api.coldSnapshot = true
+	c := newTestClient(t, api.srv.URL, "correct-key")
+
+	if err := Run(c, []string{"fans", "off"}, true); err != nil {
+		t.Fatalf("Run(fans off, force=true) against a cold-snapshot advertisement: %v", err)
+	}
+
+	got := api.forceValues()
+	if len(got) != 1 || got[0] != "true" {
+		t.Fatalf("force values sent to POST /fans/off = %v, want exactly one %q despite no advertised field (gz0)", got, "true")
+	}
+}
+
+// TestRunFansOffWithoutForceStill409sWhenTheConfirmingProbeDisagrees pins the
+// other half: when the caller did NOT pass --force, the client must still
+// send nothing (there is no override to send), and a cold-snapshot
+// advertisement whose confirming probe finds a host up must still surface as
+// a 409 -- the fix sends an unsolicited force only when the user actually
+// asked for it, never fabricates one.
+func TestRunFansOffWithoutForceStill409sWhenTheConfirmingProbeDisagrees(t *testing.T) {
+	api := newFakeAPI(t, "correct-key")
+	api.coldSnapshot = true
+	c := newTestClient(t, api.srv.URL, "correct-key")
+
+	err := Run(c, []string{"fans", "off"}, false)
+	if err == nil {
+		t.Fatal("Run(fans off, force=false) succeeded even though the confirming probe found a host up")
+	}
+
+	got := api.forceValues()
+	if len(got) != 1 || got[0] != "" {
+		t.Fatalf("force values sent to POST /fans/off = %v, want exactly one empty value: no --force was passed", got)
 	}
 }
 

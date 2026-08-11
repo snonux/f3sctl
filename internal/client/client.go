@@ -384,14 +384,35 @@ func (c *Client) Follow(from Entity, rel string) (Entity, error) {
 // satisfied by confirm, and its own title is what gets shown when it is not.
 func (c *Client) Perform(a Action, confirm bool) (Entity, error) {
 	form := url.Values{}
+	sawForce := false
 	for _, f := range a.Fields {
 		if f.Type != "checkbox" {
 			continue
+		}
+		if f.Name == "force" {
+			sawForce = true
 		}
 		if f.Required && !confirm {
 			return Entity{}, fmt.Errorf("%s needs confirmation: %s (pass --force)", a.Name, f.Title)
 		}
 		form.Set(f.Name, fmt.Sprintf("%t", confirm))
 	}
+
+	// gz0: fans-off's "force" checkbox is gated by the server's cheap,
+	// single-probe snapshot (registry.go's rackBusy), while the plug switch
+	// itself is guarded by a stricter multi-probe confirmation inside the
+	// engine (handlers.go's rackStillBusy). When the snapshot reads the rack
+	// as cold, the advertisement omits the field entirely -- so the loop
+	// above never runs for it -- even though the confirming probe can still
+	// find a host up and 409. A caller who explicitly passed --force meant it
+	// regardless of which snapshot the advertisement happened to be built
+	// from, so send it anyway: the server's own confirmation is the actual
+	// safety gate, and an unsolicited-but-true force field cannot make an
+	// action less safe, it can only save the round trip that a spurious 409
+	// and a retry would otherwise force on the user.
+	if confirm && !sawForce {
+		form.Set("force", "true")
+	}
+
 	return c.do(a.Href, a.Method, form)
 }

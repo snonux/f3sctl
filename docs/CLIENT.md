@@ -362,11 +362,27 @@ in that state the `ping` flags in `/status` are not evidence of an idle rack
 either, so do not present it as one. This is why §6 says to render the title as
 given instead of writing your own.
 
-A `fans-off` sent **without** `force` can still come back `409` even though the
-action was offered with no field: the advertisement is judged on the single
-probe taken to build the response, while the switch itself is judged on a
-slower, more sceptical one. Treat it like any other 409 — re-fetch and
-re-render, and the field will be there.
+**`fans-off` is judged twice, on two different budgets, and they can
+disagree.** The `force` field's presence is decided by a cheap single-probe
+snapshot taken once for the whole response; the plug switch itself is guarded
+by a slower, stricter, multi-probe confirmation run only when the request
+actually tries to flip it. When the snapshot reads the rack as cold, the field
+is omitted — but the confirming probe can still find a host up, and a
+`fans-off` sent **without** `force` then comes back `409` even though nothing
+in the response ever offered the field to withhold.
+
+Do not treat this 409 like the others in §7 (re-fetch and re-render, hope the
+next snapshot agrees with the probe that just ran). It is not guaranteed to
+resolve itself in any particular number of retries, and re-fetching throws
+away information your user already gave you: if they explicitly asked for
+`fans off` **and** confirmed the force checkbox last time it was offered, send
+`force=true` on the retry directly, whether or not this response's `fields`
+array happens to list it. The server's own multi-probe confirmation is the
+real safety gate, not the advertisement — sending an unsolicited-but-genuine
+`force=true` can never make the action less safe, it only avoids a second
+round trip for a "yes" the user already gave. Never fabricate `force=true`
+when the user has not actually confirmed it; that would skip the confirmation
+this whole field exists to get.
 
 ---
 
