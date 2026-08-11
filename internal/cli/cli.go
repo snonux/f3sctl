@@ -331,6 +331,17 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 		return errUsage
 	}
 
+	// Resolved before building an Engine or touching the Shelly password: what
+	// was asked for is decided from the arguments alone, the same reasoning as
+	// powerActionFor. Fans has no per-host concept, so `fans on f0` used to
+	// dispatch on args[0] alone, silently switch the WHOLE rack's fans on, and
+	// drop "f0" on the floor -- a misleading success rather than an error.
+	verb, ok := parseFansArgs(args)
+	if !ok {
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("unknown fans command %q", strings.Join(args, " "))
+	}
+
 	eng, err := power.New(cfg)
 	if err != nil {
 		return err
@@ -340,7 +351,7 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 	}
 	ctx := context.Background()
 
-	switch args[0] {
+	switch verb {
 	case "status":
 		st, err := eng.FansStatus(ctx)
 		if err != nil {
@@ -357,12 +368,26 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 		fmt.Fprintf(stdout, "rack fans: %s\n", presenter.OnOff(st.On))
 		return nil
 
-	case "off":
+	default: // "off", the only spelling parseFansArgs has left standing
 		return fansOff(ctx, eng, force, liveHosts, stdout)
 	}
+}
 
-	fmt.Fprint(stderr, usage)
-	return fmt.Errorf("unknown fans command %q", args[0])
+// parseFansArgs parses a `fans` argument list -- args with the leading "fans"
+// token already stripped -- into the one verb it names. ok is false for
+// anything not documented: wrong arity (fans takes exactly one word, since it
+// has no per-host or --force-in-args concept) or an unknown word. This is what
+// turns both trailing junk (`fans on f0`) and a misspelling (`fans of`) into a
+// usage error instead of a guess.
+func parseFansArgs(args []string) (verb string, ok bool) {
+	if len(args) != 1 {
+		return "", false
+	}
+	switch args[0] {
+	case "status", "on", "off":
+		return args[0], true
+	}
+	return "", false
 }
 
 // runMonitoring reads or changes the Gogios mute on both gateways.
@@ -375,13 +400,23 @@ func runMonitoring(cfg config.Config, args []string, stdout, stderr io.Writer) e
 		return errUsage
 	}
 
+	// Resolved before building an Engine: what was asked for is decided from
+	// the arguments alone, the same reasoning as powerActionFor/parseFansArgs.
+	// `monitoring mute junk` used to dispatch on args[0] alone, silently mute
+	// Gogios, and drop "junk" on the floor.
+	verb, ok := parseMonitoringArgs(args)
+	if !ok {
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("unknown monitoring command %q", strings.Join(args, " "))
+	}
+
 	eng, err := power.New(cfg)
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
 
-	switch args[0] {
+	switch verb {
 	case "status":
 		printMonitoring(stdout, eng.MonitoringStatus(ctx))
 		return nil
@@ -393,13 +428,30 @@ func runMonitoring(cfg config.Config, args []string, stdout, stderr io.Writer) e
 		if err := eng.UnmuteNow(ctx, stdout); err != nil {
 			return err
 		}
-	default:
-		fmt.Fprint(stderr, usage)
-		return fmt.Errorf("unknown monitoring command %q", args[0])
 	}
 
 	printMonitoring(stdout, eng.MonitoringStatus(ctx))
 	return nil
+}
+
+// parseMonitoringArgs parses a `monitoring` argument list -- args with the
+// leading "monitoring" token already stripped -- into the one verb it names.
+// ok is false for anything not documented: wrong arity (monitoring takes
+// exactly one word) or an unknown word.
+//
+// isMonitoring (remote.go) parses with this same function before deciding
+// whether a `monitoring` command routes to the API, so the routing decision
+// and this local dispatch cannot disagree about which spellings are valid --
+// the same reasoning as parsePowerArgs/isShutdown.
+func parseMonitoringArgs(args []string) (verb string, ok bool) {
+	if len(args) != 1 {
+		return "", false
+	}
+	switch args[0] {
+	case "status", "mute", "unmute":
+		return args[0], true
+	}
+	return "", false
 }
 
 func printMonitoring(out io.Writer, states []power.GatewayMute) {

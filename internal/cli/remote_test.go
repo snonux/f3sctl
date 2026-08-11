@@ -146,6 +146,49 @@ func TestGlobalFlagsUseAPI(t *testing.T) {
 	}
 }
 
+// TestIsMonitoringAgreesWithParseMonitoringArgs is the routing-level half of
+// the iz0 regression, mirroring TestIsShutdownAgreesWithPowerActionFor for
+// monitoring: isMonitoring used to check only that args held exactly two
+// tokens starting with "monitoring", not that the second was a real verb. A
+// malformed verb of the right arity -- "monitoring xyz" -- was therefore
+// still routed to the API, which reports "not available right now" with a
+// nil error (an exit-0 no-op) instead of the local "unknown monitoring
+// command" every other bad spelling gets. isMonitoring must agree with
+// parseMonitoringArgs on every case: routable if and only if the args after
+// "monitoring" parse to a real verb.
+func TestIsMonitoringAgreesWithParseMonitoringArgs(t *testing.T) {
+	for _, args := range [][]string{
+		{"monitoring", "status"},
+		{"monitoring", "mute"},
+		{"monitoring", "unmute"},
+		{"monitoring", "xyz"}, // the misclassified spelling
+		{"monitoring", "mute", "junk"},
+		{"monitoring"},
+		{"power", "status"},
+		{},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var want bool
+			if len(args) > 0 && args[0] == "monitoring" {
+				_, ok := parseMonitoringArgs(args[1:])
+				want = ok
+			}
+			if got := isMonitoring(args); got != want {
+				t.Errorf("isMonitoring(%v) = %v, want %v", args, got, want)
+			}
+		})
+	}
+
+	// The malformed spelling the reviewer verified concretely: a real verb
+	// with the wrong word must not reach the API's confusing no-op.
+	if isMonitoring([]string{"monitoring", "xyz"}) {
+		t.Error(`isMonitoring([]string{"monitoring", "xyz"}) = true, want false: not a real monitoring verb`)
+	}
+	if (globalFlags{}).useAPI([]string{"monitoring", "xyz"}) {
+		t.Error(`globalFlags{}.useAPI on "monitoring xyz" = true, want false: must stay local and hit runMonitoring's validation`)
+	}
+}
+
 // fakeRemoteAPI is a minimal Siren-over-HTTP fixture for driving runRemote
 // end to end: GET / (root, linking to "fans" and "status"), GET /fans
 // (advertising fans-off with its required force checkbox, exactly as

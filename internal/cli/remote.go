@@ -71,13 +71,26 @@ func (f globalFlags) useAPI(args []string) bool {
 	return isShutdown(args) || isMonitoring(args)
 }
 
-// isMonitoring reports whether args touch the Gogios mute.
+// isMonitoring reports whether args name a valid `monitoring` command.
 //
 // These route through the API for the same reason shutdowns do: the marker
 // lives on the two OpenBSD gateways, reached with the restricted key that is
 // pinned to pi0/pi1, so running it locally from a laptop cannot work.
+//
+// Built on parseMonitoringArgs -- the same parse runMonitoring uses (cli.go)
+// -- rather than a bare arity check, so this and the local dispatch cannot
+// disagree about which spellings are valid. It used to check only that there
+// were exactly two tokens, not that the second was one of status/mute/unmute,
+// so a malformed verb such as `monitoring xyz` was still routed to the API:
+// the server would report "not available right now" with a nil error (an
+// exit-0 no-op) instead of the local, non-zero "unknown monitoring command"
+// that reaching runMonitoring's validation gives every other bad spelling.
 func isMonitoring(args []string) bool {
-	return len(args) == 2 && args[0] == "monitoring"
+	if len(args) == 0 || args[0] != "monitoring" {
+		return false
+	}
+	_, ok := parseMonitoringArgs(args[1:])
+	return ok
 }
 
 // isShutdown reports whether args ask for a host, group, or the whole rack to

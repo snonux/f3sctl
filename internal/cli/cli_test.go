@@ -306,6 +306,45 @@ func TestUnknownFansVerbPrintsUsage(t *testing.T) {
 	}
 }
 
+// TestFansRejectsTrailingArgs is the regression test for the iz0 bug: fans has
+// no per-host concept, so runFans used to resolve its verb from args[0] alone
+// and silently drop everything after it. "fans on f0" switched the WHOLE
+// rack's fans on and discarded "f0" -- a misleading success (the action named
+// did happen) rather than a wrong target, but the same "malformed spelling
+// silently reinterpreted" hazard hy0 fixed for power. Every case here must be
+// a usage error with the plug left untouched, exactly like an unknown verb.
+func TestFansRejectsTrailingArgs(t *testing.T) {
+	for _, args := range [][]string{
+		{"on", "f0"},
+		{"off", "f0"},
+		{"status", "f0"},
+		{"on", "f0", "f1"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			shelly := newFakeShelly(t, true)
+			cfg := testConfig(t, shelly)
+
+			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"fans"}, args...)...)
+			if err == nil {
+				t.Fatalf("fans %s succeeded; trailing args must be a usage error", strings.Join(args, " "))
+			}
+			want := fmt.Sprintf("unknown fans command %q", strings.Join(args, " "))
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %q", err, want)
+			}
+			if !strings.Contains(errOut, "f3sctl fans off") {
+				t.Errorf("stderr = %q, want the usage text", errOut)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing: no fans action may have run", out)
+			}
+			if got := shelly.setCalls(); len(got) != 0 {
+				t.Errorf("Switch.Set calls = %v, want none: the fan plug must be untouched", got)
+			}
+		})
+	}
+}
+
 // TestFansStatusReportsThePlugWithoutTouchingIt pins the read-only verb: it
 // reports the plug's current state, switches nothing, and never consults the
 // liveness probe -- there is no guard on a read.
@@ -335,6 +374,40 @@ func TestFansStatusReportsThePlugWithoutTouchingIt(t *testing.T) {
 			}
 			if live.calls != 0 {
 				t.Errorf("liveness consulted %d times, want none: status has no guard", live.calls)
+			}
+		})
+	}
+}
+
+// TestMonitoringRejectsTrailingArgs is the monitoring half of the iz0
+// regression: runMonitoring used to resolve its verb from args[0] alone and
+// silently drop everything after it. "monitoring mute junk" muted Gogios and
+// discarded "junk" instead of failing. None of these route to the API --
+// isMonitoring requires the single word right after "monitoring" to be a real
+// verb, so a trailing token also fails that check and the command reaches
+// runMonitoring's own validation locally, which is what this test pins.
+func TestMonitoringRejectsTrailingArgs(t *testing.T) {
+	for _, args := range [][]string{
+		{"mute", "junk"},
+		{"unmute", "junk"},
+		{"status", "junk"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			cfg := testConfig(t, newFakeShelly(t, true))
+
+			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"monitoring"}, args...)...)
+			if err == nil {
+				t.Fatalf("monitoring %s succeeded; trailing args must be a usage error", strings.Join(args, " "))
+			}
+			want := fmt.Sprintf("unknown monitoring command %q", strings.Join(args, " "))
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %q", err, want)
+			}
+			if !strings.Contains(errOut, "f3sctl monitoring mute") {
+				t.Errorf("stderr = %q, want the usage text", errOut)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing: no monitoring action may have run", out)
 			}
 		})
 	}
