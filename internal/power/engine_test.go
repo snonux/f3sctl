@@ -3,11 +3,8 @@ package power
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +15,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/powertest"
 )
 
 // TestPartitionLiveSkipsHostsThatAreAlreadyOff is the regression test for a
@@ -93,57 +91,6 @@ func names(hosts []inventory.Host) []string {
 	return out
 }
 
-// fakeShelly stands in for the rack-fan Shelly plug.
-//
-// It answers the two RPCs the engine uses and records every Switch.Set, so the
-// tests can ask the only question that matters here -- "did the plug actually
-// get switched off" -- rather than reading log text. Digest auth is not
-// offered: shellyRPC only performs the challenge-response after a 401, so
-// answering 200 immediately keeps the fixture to what is under test.
-type fakeShelly struct {
-	srv *httptest.Server
-
-	mu   sync.Mutex
-	on   bool
-	sets []bool // the requested state of every Switch.Set, in order
-}
-
-func newFakeShelly(t *testing.T, initiallyOn bool) *fakeShelly {
-	t.Helper()
-	s := &fakeShelly{on: initiallyOn}
-	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
-	t.Cleanup(s.srv.Close)
-	return s
-}
-
-func (s *fakeShelly) handle(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	switch r.URL.Path {
-	case "/rpc/Switch.Set":
-		on := r.URL.Query().Get("on") == "true"
-		s.sets = append(s.sets, on)
-		s.on = on
-		_ = json.NewEncoder(w).Encode(map[string]bool{"was_on": !on})
-	case "/rpc/Switch.GetStatus":
-		_ = json.NewEncoder(w).Encode(map[string]bool{"output": s.on})
-	default:
-		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-	}
-}
-
-// setCalls returns the state requested by each Switch.Set so far.
-func (s *fakeShelly) setCalls() []bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]bool(nil), s.sets...)
-}
-
-// addr is what goes into Inventory.ShellyIP: the engine builds its URL as
-// "http://" + ShellyIP + path, so a host:port belongs there.
-func (s *fakeShelly) addr() string { return strings.TrimPrefix(s.srv.URL, "http://") }
-
 // testEngine returns an Engine wired to the fake plug, with liveness and the
 // NFS listing injected, a negligible probe gap, and no gateways in the
 // inventory.
@@ -169,7 +116,7 @@ func (s *fakeShelly) addr() string { return strings.TrimPrefix(s.srv.URL, "http:
 // zusbPreflight's SSH calls without touching e.ssh at all. See
 // backends_test.go, in particular TestOffRunsThroughFakeBackendsEndToEnd,
 // which drives exactly that middle with a non-empty host list.
-func testEngine(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
+func testEngine(t *testing.T, shelly *powertest.FakeShelly, up ...string) *Engine {
 	t.Helper()
 	return buildTestEngine(t, shelly, true, up)
 }
@@ -179,12 +126,12 @@ func testEngine(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
 // filters by role itself, rather than inheriting a pre-filtered inventory; it
 // cannot be used to drive a shutdown, because the Gogios mute would then SSH
 // to the gateways for real.
-func testEngineFullInventory(t *testing.T, shelly *fakeShelly, up ...string) *Engine {
+func testEngineFullInventory(t *testing.T, shelly *powertest.FakeShelly, up ...string) *Engine {
 	t.Helper()
 	return buildTestEngine(t, shelly, false, up)
 }
 
-func buildTestEngine(t *testing.T, shelly *fakeShelly, fHostsOnly bool, up []string) *Engine {
+func buildTestEngine(t *testing.T, shelly *powertest.FakeShelly, fHostsOnly bool, up []string) *Engine {
 	t.Helper()
 
 	pwFile := filepath.Join(t.TempDir(), "shelly_plug")
@@ -194,7 +141,7 @@ func buildTestEngine(t *testing.T, shelly *fakeShelly, fHostsOnly bool, up []str
 
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
-	cfg.Inventory.ShellyIP = shelly.addr()
+	cfg.Inventory.ShellyIP = shelly.Addr()
 	if fHostsOnly {
 		cfg.Inventory.Hosts = cfg.Inventory.ByRole(inventory.RoleF)
 	}
@@ -241,14 +188,14 @@ func hostIP(t *testing.T, e *Engine, name string) string {
 // and the run must still succeed: the hosts it was asked to power off did go
 // down.
 func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f3")
 
 	var log bytes.Buffer
 	if err := eng.Off(context.Background(), &log); err != nil {
 		t.Fatalf("power off: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: f3 is still running", got)
 	}
 	if !strings.Contains(log.String(), fansLeftOn) {
@@ -273,7 +220,7 @@ func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
 // from "shut the cluster down and deliberately kept it running" -- and a client
 // polling job.json has nothing else to look at. See docs/CLIENT.md.
 func TestClusterOffRecordsTheFansAsLeftOn(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f3")
 
 	steps := &recordingReporter{}
@@ -298,14 +245,14 @@ func TestClusterOffRecordsTheFansAsLeftOn(t *testing.T) {
 // still be cut. A guard that simply stopped cutting the fans would pass the
 // test above and leave them running for good.
 func TestRackOffStillSwitchesTheFansOffWhenNothingAnswers(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly) // every f-host already silent
 
 	var log bytes.Buffer
 	if err := eng.OffAll(context.Background(), &log); err != nil {
 		t.Fatalf("power all off: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 }
@@ -314,14 +261,14 @@ func TestRackOffStillSwitchesTheFansOffWhenNothingAnswers(t *testing.T) {
 // the rack being idle, not on f3 being special: run the cluster shutdown with
 // nothing answering at all and the fans go off, exactly as they always did.
 func TestClusterOffSwitchesTheFansOffOnceF3IsAlsoDown(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 
 	var log bytes.Buffer
 	if err := eng.Off(context.Background(), &log); err != nil {
 		t.Fatalf("power off: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 }
@@ -342,7 +289,7 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 		{name: "everything", up: []string{"f0", "f1", "f2", "f3"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shelly := newFakeShelly(t, true)
+			shelly := powertest.NewFakeShelly(t, true)
 			eng := testEngine(t, shelly, tc.up...)
 
 			var log bytes.Buffer
@@ -351,7 +298,7 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			got := shelly.setCalls()
+			got := shelly.SetCalls()
 			if !tc.wantSet {
 				if len(got) != 0 {
 					t.Fatalf("Switch.Set calls = %v, want none while %v is up", got, tc.up)
@@ -389,7 +336,7 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 //
 // Unknown must therefore count as running, and nothing may be switched.
 func TestFansStayOnWhenLivenessCannotBeProbed(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly) // nothing "answers"...
 	// ...but nothing is known either: every probe fails to happen.
 	eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
@@ -400,7 +347,7 @@ func TestFansStayOnWhenLivenessCannotBeProbed(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: nothing is known about the rack", got)
 	}
 	if want := []string{"f0", "f1", "f2", "f3"}; !reflect.DeepEqual(leftOn, want) {
@@ -419,7 +366,7 @@ func TestFansStayOnWhenLivenessCannotBeProbed(t *testing.T) {
 // pingOnce returned false when it could not find a binary, LiveHosts dropped
 // every host, and the guard read len(up)==0 as an idle rack.
 func TestFansStayOnWhenPingIsMissing(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 	eng.isUp = func(ctx context.Context, ip string) (bool, bool) {
 		return eng.pingWith(ctx, "", ip) // no ping(8) anywhere
@@ -430,7 +377,7 @@ func TestFansStayOnWhenPingIsMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: ping(8) could not be run", got)
 	}
 	if len(leftOn) != 4 {
@@ -448,7 +395,7 @@ func TestFansStayOnWhenPingIsMissing(t *testing.T) {
 // three of the guard's probes agreed and the plug went off under a running
 // rack.
 func TestFansStayOnWhenEveryPingFailsHard(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 
 	bin := filepath.Join(t.TempDir(), "ping")
@@ -465,7 +412,7 @@ func TestFansStayOnWhenEveryPingFailsHard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: ping(8) never sent a packet", got)
 	}
 	if len(leftOn) != 4 {
@@ -539,7 +486,7 @@ func TestBothHalvesOfTheGuardAgree(t *testing.T) {
 		{name: "unprobeable", wantBusy: true, wantReason: "could not be probed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shelly := newFakeShelly(t, true)
+			shelly := powertest.NewFakeShelly(t, true)
 			eng := testEngine(t, shelly)
 			eng.isUp = func(context.Context, string) (bool, bool) { return tc.up, tc.known }
 
@@ -583,7 +530,7 @@ func TestBothHalvesOfTheGuardAgree(t *testing.T) {
 // host meant a single dropped echo reply could cut the cooling to a running
 // rack -- the more dangerous question answered on the weaker evidence.
 func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 	flapping := hostIP(t, eng, "f3")
 
@@ -604,7 +551,7 @@ func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: f3 answered its second probe", got)
 	}
 	if want := []string{"f3"}; !reflect.DeepEqual(leftOn, want) {
@@ -641,7 +588,7 @@ func TestSkipAlreadyOffKeepsHostsItCouldNotProbe(t *testing.T) {
 	hosts := inventory.Default().ShutdownOrder()
 
 	t.Run("unprobeable hosts stay in the list", func(t *testing.T) {
-		eng := testEngine(t, newFakeShelly(t, true))
+		eng := testEngine(t, powertest.NewFakeShelly(t, true))
 		eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
 
 		var log bytes.Buffer
@@ -660,7 +607,7 @@ func TestSkipAlreadyOffKeepsHostsItCouldNotProbe(t *testing.T) {
 	// not pass: a host confirmed silent is still dropped, or a staged shutdown
 	// aborts at the first host that is already down.
 	t.Run("hosts confirmed silent are dropped", func(t *testing.T) {
-		eng := testEngine(t, newFakeShelly(t, true))
+		eng := testEngine(t, powertest.NewFakeShelly(t, true))
 
 		var log bytes.Buffer
 		live := eng.skipAlreadyOff(context.Background(), &log, hosts)
@@ -682,7 +629,7 @@ func TestSkipAlreadyOffKeepsHostsItCouldNotProbe(t *testing.T) {
 // is that these hosts are still pending after several probes, which is decided
 // within milliseconds at the test engine's probe gap.
 func TestAwaitPowerDownNeverConfirmsAHostItCouldNotProbe(t *testing.T) {
-	eng := testEngine(t, newFakeShelly(t, true))
+	eng := testEngine(t, powertest.NewFakeShelly(t, true))
 	eng.isUp = func(context.Context, string) (bool, bool) { return false, false }
 
 	hosts := eng.cfg.Inventory.ShutdownOrder()
@@ -725,7 +672,7 @@ func TestUnconfirmedPowerDownsAreDiagnosedApart(t *testing.T) {
 
 	newEngine := func(t *testing.T) (*Engine, *recordingReporter) {
 		t.Helper()
-		eng := testEngine(t, newFakeShelly(t, true))
+		eng := testEngine(t, powertest.NewFakeShelly(t, true))
 		// The wait is a field so this takes 50ms rather than two real minutes.
 		eng.powerDownTimeout = 50 * time.Millisecond
 		steps := &recordingReporter{}
@@ -813,7 +760,7 @@ func TestUnconfirmedPowerDownsAreDiagnosedApart(t *testing.T) {
 // it. Here the local NFS listing fails, which is itself a fix -- mount(8) that
 // cannot be run used to be reported as "nothing is mounted".
 func TestAShutdownThatAbortsNeverTouchesTheFans(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 	eng.nfsMounts = func(context.Context) ([]string, error) {
 		return nil, errors.New("mount: not found")
@@ -823,7 +770,7 @@ func TestAShutdownThatAbortsNeverTouchesTheFans(t *testing.T) {
 	if err := eng.Off(context.Background(), &log); err == nil {
 		t.Fatal("power off succeeded, want the NFS pre-flight to abort it")
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: the shutdown never happened", got)
 	}
 }
@@ -966,14 +913,14 @@ func (r *recordingReporter) lastStep() string {
 // other host is already silent, because the operator asked for one host, not
 // for the rack to go cold.
 func TestOffHostNeverTouchesTheFans(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 
 	var log bytes.Buffer
 	if err := eng.OffHost(context.Background(), &log, "f3"); err != nil {
 		t.Fatalf("power f3 off: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: a single host never switches the plug", got)
 	}
 }
@@ -988,7 +935,7 @@ func TestOffHostNeverTouchesTheFans(t *testing.T) {
 // that iterated inv.Hosts wholesale would pass this and only misbehave in
 // production -- where the gateways and k3s nodes are in there too.
 func TestLiveHostsReportsEveryFHostInInventoryOrder(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngineFullInventory(t, shelly, "f3", "f0", "r1", "blowfish")
 
 	got := eng.LiveHosts(context.Background())

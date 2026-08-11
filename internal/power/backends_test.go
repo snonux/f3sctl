@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/powertest"
 )
 
 // This file exercises off()'s and on()'s ordering and refusal logic purely
@@ -21,11 +22,12 @@ import (
 // seamed is e.ssh" comment on testEngine, above); wiring the seams this
 // refactor adds is what closes that gap.
 //
-// off()'s tests still send the fan plug through fakeShelly (an httptest
-// server), which predates this refactor and already exercises FansBackend's
-// real adapter end to end for the one call off() makes; duplicating it behind
-// a fake here would test less, not more. on()'s tests use fakeFans instead,
-// because they need a second, failing call as well (see fakeFans' own doc).
+// off()'s tests still send the fan plug through powertest.FakeShelly (an
+// httptest server), which predates this refactor and already exercises
+// FansBackend's real adapter end to end for the one call off() makes;
+// duplicating it behind a fake here would test less, not more. on()'s tests
+// use fakeFans instead, because they need a second, failing call as well (see
+// fakeFans' own doc).
 
 // sequence records the order calls land in across more than one fake, so a
 // test can assert that the zusb pre-flight runs to completion before any
@@ -120,10 +122,11 @@ func (f *fakePower) calls() []string {
 // refuses to switch on stops the wake sequence before a single magic packet
 // goes out -- without a Shelly plug or an httptest server involved at all.
 //
-// off()'s tests reuse fakeShelly (an httptest server) instead, because that
-// already exercises FansBackend's real HTTP adapter end to end for the one
-// call off() makes; on()'s tests need a second, failing call as well, which a
-// plain Go fake scripts far more directly than a second HTTP fixture would.
+// off()'s tests reuse powertest.FakeShelly (an httptest server) instead,
+// because that already exercises FansBackend's real HTTP adapter end to end
+// for the one call off() makes; on()'s tests need a second, failing call as
+// well, which a plain Go fake scripts far more directly than a second HTTP
+// fixture would.
 type fakeFans struct {
 	mu  sync.Mutex
 	seq *sequence
@@ -231,7 +234,7 @@ func (n *fakeNFS) Unmount(_ context.Context, mountpoint string) (string, error) 
 // path testEngine's own doc says was previously unreachable without a real
 // SSH client.
 func TestOffRunsThroughFakeBackendsEndToEnd(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f1")
 	eng.downProbeInterval = time.Millisecond
 
@@ -270,7 +273,7 @@ func TestOffRunsThroughFakeBackendsEndToEnd(t *testing.T) {
 	if len(zusb.unloadCalls) != 0 {
 		t.Errorf("zusb-unload calls = %v, want none: nothing reported the pool loaded", zusb.unloadCalls)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false: the rack went idle", got)
 	}
 }
@@ -279,7 +282,7 @@ func TestOffRunsThroughFakeBackendsEndToEnd(t *testing.T) {
 // off()'s own doc promises: zusb is exported everywhere it is held before
 // the first poweroff is sent, not interleaved with it.
 func TestOffExportsZusbBeforeAnyHostIsPoweredOff(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f0", "f1", "f2")
 	eng.downProbeInterval = time.Millisecond
 
@@ -343,7 +346,7 @@ func TestOffExportsZusbBeforeAnyHostIsPoweredOff(t *testing.T) {
 // possible place to stop: a local NFS mount that will not let go must abort
 // the whole shutdown before the zusb pre-flight or any host is touched.
 func TestOffAbortsWhenNFSWontUnmount(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f0")
 	eng.nfsMounts = func(context.Context) ([]string, error) {
 		return []string{"/mnt/nfs"}, nil
@@ -369,7 +372,7 @@ func TestOffAbortsWhenNFSWontUnmount(t *testing.T) {
 	if got := power.calls(); len(got) != 0 {
 		t.Errorf("PowerOff calls = %v, want none: the rack was never reached", got)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none: the rack was never reached", got)
 	}
 }
@@ -379,7 +382,7 @@ func TestOffAbortsWhenNFSWontUnmount(t *testing.T) {
 // poweroff is sent, so the rack is never touched with the pool still held by
 // a host about to lose USB power mid-write.
 func TestOffAbortsWhenZusbExportFails(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f0")
 	eng.zusb = &fakeZusb{
 		loaded:    map[string]bool{"f0": true},
@@ -399,7 +402,7 @@ func TestOffAbortsWhenZusbExportFails(t *testing.T) {
 	if got := power.calls(); len(got) != 0 {
 		t.Errorf("PowerOff calls = %v, want none: aborted before any poweroff", got)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none: the rack was never touched", got)
 	}
 }
@@ -408,7 +411,7 @@ func TestOffAbortsWhenZusbExportFails(t *testing.T) {
 // last mechanism stage: a host that refuses the poweroff itself must fail the
 // run and, just as importantly, must never reach the fans-off step.
 func TestOffReportsPowerOffFailureAndLeavesFansOn(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f0")
 	eng.zusb = &fakeZusb{}
 	eng.power = &fakePower{
@@ -426,7 +429,7 @@ func TestOffReportsPowerOffFailureAndLeavesFansOn(t *testing.T) {
 	if !strings.Contains(err.Error(), fansLeftOn) {
 		t.Errorf("error = %v, want it to say %q", err, fansLeftOn)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: a failed shutdown must not touch the fans", got)
 	}
 }
@@ -438,7 +441,7 @@ func TestOffReportsPowerOffFailureAndLeavesFansOn(t *testing.T) {
 // this ordering could only be observed against a real Shelly plug and real
 // NICs on the wire.
 func TestOnRunsThroughFakeBackendsEndToEnd(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	eng := testEngine(t, shelly)
 
 	seq := &sequence{}
@@ -482,7 +485,7 @@ func TestOnRunsThroughFakeBackendsEndToEnd(t *testing.T) {
 // single magic packet is sent, the same way a stuck NFS mount stops off()
 // before the zusb pre-flight.
 func TestOnAbortsWhenFansWontSwitchOn(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	eng := testEngine(t, shelly)
 
 	eng.fans = &fakeFans{setErr: errors.New("shelly plug did not change state")}
@@ -507,7 +510,7 @@ func TestOnAbortsWhenFansWontSwitchOn(t *testing.T) {
 // after it in the list is woken, and must surface the failure rather than
 // carry on quietly.
 func TestOnAbortsWhenWakeFails(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	eng := testEngine(t, shelly)
 
 	eng.fans = &fakeFans{}
@@ -596,7 +599,7 @@ func trackedLiveness(t *testing.T, eng *Engine, upHosts ...string) func(inventor
 // resolution are both driven through the one seam checkLocalNFS actually
 // uses, not two independent fakes that could disagree.
 func TestOffProceedsWhenNFSWasAlreadyUnmountedByTheRace(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f0")
 
 	var listCalls int

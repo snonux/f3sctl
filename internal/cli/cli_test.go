@@ -3,77 +3,19 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/powertest"
 )
-
-// fakeShelly stands in for the rack-fan Shelly plug.
-//
-// It answers the two RPCs the engine uses and records every Switch.Set, which
-// is what the tests below assert on: "did the fans actually get switched off"
-// is the question, not "what did the CLI print". Digest auth is deliberately
-// not offered -- shellyRPC only performs the challenge-response when it gets a
-// 401, so answering 200 straight away keeps the fixture to what is under test.
-type fakeShelly struct {
-	srv *httptest.Server
-
-	mu   sync.Mutex
-	on   bool
-	sets []bool // the requested state of every Switch.Set, in order
-}
-
-func newFakeShelly(t *testing.T, initiallyOn bool) *fakeShelly {
-	t.Helper()
-	s := &fakeShelly{on: initiallyOn}
-	s.srv = httptest.NewServer(http.HandlerFunc(s.handle))
-	t.Cleanup(s.srv.Close)
-	return s
-}
-
-func (s *fakeShelly) handle(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	switch r.URL.Path {
-	case "/rpc/Switch.Set":
-		on := r.URL.Query().Get("on") == "true"
-		s.sets = append(s.sets, on)
-		s.on = on
-		_ = json.NewEncoder(w).Encode(map[string]bool{"was_on": !on})
-	case "/rpc/Switch.GetStatus":
-		_ = json.NewEncoder(w).Encode(map[string]bool{"output": s.on})
-	default:
-		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-	}
-}
-
-// unplug makes the fixture unreachable, the way a plug that has lost power or
-// fallen off the wifi is. Closing twice is safe: t.Cleanup closes it again.
-func (s *fakeShelly) unplug() { s.srv.Close() }
-
-// setCalls returns the state requested by each Switch.Set so far.
-func (s *fakeShelly) setCalls() []bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]bool(nil), s.sets...)
-}
-
-// addr is what goes into Inventory.ShellyIP: the engine builds its URL as
-// "http://" + ShellyIP + path, so a host:port belongs there.
-func (s *fakeShelly) addr() string { return strings.TrimPrefix(s.srv.URL, "http://") }
 
 // fHostIP is the address of the single f-host in the test inventory. Nothing
 // ever contacts it: liveness is injected (see runCLI) and no test below reaches
@@ -82,7 +24,7 @@ const fHostIP = "192.0.2.1" // TEST-NET-1, reserved and never routed
 
 // testConfig wires the CLI up to the fake plug and to a single f-host, with a
 // Shelly password on disk so ResolveShellyPassword succeeds.
-func testConfig(t *testing.T, s *fakeShelly) config.Config {
+func testConfig(t *testing.T, s *powertest.FakeShelly) config.Config {
 	t.Helper()
 
 	pwFile := filepath.Join(t.TempDir(), "shelly_plug")
@@ -93,7 +35,7 @@ func testConfig(t *testing.T, s *fakeShelly) config.Config {
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
 	cfg.Inventory = inventory.Inventory{
-		ShellyIP: s.addr(),
+		ShellyIP: s.Addr(),
 		Hosts: []inventory.Host{
 			{Name: "f0", Role: inventory.RoleF, IP: fHostIP, SSHPort: 22, SSHUser: "f3sctl"},
 		},
@@ -148,14 +90,14 @@ func runCLI(t *testing.T, cfg config.Config, live *fakeLiveness, args ...string)
 func TestFansOffForceSwitchesThePlugWhileAHostIsUp(t *testing.T) {
 	for _, flag := range []string{"--force", "-f"} {
 		t.Run(flag, func(t *testing.T) {
-			shelly := newFakeShelly(t, true)
+			shelly := powertest.NewFakeShelly(t, true)
 			cfg := testConfig(t, shelly)
 
 			out, _, err := runCLI(t, cfg, hostsUp("f0"), "fans", "off", flag)
 			if err != nil {
 				t.Fatalf("fans off %s: %v", flag, err)
 			}
-			if got := shelly.setCalls(); len(got) != 1 || got[0] {
+			if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 				t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 			}
 			if !strings.Contains(out, "rack fans: off") {
@@ -169,13 +111,13 @@ func TestFansOffForceSwitchesThePlugWhileAHostIsUp(t *testing.T) {
 // honoured wherever it sits. parseGlobalFlags accepts global flags anywhere on
 // purpose, so `--force fans off` must behave exactly like `fans off --force`.
 func TestFansOffForceBeforeTheVerbSwitchesThePlugWhileAHostIsUp(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 
 	if _, _, err := runCLI(t, cfg, hostsUp("f0"), "--force", "fans", "off"); err != nil {
 		t.Fatalf("--force fans off: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 }
@@ -183,7 +125,7 @@ func TestFansOffForceBeforeTheVerbSwitchesThePlugWhileAHostIsUp(t *testing.T) {
 // TestFansOffWithoutForceRefusesWhileAHostIsUp is the other half of the fix:
 // threading the flag through must not weaken the thermal guard.
 func TestFansOffWithoutForceRefusesWhileAHostIsUp(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 
 	_, _, err := runCLI(t, cfg, hostsUp("f0"), "fans", "off")
@@ -196,7 +138,7 @@ func TestFansOffWithoutForceRefusesWhileAHostIsUp(t *testing.T) {
 	if !strings.Contains(err.Error(), "f0") {
 		t.Errorf("error = %v, want it to name the host that is still up", err)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none: the plug must be untouched", got)
 	}
 }
@@ -204,13 +146,13 @@ func TestFansOffWithoutForceRefusesWhileAHostIsUp(t *testing.T) {
 // TestFansOffWithNothingUpNeedsNoForce checks the guard only stands in the way
 // when it has a reason to: an idle rack switches off without ceremony.
 func TestFansOffWithNothingUpNeedsNoForce(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 
 	if _, _, err := runCLI(t, cfg, hostsUp(), "fans", "off"); err != nil {
 		t.Fatalf("fans off with no host up: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 }
@@ -220,9 +162,9 @@ func TestFansOffWithNothingUpNeedsNoForce(t *testing.T) {
 // and reports the run as failed if this fails, so swallowing it would claim a
 // rack was safely shut down with the fans still spinning.
 func TestFansOffReportsAnUnreachablePlug(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
-	shelly.unplug()
+	shelly.Unplug()
 
 	out, _, err := runCLI(t, cfg, hostsUp(), "fans", "off")
 	if err == nil {
@@ -241,7 +183,7 @@ func TestFansOffReportsAnUnreachablePlug(t *testing.T) {
 // never the risky direction -- so --force has no business here and liveness is
 // not consulted.
 func TestFansOnSwitchesThePlugOnEvenWhileHostsAreUp(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	cfg := testConfig(t, shelly)
 	live := hostsUp("f0")
 
@@ -249,7 +191,7 @@ func TestFansOnSwitchesThePlugOnEvenWhileHostsAreUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fans on: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || !got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || !got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=true", got)
 	}
 	if !strings.Contains(out, "rack fans: on") {
@@ -263,7 +205,7 @@ func TestFansOnSwitchesThePlugOnEvenWhileHostsAreUp(t *testing.T) {
 // TestFansWithNoVerbPrintsUsage pins that a bare `fans` is a usage error and
 // says so on stderr, rather than being read as some default verb.
 func TestFansWithNoVerbPrintsUsage(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 
 	out, errOut, err := runCLI(t, cfg, hostsUp("f0"), "fans")
@@ -276,7 +218,7 @@ func TestFansWithNoVerbPrintsUsage(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout = %q, want usage on stderr only", out)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none", got)
 	}
 }
@@ -285,7 +227,7 @@ func TestFansWithNoVerbPrintsUsage(t *testing.T) {
 // leaves the plug alone. The package doc makes a point of rejecting retired
 // wol-f3s spellings outright; guessing at "fans of" would undo that.
 func TestUnknownFansVerbPrintsUsage(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 
 	out, errOut, err := runCLI(t, cfg, hostsUp("f0"), "fans", "of")
@@ -301,7 +243,7 @@ func TestUnknownFansVerbPrintsUsage(t *testing.T) {
 	if out != "" {
 		t.Errorf("stdout = %q, want usage on stderr only", out)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none", got)
 	}
 }
@@ -321,7 +263,7 @@ func TestFansRejectsTrailingArgs(t *testing.T) {
 		{"on", "f0", "f1"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			shelly := newFakeShelly(t, true)
+			shelly := powertest.NewFakeShelly(t, true)
 			cfg := testConfig(t, shelly)
 
 			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"fans"}, args...)...)
@@ -338,7 +280,7 @@ func TestFansRejectsTrailingArgs(t *testing.T) {
 			if out != "" {
 				t.Errorf("stdout = %q, want nothing: no fans action may have run", out)
 			}
-			if got := shelly.setCalls(); len(got) != 0 {
+			if got := shelly.SetCalls(); len(got) != 0 {
 				t.Errorf("Switch.Set calls = %v, want none: the fan plug must be untouched", got)
 			}
 		})
@@ -355,7 +297,7 @@ func TestFansStatusReportsThePlugWithoutTouchingIt(t *testing.T) {
 			name = "on"
 		}
 		t.Run(name, func(t *testing.T) {
-			shelly := newFakeShelly(t, on)
+			shelly := powertest.NewFakeShelly(t, on)
 			cfg := testConfig(t, shelly)
 			live := hostsUp("f0")
 
@@ -366,10 +308,10 @@ func TestFansStatusReportsThePlugWithoutTouchingIt(t *testing.T) {
 			if want := "rack fans: " + name; !strings.Contains(out, want) {
 				t.Errorf("output = %q, want it to contain %q", out, want)
 			}
-			if !strings.Contains(out, shelly.addr()) {
-				t.Errorf("output = %q, want it to name the plug at %s", out, shelly.addr())
+			if !strings.Contains(out, shelly.Addr()) {
+				t.Errorf("output = %q, want it to name the plug at %s", out, shelly.Addr())
 			}
-			if got := shelly.setCalls(); len(got) != 0 {
+			if got := shelly.SetCalls(); len(got) != 0 {
 				t.Errorf("Switch.Set calls = %v, want none: status must not switch", got)
 			}
 			if live.calls != 0 {
@@ -393,7 +335,7 @@ func TestMonitoringRejectsTrailingArgs(t *testing.T) {
 		{"status", "junk"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			cfg := testConfig(t, newFakeShelly(t, true))
+			cfg := testConfig(t, powertest.NewFakeShelly(t, true))
 
 			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"monitoring"}, args...)...)
 			if err == nil {
@@ -425,7 +367,7 @@ func TestMonitoringRejectsTrailingArgs(t *testing.T) {
 // f-host to probe: it returns nil without a single packet leaving the box, and
 // the guard then sees an idle rack and switches the plug off for real.
 func TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 	cfg.Inventory.Hosts = nil
 
@@ -433,7 +375,7 @@ func TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected(t *testing.T) {
 	if err := Run(cfg, []string{"fans", "off"}, &outBuf, &errBuf); err != nil {
 		t.Fatalf("fans off with no liveness injected: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 	if !strings.Contains(outBuf.String(), "rack fans: off") {
@@ -467,7 +409,7 @@ func TestParseGlobalFlagsConsumesForce(t *testing.T) {
 // Everything else on that path is inert with this inventory: no RoleCluster
 // hosts, so UnmuteGogios's wait for the k3s nodes returns immediately, and no
 // RoleGateway hosts, so it has nobody to SSH to.
-func powerConfig(t *testing.T, s *fakeShelly) config.Config {
+func powerConfig(t *testing.T, s *powertest.FakeShelly) config.Config {
 	t.Helper()
 	cfg := testConfig(t, s)
 	cfg.Inventory.Broadcast = "127.0.0.1"
@@ -518,7 +460,7 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 		{"status", "off"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			shelly := newFakeShelly(t, true)
+			shelly := powertest.NewFakeShelly(t, true)
 			cfg := powerConfig(t, shelly)
 
 			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"power"}, args...)...)
@@ -536,7 +478,7 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 			if out != "" {
 				t.Errorf("stdout = %q, want nothing: no power action may have run", out)
 			}
-			if got := shelly.setCalls(); len(got) != 0 {
+			if got := shelly.SetCalls(); len(got) != 0 {
 				t.Errorf("Switch.Set calls = %v, want none: the fan plug must be untouched", got)
 			}
 		})
@@ -600,14 +542,14 @@ func TestIsShutdownAgreesWithPowerActionFor(t *testing.T) {
 // TestPowerOnWakesThePowerGroupOnly pins the bare cluster wake: fans first,
 // then a magic packet to every host of the power group -- which excludes f3.
 func TestPowerOnWakesThePowerGroupOnly(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	cfg := powerConfig(t, shelly)
 
 	out, _, err := runCLI(t, cfg, hostsUp(), "power", "on")
 	if err != nil {
 		t.Fatalf("power on: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || !got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || !got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=true: fans go on first", got)
 	}
 	if !strings.Contains(out, "magic packet to f0") {
@@ -622,14 +564,14 @@ func TestPowerOnWakesThePowerGroupOnly(t *testing.T) {
 // resolves to the whole-rack wake, f3 included -- the case `power on f3` used
 // to be silently confused with.
 func TestPowerAllOnWakesEveryFHost(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	cfg := powerConfig(t, shelly)
 
 	out, _, err := runCLI(t, cfg, hostsUp(), "power", "all", "on")
 	if err != nil {
 		t.Fatalf("power all on: %v", err)
 	}
-	if got := shelly.setCalls(); len(got) != 1 || !got[0] {
+	if got := shelly.SetCalls(); len(got) != 1 || !got[0] {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=true: fans go on first", got)
 	}
 	for _, host := range []string{"f0", "f3"} {
@@ -642,7 +584,7 @@ func TestPowerAllOnWakesEveryFHost(t *testing.T) {
 // TestPowerHostOnWakesThatHostAlone pins the documented per-host spelling: one
 // packet, to the host named, and the fan plug untouched.
 func TestPowerHostOnWakesThatHostAlone(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	cfg := powerConfig(t, shelly)
 
 	out, _, err := runCLI(t, cfg, hostsUp(), "power", "f3", "on")
@@ -655,7 +597,7 @@ func TestPowerHostOnWakesThatHostAlone(t *testing.T) {
 	if strings.Contains(out, "magic packet to f0") {
 		t.Errorf("output = %q, want only the named host woken", out)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none: a single host does not own the rack fans", got)
 	}
 }
@@ -664,7 +606,7 @@ func TestPowerHostOnWakesThatHostAlone(t *testing.T) {
 // engine rather than being dropped: a name no inventory knows must fail, and
 // name it.
 func TestPowerHostOnRejectsAnUnknownHost(t *testing.T) {
-	shelly := newFakeShelly(t, false)
+	shelly := powertest.NewFakeShelly(t, false)
 	cfg := powerConfig(t, shelly)
 
 	_, _, err := runCLI(t, cfg, hostsUp(), "power", "f9", "on")
@@ -674,7 +616,7 @@ func TestPowerHostOnRejectsAnUnknownHost(t *testing.T) {
 	if !strings.Contains(err.Error(), `unknown host "f9"`) {
 		t.Errorf("error = %v, want it to name the unknown host", err)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none", got)
 	}
 }
@@ -683,7 +625,7 @@ func TestPowerHostOnRejectsAnUnknownHost(t *testing.T) {
 // arity. The inventory is emptied so ProbeAll has no host to ping: the table
 // header and the fan line are what this is about, and nothing leaves the box.
 func TestPowerStatusPrintsTheTable(t *testing.T) {
-	shelly := newFakeShelly(t, true)
+	shelly := powertest.NewFakeShelly(t, true)
 	cfg := powerConfig(t, shelly)
 	cfg.Inventory.Hosts = nil
 
@@ -697,7 +639,7 @@ func TestPowerStatusPrintsTheTable(t *testing.T) {
 	if !strings.Contains(out, "rack fans: on") {
 		t.Errorf("output = %q, want the fan state", out)
 	}
-	if got := shelly.setCalls(); len(got) != 0 {
+	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none: status must not switch", got)
 	}
 }
