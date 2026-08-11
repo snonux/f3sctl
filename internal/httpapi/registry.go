@@ -157,6 +157,17 @@ type route struct {
 	// Action marks a state change (rendered in "actions"). Routes without it
 	// are resources, rendered in "links".
 	Action bool
+	// SkipsProbe declares that this route's own Handle, and every
+	// Available/Fields predicate the router evaluates while rendering it,
+	// provably never read State.Hosts or State.Fans -- so Server.snapshot
+	// can skip the ~3s fleet probe and the Shelly plug read entirely when
+	// serving it (see snapshot's doc comment in server.go for the cost that
+	// buys). Zero value is false: a new route needs the probe by default and
+	// must opt out explicitly and correctly, rather than silently inherit an
+	// exemption because its path happened to match a hardcoded prefix
+	// meant for someone else's routes. That is what went wrong before this
+	// field existed -- see rz0.
+	SkipsProbe bool
 	// CLIVerb is the exact CLI words that invoke this action, e.g. "power on"
 	// or "power f1 on". It is the single declaration of the "power off" <->
 	// action-name <-> job-run-argv contract: jobArgs (handlers.go) splits it
@@ -245,17 +256,28 @@ func resourceRoutes() []route {
 		{
 			Name: "job", Title: "Current or last power job",
 			Method: http.MethodGet, Path: jobPath,
-			Handle: (*Server).handleJob,
+			// handleJob renders only state.Job, which snapshot() always reads
+			// regardless of this flag (it is a cheap local disk read).
+			SkipsProbe: true,
+			Handle:     (*Server).handleJob,
 		},
 		{
 			Name: "monitoring", Title: "Gogios alerting mute",
 			Method: http.MethodGet, Path: "/monitoring",
-			Handle: (*Server).handleMonitoring,
+			// handleMonitoring, and the monitoring-mute/monitoring-unmute
+			// actions it renders via ActionsFor, all read only
+			// state.Monitoring, populated separately by enrichState.
+			SkipsProbe: true,
+			Handle:     (*Server).handleMonitoring,
 		},
 		{
 			Name: "describedby", Title: "OpenAPI description",
 			Method: http.MethodGet, Path: "/openapi.json",
-			Handle: (*Server).handleOpenAPI,
+			// handleOpenAPI ignores State completely: OpenAPIBuilder renders
+			// every route's Fields against a synthetic widestState(), not
+			// the request's own state (see openapi.go).
+			SkipsProbe: true,
+			Handle:     (*Server).handleOpenAPI,
 		},
 	}
 }
@@ -384,14 +406,16 @@ func monitoringActionRoutes() []route {
 		{
 			Name: "monitoring-unmute", Title: "Resume Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/unmute", Action: true,
-			CLIVerb:   "monitoring unmute",
-			Available: func(s State) bool { return s.monitoringMuted() },
-			Handle:    (*Server).handleUnmute,
+			CLIVerb:    "monitoring unmute",
+			SkipsProbe: true,
+			Available:  func(s State) bool { return s.monitoringMuted() },
+			Handle:     (*Server).handleUnmute,
 		},
 		{
 			Name: "monitoring-mute", Title: "Suppress Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/mute", Action: true,
-			CLIVerb: "monitoring mute",
+			CLIVerb:    "monitoring mute",
+			SkipsProbe: true,
 			Available: func(s State) bool {
 				return s.Monitoring != nil && !s.monitoringMuted()
 			},

@@ -501,6 +501,51 @@ func TestAllOffNeedsSSHNotPing(t *testing.T) {
 	}
 }
 
+// TestSkipsProbeRoutesDontDependOnHostsOrFans is the safety net for
+// route.SkipsProbe (see server.go's skipsProbe and rz0): it does not trust
+// the flag on the declaring author's word alone, it asks each route marked
+// SkipsProbe whether its own Available/Fields answer actually changes when
+// only Hosts/Fans/FansErr change, and requires the answer to be no.
+//
+// This is what would actually catch the failure rz0 was opened over: a
+// future route added under a SkipsProbe:true path (e.g. a new
+// /monitoring/... action) whose Available or Fields reads state.Hosts or
+// state.Fans gets zero-value versions of both from snapshot() -- this test
+// fails the moment such a route is declared, rather than relying on someone
+// noticing the mismatch during review.
+func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
+	// probed and unprobed differ only in Hosts/Fans/FansErr -- probed is what
+	// a real fleet probe and Shelly read might produce, unprobed is exactly
+	// what snapshot() leaves those three fields as when it skips both. Every
+	// other field (Job, Monitoring, PeerBusy) stays at its zero value in
+	// both, so a mismatch below can only come from the probe fields
+	// SkipsProbe claims the route does not look at.
+	probed := State{
+		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true}},
+		Fans:  power.FansState{On: true},
+	}
+	unprobed := State{}
+
+	for _, r := range routes() {
+		if !r.SkipsProbe {
+			continue
+		}
+		if r.Available != nil {
+			if got, want := r.Available(probed), r.Available(unprobed); got != want {
+				t.Errorf("route %q is marked SkipsProbe but Available depends on the probe: "+
+					"available=%v with a probed state, available=%v without one",
+					r.Name, got, want)
+			}
+		}
+		if r.Fields != nil {
+			if got, want := len(r.Fields(probed)), len(r.Fields(unprobed)); got != want {
+				t.Errorf("route %q is marked SkipsProbe but Fields depends on the probe: "+
+					"%d fields with a probed state, %d without one", r.Name, got, want)
+			}
+		}
+	}
+}
+
 func routeByName(name string) (route, bool) {
 	for _, r := range routes() {
 		if r.Name == name {

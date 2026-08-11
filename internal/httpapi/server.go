@@ -241,29 +241,47 @@ func (s *Server) snapshot(ctx context.Context, req request) State {
 	return st
 }
 
-// skipsProbe reports whether a route never reads State.Hosts or State.Fans,
-// in its handler or in any Available/Fields predicate the router evaluates
-// while rendering it -- so snapshot() can skip the fleet probe and the Shelly
-// read for it entirely.
+// skipsProbe reports whether the route serving path never reads
+// State.Hosts or State.Fans -- in its Handle, or in any Available/Fields
+// predicate the router evaluates while rendering it -- so snapshot() can
+// skip the fleet probe and the Shelly read for it entirely.
 //
-// The three cases, verified against the current handlers and registry.go
-// rather than assumed:
-//   - jobPath (handleJob) renders only state.Job.
-//   - the "/monitoring" family (handleMonitoring, handleMute, handleUnmute,
-//     and the monitoring-mute/monitoring-unmute Available predicates) reads
-//     only state.Monitoring, populated separately by enrichState.
-//   - openAPIPath (handleOpenAPI) ignores State completely: OpenAPIBuilder
-//     renders every route's Fields against a synthetic widestState(), not the
-//     request's own state (see openapi.go).
+// This used to be a hardcoded set of path prefixes (/job, /openapi.json,
+// /monitoring), correct only because it was checked by hand against every
+// handler at the time it was written -- nothing stopped a route added later
+// under one of those prefixes from silently inheriting the exemption without
+// anyone checking whether its own Available or Handle actually read
+// Hosts/Fans (see rz0). It now reads route.SkipsProbe instead: the same
+// per-route declaration registry.go's authors already have to get right,
+// kept next to the route it describes rather than duplicated as a second,
+// driftable list here.
 //
-// Router.Actions/ActionsFor, called from handleRoot/handleStatus/handleFans/
-// handleMonitoring, evaluate every action route's Available predicate before
-// filtering by name -- including ones that do read Hosts/Fans -- but a
-// skipped route's own handler never renders that unfiltered result, so a
-// zero-value Hosts/Fans reaching those predicates only produces answers that
-// get discarded, never ones a client sees.
+// Looked up by path alone, ignoring method, the same as Router.PathExists:
+// every route in the registry has a unique Path (TestRoutesAreUnique), so
+// this never has to disambiguate two routes sharing one. A path matching no
+// route returns false -- the safe default of "run the probe" -- but that
+// case cannot actually reach here: serve() only calls snapshot() after
+// Router.Lookup has already found a route for this exact path.
+//
+// A resource route's own SkipsProbe therefore has to account for every
+// action its handler renders, not just its own Handle: handleMonitoring
+// renders monitoring-mute/monitoring-unmute via Router.ActionsFor, so
+// "/monitoring" being SkipsProbe:true is only correct because those two
+// action routes are SkipsProbe:true as well -- a fact
+// TestSkipsProbeRoutesDontDependOnHostsOrFans checks directly, since which
+// actions a resource's handler chooses to render is still a human's call to
+// get right when wiring up that handler, not something this function can
+// derive. Router.Actions/ActionsFor, called from handleRoot/handleStatus,
+// by contrast, evaluate every action route's Available predicate including
+// ones that do read Hosts/Fans -- but "/" and "/status" are not SkipsProbe
+// routes, so that is never an issue for them.
 func skipsProbe(path string) bool {
-	return path == jobPath || path == openAPIPath || strings.HasPrefix(path, "/monitoring")
+	for _, r := range routes() {
+		if r.Path == path {
+			return r.SkipsProbe
+		}
+	}
+	return false
 }
 
 // probeHostsFn returns the fleet probe, falling back to the engine's real
