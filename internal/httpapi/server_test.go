@@ -3,6 +3,7 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"os"
@@ -186,5 +187,140 @@ func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
 		if skipsProbe(path) {
 			t.Errorf("skipsProbe(%q) = true, want false: this route's handler or Available predicates do read the probe", path)
 		}
+	}
+}
+
+// cgiEnvForJob sets the CGI environment variables ServeCGI reads (see
+// parseCGIRequest) for a GET request against jobPath, authenticated with
+// apiKey. jobPath is used by both tests below because it is the one route
+// that needs no live probe, no peer network call and no Gogios SSH round
+// trip (see skipsProbe and enrichState) -- so the only things standing
+// between "bad key" and "200 with the job entity" are the pieces qz0 is
+// about: auth, routing and siren rendering, not network flakiness.
+func cgiEnvForJob(t *testing.T, apiKey string) {
+	t.Helper()
+	t.Setenv("REQUEST_METHOD", http.MethodGet)
+	t.Setenv("PATH_INFO", jobPath)
+	t.Setenv("QUERY_STRING", "")
+	t.Setenv("HTTP_X_API_KEY", apiKey)
+	// Empty SCRIPT_NAME gives the Router an empty base, so hrefs below are
+	// predictable (Href(jobPath) == jobPath) without depending on whatever
+	// the test process's own environment happens to have set.
+	t.Setenv("SCRIPT_NAME", "")
+	t.Setenv("CONTENT_LENGTH", "")
+}
+
+// serverTestConfig returns a config.Default() pointed at throwaway,
+// test-local files: an API key file under a fresh temp dir (also used as
+// StateDir, so Manager.Read() sees no job ever having run) and no peers to
+// contact. It is deliberately built with config.Default() plus overrides --
+// the same shape newServer's caller (cmd/f3sctl/main.go) uses -- rather than
+// a hand-picked subset of fields, since the whole point of the two tests
+// below is to construct a Server the way production does.
+func serverTestConfig(t *testing.T, apiKey string) config.Config {
+	t.Helper()
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "apikey")
+	if err := os.WriteFile(keyFile, []byte(apiKey+"\n"), 0o600); err != nil {
+		t.Fatalf("writing the API key file: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.APIKeyFile = keyFile
+	cfg.StateDir = dir
+	cfg.PeerNodes = nil
+	return cfg
+}
+
+// TestServeCGIEndToEndRejectsBadAPIKeyBeforeTouchingTheHandler is the
+// regression test for qz0: every Server built in this package's tests before
+// it was a literal carrying only the fields one handler needed (see
+// countingServer above and handlers_test.go's testServer, both of which
+// leave auth, siren, openapi, peers nil) and called a handler function
+// directly -- so nothing ever exercised the fully-wired production pipeline
+// serve() actually runs: auth check -> route lookup -> peer-busy check ->
+// handler -> siren render. A Server missing its Authenticator would panic
+// the instant serve() reached s.auth.Check (nil pointer dereference), which
+// this test would catch immediately, not silently pass.
+//
+// This drives the request through ServeCGI -- the exact function
+// cmd/f3sctl/main.go calls in CGI mode -- reading the request from real CGI
+// environment variables and stdin the way parseCGIRequest expects, so the
+// Server under test is the one newServer actually builds, and the assertion
+// is against the real response bytes, not a handler's return value taken as
+// a shortcut.
+func TestServeCGIEndToEndRejectsBadAPIKeyBeforeTouchingTheHandler(t *testing.T) {
+	cfg := serverTestConfig(t, "correct-key")
+	cgiEnvForJob(t, "wrong-key")
+
+	var out bytes.Buffer
+	if err := ServeCGI(cfg, &out); err != nil {
+		t.Fatalf("ServeCGI: %v", err)
+	}
+
+	headers, body := splitCGIResponse(t, out.String())
+	if headers["Status"] != "401 Unauthorized" {
+		t.Fatalf("Status header = %q, want %q: a fully-wired Server must reject a bad key before reaching any handler\nbody: %s",
+			headers["Status"], "401 Unauthorized", body)
+	}
+
+	var got struct {
+		Properties map[string]any `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("body is not valid JSON: %v\nbody: %s", err, body)
+	}
+	if msg, _ := got.Properties["message"].(string); msg != "unauthorized" {
+		t.Errorf("properties.message = %q, want %q", msg, "unauthorized")
+	}
+}
+
+// TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline is qz0's
+// positive case, and the true differentiator from calling handleJob
+// directly: handleJob builds its "self"/"up" links with s.router.Href, so a
+// Server whose Router field was left nil -- exactly the gap in this
+// package's existing Server literals -- would panic here, not merely return
+// a wrong value. It also proves the response actually went through
+// SirenRenderer (the CGI header block, the Siren media type) rather than
+// just checking the Entity handleJob returns.
+func TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline(t *testing.T) {
+	cfg := serverTestConfig(t, "correct-key")
+	cgiEnvForJob(t, "correct-key")
+
+	var out bytes.Buffer
+	if err := ServeCGI(cfg, &out); err != nil {
+		t.Fatalf("ServeCGI: %v", err)
+	}
+
+	headers, body := splitCGIResponse(t, out.String())
+	if headers["Status"] != "200 OK" {
+		t.Fatalf("Status header = %q, want %q\nbody: %s", headers["Status"], "200 OK", body)
+	}
+	if headers["Content-Type"] != sirenMediaType {
+		t.Errorf("Content-Type = %q, want the Siren media type %q", headers["Content-Type"], sirenMediaType)
+	}
+
+	var got Entity
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("body is not valid JSON: %v\nbody: %s", err, body)
+	}
+	if len(got.Class) != 1 || got.Class[0] != "job" {
+		t.Errorf("class = %v, want [job]", got.Class)
+	}
+	if state, _ := got.Properties["state"].(string); state != "none" {
+		t.Errorf("properties.state = %q, want %q: no job has ever run in this fresh StateDir", state, "none")
+	}
+
+	var self string
+	for _, l := range got.Links {
+		for _, rel := range l.Rel {
+			if rel == "self" {
+				self = l.Href
+			}
+		}
+	}
+	if self != jobPath {
+		t.Errorf("self link = %q, want %q (router.Href(%q) with an empty SCRIPT_NAME base): "+
+			"a nil Router would have panicked before this response was ever produced", self, jobPath, jobPath)
 	}
 }
