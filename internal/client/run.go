@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/presenter"
 )
@@ -36,8 +37,22 @@ const jobWaitBuffer = 5 * time.Minute
 // that race. Computing from the same config value means an operator who
 // raises UnmuteTimeout (as happened 2026-08-09, 600s -> 1200s, to survive a
 // slow ntpd_sync_on_start) automatically raises the client's patience too.
+//
+// A zero cfg.UnmuteTimeout means "unset" (a caller that built config.Config{}
+// directly instead of going through config.Default()/config.Load()), not
+// "wait zero seconds" -- there is no scenario where an operator wants
+// waitForJob to give up after just jobWaitBuffer (~5m) while r0/r1/r2 are
+// still booting. Substituting config.Default()'s UnmuteTimeout for that case
+// mirrors how internal/agent/poweroff.go's vmShutdownTimeout already treats
+// an unset/zero VMShutdownTimeout: fall back to the compiled-in default
+// rather than let a forgotten config.Default() silently produce a deadline
+// nobody chose (see uz0).
 func (c *Client) jobWaitTimeout() time.Duration {
-	return c.cfg.UnmuteTimeout.D() + jobWaitBuffer
+	unmute := c.cfg.UnmuteTimeout.D()
+	if unmute <= 0 {
+		unmute = config.Default().UnmuteTimeout.D()
+	}
+	return unmute + jobWaitBuffer
 }
 
 // Run executes a CLI command against the remote API.

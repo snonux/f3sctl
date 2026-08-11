@@ -32,26 +32,29 @@ func TestNewThreadsCfgThrough(t *testing.T) {
 	}
 }
 
-// TestNewWithZeroValueConfigDoesNotSilentlyShortenTheDeadline is the specific
-// case mz0's annotation calls out: a caller that passes a zero-value
-// config.Config (cfg.UnmuteTimeout == 0, as opposed to config.Default()'s
-// resolved default) must not silently produce a deadline that is only
-// jobWaitBuffer long -- that would reintroduce, in a new disguise, the very
+// TestNewWithZeroValueConfigFallsBackToTheDefaultUnmuteTimeout is the fixed
+// version of the case mz0's annotation flagged and uz0 resolved: a caller
+// that passes a zero-value config.Config (cfg.UnmuteTimeout == 0, as opposed
+// to config.Default()'s resolved default) used to get a deadline that was
+// only jobWaitBuffer long (~5m) -- reintroducing, in a new disguise, the very
 // "gave up moments before the job finished" bug jobWaitTimeout exists to
-// prevent. This pins the current, honest behaviour: jobWaitTimeout uses
-// exactly what cfg carries, so a caller that skips config.Default() gets a
-// visibly too-short timeout (5m) rather than a comfortable one -- a caller
-// wanting the safe default must go through config.Default(), not New.
-func TestNewWithZeroValueConfigDoesNotSilentlyShortenTheDeadline(t *testing.T) {
+// prevent. jobWaitTimeout now treats a zero UnmuteTimeout as "unset" and
+// substitutes config.Default()'s value (mirroring
+// internal/agent/poweroff.go's vmShutdownTimeout for VMShutdownTimeout), so a
+// caller that forgets config.Default() still gets the ~25m deadline an
+// operator actually wants rather than a silently short one.
+func TestNewWithZeroValueConfigFallsBackToTheDefaultUnmuteTimeout(t *testing.T) {
 	c, err := New("http://example.invalid/", "some-key", config.Config{}, io.Discard)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
 	got := c.jobWaitTimeout()
-	if got != jobWaitBuffer {
-		t.Errorf("jobWaitTimeout() with a zero-value config.Config = %s, want exactly jobWaitBuffer (%s): "+
-			"UnmuteTimeout.D() of a zero Duration must be 0, not a hidden default", got, jobWaitBuffer)
+	want := config.Default().UnmuteTimeout.D() + jobWaitBuffer
+	if got != want {
+		t.Errorf("jobWaitTimeout() with a zero-value config.Config = %s, want %s "+
+			"(config.Default()'s UnmuteTimeout + jobWaitBuffer): a zero UnmuteTimeout must fall back "+
+			"to the default, not silently shorten the deadline to just jobWaitBuffer", got, want)
 	}
 }
 
