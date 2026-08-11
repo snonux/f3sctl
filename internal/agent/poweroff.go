@@ -8,24 +8,67 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/config"
 )
 
-// vmShutdownTimeout bounds how long we wait for the bhyve guests to power
-// themselves off before resorting to SIGKILL.
+// guestPollInterval is the default value of pollInterval, how often we
+// re-check whether the guests have gone.
+const guestPollInterval = 5 * time.Second
+
+// pollInterval, killSettleWait, pidLookup and sendSignal are read through
+// vars rather than used directly, so a test can shrink the waits and fake the
+// PID/signal seams instead of depending on real bhyve processes and waiting
+// out real timeouts -- the same pattern internal/power uses for
+// downProbeInterval/powerDownTimeout.
+var (
+	pollInterval   = guestPollInterval
+	killSettleWait = 2 * time.Second
+	pidLookup      = bhyvePIDs
+	sendSignal     = signalAll
+)
+
+// vmShutdownTimeout returns how long waitForGuests should wait for the bhyve
+// guests to power themselves off before resorting to SIGKILL.
 //
-// This must stay BELOW the host's rcshutdown_timeout, currently 300s (raised
-// from the 90s default on 2026-06-28 across f0/f1/f2). The reason is specific:
-// if rc.shutdown overruns that watchdog, init logs "terminated abnormally,
-// going to single user mode" and the host drops to single-user *still powered
-// on, with no network*. Wake-on-LAN only wakes a powered-off NIC, so the host
-// then cannot be woken remotely at all and needs physical access. Changing one
-// of these two numbers without the other reopens exactly that trap.
+// It reads cfg.VMShutdownTimeout from the host's own local config instead of
+// a hardcoded constant, so that an operator who lowers vm_shutdown_timeout
+// actually gets a shorter real wait here -- see vz0. Before this, the config
+// value was read only by internal/power/awaitdown.go's ShutdownWorstCase to
+// compute the server's staleness ceiling, while the agent silently kept
+// waiting its own hardcoded 240s regardless; lowering the config then shrank
+// the ceiling without shrinking the real worst case, which could make a
+// perfectly healthy shutdown look stale. A missing config file, a load
+// error, or an unset/zero value all fall back to config.Default()'s 240s --
+// a zero-duration wait would give up and SIGKILL every guest on the very
+// first poll, which is never what an operator setting up a fresh config
+// intends.
+//
+// Whatever this returns must stay BELOW the host's rcshutdown_timeout,
+// currently 300s (raised from the 90s default on 2026-06-28 across
+// f0/f1/f2). The reason is specific: if rc.shutdown overruns that watchdog,
+// init logs "terminated abnormally, going to single user mode" and the host
+// drops to single-user *still powered on, with no network*. Wake-on-LAN only
+// wakes a powered-off NIC, so the host then cannot be woken remotely at all
+// and needs physical access. Now that vm_shutdown_timeout is actually
+// honored, an operator raising it above 300s reopens that trap just as
+// surely as changing rcshutdown_timeout would.
 //
 // See the f3s skill, references/console-jetkvm-shutdown.md.
-const vmShutdownTimeout = 240 * time.Second
+func vmShutdownTimeout() time.Duration {
+	def := config.Default().VMShutdownTimeout.D()
 
-// guestPollInterval is how often we re-check whether the guests have gone.
-const guestPollInterval = 5 * time.Second
+	cfg, err := config.Load(os.Getenv("F3SCTL_CONFIG"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"WARNING: loading config for vm_shutdown_timeout failed (%v); using the %s default\n", err, def)
+		return def
+	}
+	if d := cfg.VMShutdownTimeout.D(); d > 0 {
+		return d
+	}
+	return def
+}
 
 // runPoweroff stops every bhyve guest, then powers the host off.
 //
@@ -44,7 +87,7 @@ func runPoweroff() error {
 		fmt.Printf("guests before shutdown:\n%s", out)
 	}
 
-	pids, err := bhyvePIDs()
+	pids, err := pidLookup()
 	if err != nil {
 		return err
 	}
@@ -53,12 +96,12 @@ func runPoweroff() error {
 		// Two signals with a pause between, mirroring vm-bhyve: the first
 		// initiates ACPI shutdown in the guest, the second covers a guest
 		// that was not ready for the first.
-		signalAll(pids, syscall.SIGTERM)
+		sendSignal(pids, syscall.SIGTERM)
 		time.Sleep(time.Second)
-		signalAll(pids, syscall.SIGTERM)
+		sendSignal(pids, syscall.SIGTERM)
 	}
 
-	if err := waitForGuests(); err != nil {
+	if err := waitForGuests(vmShutdownTimeout()); err != nil {
 		return err
 	}
 
@@ -67,17 +110,21 @@ func runPoweroff() error {
 }
 
 // waitForGuests polls until no bhyve process remains, SIGKILLing whatever is
-// left once the timeout expires.
+// left once timeout expires.
+//
+// timeout comes from vmShutdownTimeout (cfg.VMShutdownTimeout, in
+// production) rather than being read here directly, so a test can drive this
+// function with a short duration instead of the real config.
 //
 // The forced kill is a last resort and says so loudly: SIGKILL can leave an
 // etcd write-ahead log torn, which may need a health check or recovery on the
 // next boot. It is still the better outcome than the host hanging and becoming
 // un-wakeable.
-func waitForGuests() error {
-	deadline := time.Now().Add(vmShutdownTimeout)
+func waitForGuests(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 
 	for {
-		pids, err := bhyvePIDs()
+		pids, err := pidLookup()
 		if err != nil {
 			return err
 		}
@@ -88,11 +135,11 @@ func waitForGuests() error {
 		if time.Now().After(deadline) {
 			fmt.Fprintf(os.Stderr,
 				"WARNING: guests still running after %s; force-killing bhyve PIDs %v. "+
-					"Check etcd health on the next boot.\n", vmShutdownTimeout, pids)
-			signalAll(pids, syscall.SIGKILL)
-			time.Sleep(2 * time.Second)
+					"Check etcd health on the next boot.\n", timeout, pids)
+			sendSignal(pids, syscall.SIGKILL)
+			time.Sleep(killSettleWait)
 
-			remaining, err := bhyvePIDs()
+			remaining, err := pidLookup()
 			if err != nil {
 				return err
 			}
@@ -104,7 +151,7 @@ func waitForGuests() error {
 			return nil
 		}
 
-		time.Sleep(guestPollInterval)
+		time.Sleep(pollInterval)
 	}
 }
 
