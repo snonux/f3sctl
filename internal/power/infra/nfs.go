@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // NFSMounts returns the mount points of every locally mounted NFS
@@ -35,7 +36,7 @@ func NFSMounts(ctx context.Context) ([]string, error) {
 	if runtime.GOOS == "linux" {
 		return linuxNFSMounts()
 	}
-	return bsdNFSMounts(ctx)
+	return bsdNFSMounts(ctx, MountPath())
 }
 
 // linuxNFSMounts reads /proc/mounts and hands it to parseProcMounts, which is
@@ -68,8 +69,40 @@ func parseProcMounts(r io.Reader) ([]string, error) {
 	return out, sc.Err()
 }
 
-// bsdNFSMounts runs `mount -t nfs` and hands its output to
+// mountCandidates are where mount(8) lives, most likely first.
+//
+// Looked up by absolute path rather than through PATH for the same reason as
+// pingCandidates (ping.go): f3sctl's HTTP API CGI runs with the environment
+// bozohttpd hands it -- on NetBSD that is
+// /usr/bin:/bin:/usr/pkg/bin:/usr/local/bin, which does NOT include /sbin
+// where mount actually is. Relying on PATH made checkLocalNFS's very first
+// step -- listing what is mounted -- fail outright with "executable file not
+// found in $PATH" on pi0/pi1, aborting every `power off`/`power all off` job
+// before it touched a single host. Caught by an end-to-end power-off test
+// against the real pi0 CGI on 2026-08-11.
+var mountCandidates = []string{"/sbin/mount", "/usr/sbin/mount", "/bin/mount", "/usr/bin/mount"}
+
+// MountPath resolves mount(8) once per process, falling back to PATH lookup
+// as a last resort for a platform that keeps it somewhere else entirely.
+var MountPath = sync.OnceValue(func() string {
+	for _, p := range mountCandidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("mount"); err == nil {
+		return p
+	}
+	return ""
+})
+
+// bsdNFSMounts runs `<bin> -t nfs` and hands its output to
 // parseBSDMountOutput, which is the part that actually knows the format.
+//
+// bin takes an explicit path (resolved by the caller via MountPath) rather
+// than a hard-coded "mount", the same seam Ping uses for ping(8): it lets a
+// test drive this with a stub binary directly, without relying on PATH or on
+// MountPath's own process-wide, once-only caching.
 //
 // A non-zero exit means "nothing of that type is mounted" on some of the
 // BSDs here, so that is treated as an empty list rather than a failure.
@@ -80,8 +113,11 @@ func parseProcMounts(r io.Reader) ([]string, error) {
 // prevent. The two are told apart by errors.As against *exec.ExitError: that
 // type means mount(8) ran and exited non-zero, anything else means it never
 // got to run at all (not found, not executable, fork failed).
-func bsdNFSMounts(ctx context.Context) ([]string, error) {
-	out, err := exec.CommandContext(ctx, "mount", "-t", "nfs").Output()
+func bsdNFSMounts(ctx context.Context, bin string) ([]string, error) {
+	if bin == "" {
+		return nil, errors.New("mount(8) not found")
+	}
+	out, err := exec.CommandContext(ctx, bin, "-t", "nfs").Output()
 	if err != nil {
 		if errors.As(err, new(*exec.ExitError)) {
 			return nil, nil
@@ -91,13 +127,36 @@ func bsdNFSMounts(ctx context.Context) ([]string, error) {
 	return parseBSDMountOutput(string(out)), nil
 }
 
+// umountCandidates are where umount(8) lives, most likely first.
+//
+// Same reasoning and same incident as mountCandidates above: checkLocalNFS's
+// real unmount step (internal/power/backends_exec.go's execNFS.Unmount) shells
+// out to umount(8), which sits in /sbin alongside mount(8) and is equally
+// absent from the CGI's PATH.
+var umountCandidates = []string{"/sbin/umount", "/usr/sbin/umount", "/bin/umount", "/usr/bin/umount"}
+
+// UmountPath resolves umount(8) once per process, falling back to PATH
+// lookup as a last resort for a platform that keeps it somewhere else
+// entirely.
+var UmountPath = sync.OnceValue(func() string {
+	for _, p := range umountCandidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("umount"); err == nil {
+		return p
+	}
+	return ""
+})
+
 // parseBSDMountOutput parses `mount -t nfs`'s stdout, whose lines read
 // "server:/export on /mountpoint (nfs, ...)" on all the BSDs here, into the
 // list of mount points.
 //
 // Split out from bsdNFSMounts so the format can be pinned directly, without
 // exec(2) or a real mount(8) -- the exit-code/ExitError handling around it is
-// tested separately, against a stub "mount" on PATH.
+// tested separately, against an explicit stub binary path.
 func parseBSDMountOutput(out string) []string {
 	var mounts []string
 	for _, line := range strings.Split(out, "\n") {

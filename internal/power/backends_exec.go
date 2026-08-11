@@ -2,10 +2,12 @@ package power
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/power/infra"
 )
 
 // This file holds the adapters New wires the PowerBackend/ProbeBackend/
@@ -90,7 +92,11 @@ func (n execNFS) Mounts(ctx context.Context) ([]string, error) {
 }
 
 func (n execNFS) Unmount(ctx context.Context, mountpoint string) (out string, err error) {
-	raw, err := exec.CommandContext(ctx, "umount", mountpoint).CombinedOutput()
+	bin := infra.UmountPath()
+	if bin == "" {
+		return "", errors.New("umount(8) not found")
+	}
+	raw, err := exec.CommandContext(ctx, bin, mountpoint).CombinedOutput()
 	return strings.TrimSpace(string(raw)), err
 }
 

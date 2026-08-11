@@ -73,15 +73,14 @@ func TestParseBSDMountOutputEmpty(t *testing.T) {
 // proceed with an NFS share that is, for all this machine actually knows,
 // still mounted.
 //
-// bsdNFSMounts hard-codes the "mount" command name (matching mount(8)'s real
-// invocation), so it is driven here by putting a stub executable named
-// "mount" first on PATH -- the same technique the ping tests use, just via
-// PATH instead of an explicit argument, because bsdNFSMounts (unlike Ping)
-// takes no injectable binary path.
+// bsdNFSMounts takes bin as an explicit argument (the same seam Ping uses
+// for ping(8)), so each case drives it directly with a stub binary path
+// rather than manipulating PATH -- which would also race MountPath's
+// process-wide sync.OnceValue cache across subtests.
 func TestBSDNFSMountsToldApartFromAnUnrunnableMount(t *testing.T) {
 	t.Run("mount ran and exited non-zero: empty, not an error", func(t *testing.T) {
-		withStubMount(t, "#!/bin/sh\nexit 1\n")
-		got, err := bsdNFSMounts(context.Background())
+		bin := writeStubMount(t, "#!/bin/sh\nexit 1\n")
+		got, err := bsdNFSMounts(context.Background(), bin)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -91,8 +90,8 @@ func TestBSDNFSMountsToldApartFromAnUnrunnableMount(t *testing.T) {
 	})
 
 	t.Run("mount ran and printed a mount: parsed", func(t *testing.T) {
-		withStubMount(t, "#!/bin/sh\necho '192.168.1.138:/tank/media on /mnt/media (nfs)'\n")
-		got, err := bsdNFSMounts(context.Background())
+		bin := writeStubMount(t, "#!/bin/sh\necho '192.168.1.138:/tank/media on /mnt/media (nfs)'\n")
+		got, err := bsdNFSMounts(context.Background(), bin)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -102,12 +101,25 @@ func TestBSDNFSMountsToldApartFromAnUnrunnableMount(t *testing.T) {
 		}
 	})
 
-	t.Run("mount could not be started at all: reported, not empty", func(t *testing.T) {
-		// PATH points only at an empty directory, so exec.CommandContext
-		// cannot find "mount" and the failure is a *fs.PathError / exec.Error,
-		// never an *exec.ExitError.
-		t.Setenv("PATH", t.TempDir())
-		_, err := bsdNFSMounts(context.Background())
+	t.Run("mount path empty: reported, not empty list", func(t *testing.T) {
+		// The empty string is what MountPath returns when mount(8) could not
+		// be found anywhere -- the CGI-PATH incident this whole seam exists
+		// for (see mountCandidates). bsdNFSMounts must refuse to guess.
+		_, err := bsdNFSMounts(context.Background(), "")
+		if err == nil {
+			t.Fatal("bsdNFSMounts = nil error, want one: mount(8) could not be resolved at all")
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("bsdNFSMounts returned an *exec.ExitError (%v); "+
+				"an unresolved binary must not be classified as one", err)
+		}
+	})
+
+	t.Run("mount path does not exist: reported, not empty list", func(t *testing.T) {
+		// A resolved-but-wrong path (e.g. a stale cache entry) must fail the
+		// same way as an empty one, not silently read as "nothing mounted".
+		_, err := bsdNFSMounts(context.Background(), filepath.Join(t.TempDir(), "no-such-mount"))
 		if err == nil {
 			t.Fatal("bsdNFSMounts = nil error, want one: mount(8) could not be run at all")
 		}
@@ -119,15 +131,15 @@ func TestBSDNFSMountsToldApartFromAnUnrunnableMount(t *testing.T) {
 	})
 }
 
-// withStubMount points PATH at a directory containing only an executable
-// named "mount" running script, so bsdNFSMounts's hard-coded
-// exec.CommandContext(ctx, "mount", ...) resolves to it instead of the real
+// writeStubMount writes an executable script and returns its absolute path,
+// for bsdNFSMounts's injectable bin argument to resolve to instead of a real
 // mount(8).
-func withStubMount(t *testing.T, script string) {
+func writeStubMount(t *testing.T, script string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "mount"), []byte(script), 0o755); err != nil {
+	p := filepath.Join(dir, "mount")
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatalf("writing the mount stub: %v", err)
 	}
-	t.Setenv("PATH", dir)
+	return p
 }
