@@ -202,19 +202,18 @@ func (c *Client) waitForJob(root Entity, id string) error {
 	deadline := time.Now().Add(timeout)
 
 	for time.Now().Before(deadline) {
-		time.Sleep(10 * time.Second)
+		time.Sleep(jobPollInterval)
 
-		job, err := c.Follow(root, "job")
+		job, err := c.pollJob(root, id)
 		if err != nil {
 			// A transient network blip mid-shutdown is expected -- the
 			// cluster is, after all, being taken apart.
 			fmt.Fprintf(c.stdout, "  (cannot read the job right now: %v)\n", err)
 			continue
 		}
-
-		if got, _ := job.Properties["id"].(string); got != id {
-			// Another node's job, or none at all. Say so plainly rather than
-			// reporting someone else's outcome as this one's.
+		if job == nil {
+			// Every attempt this cycle reached the other node. Say so plainly
+			// rather than reporting someone else's outcome as this one's.
 			fmt.Fprintln(c.stdout, "  (polled the other API node; still waiting)")
 			continue
 		}
@@ -239,6 +238,50 @@ func (c *Client) waitForJob(root Entity, id string) error {
 		}
 	}
 	return fmt.Errorf("gave up waiting for the job after %s", timeout)
+}
+
+// jobPollInterval is the gap between polling cycles, and jobPollRetries is how
+// many reads one cycle may take to reach the node that actually holds the job.
+const (
+	jobPollInterval = 10 * time.Second
+	jobPollRetries  = 3
+	jobRetryGap     = time.Second
+)
+
+// pollJob reads this job, retrying briefly when the read lands on the other
+// API node. It returns nil, nil when every attempt did.
+//
+// relayd spreads requests across pi0 and pi1, so roughly half of a single-shot
+// poll's reads reach the node that is not running this job. That is not an
+// error -- waitForJob has always treated another node's job as "no news" -- but
+// paying a full ten-second cycle for it means the operator sees a stage change
+// every twenty seconds on average, and during a parallel shutdown the visible
+// step then lags what the rack is actually doing. Retrying two or three times
+// a second apart costs a couple of cheap reads and makes it very likely that
+// each cycle carries real news.
+//
+// The retries are deliberately bounded and slow enough to stay polite: this is
+// a CGI on a Raspberry Pi, and the job it is reporting on takes minutes.
+func (c *Client) pollJob(root Entity, id string) (*Entity, error) {
+	var lastErr error
+
+	for attempt := 0; attempt < jobPollRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(jobRetryGap)
+		}
+
+		job, err := c.Follow(root, "job")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if got, _ := job.Properties["id"].(string); got == id {
+			return &job, nil
+		}
+	}
+
+	// Nothing but the other node's job (or nothing but errors) this cycle.
+	return nil, lastErr
 }
 
 // showStatus renders the remote status in the same shape as the local CLI, so
