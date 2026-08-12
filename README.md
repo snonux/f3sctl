@@ -119,6 +119,9 @@ running, and a confirmation field on `fans-off` only while a host is still
 drawing power. A client renders what it is handed and never encodes a rule of
 its own.
 
+**How it fits together: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — the
+three modes, the packages, a shutdown end to end, and the two-node story.
+
 **Writing a client: [`docs/CLIENT.md`](docs/CLIENT.md)**, with a dependency-free
 reference implementation in [`docs/client-reference.js`](docs/client-reference.js).
 
