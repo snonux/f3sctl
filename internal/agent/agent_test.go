@@ -79,10 +79,11 @@ func TestArgvBeatsEnvironment(t *testing.T) {
 // widen the doas allowlist for no reason.
 func TestPrivilegedVerbsAreMarked(t *testing.T) {
 	want := map[string]bool{
-		"probe":       true,
-		"zusb-status": false,
-		"zusb-unload": true,
-		"poweroff":    true,
+		"probe":        true,
+		"zusb-status":  false,
+		"zusb-unload":  true,
+		"carp-quiesce": true,
+		"poweroff":     true,
 	}
 
 	got := map[string]bool{}

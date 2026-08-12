@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,14 +64,29 @@ type fakePower struct {
 	// returns. Used to flip a host's fake liveness to "off" so
 	// awaitPowerDown can confirm it went silent without a real ping.
 	onPowerOff func(h inventory.Host)
+	// onPowerOffStart and onPowerOffEnd bracket the call, whether or not it
+	// was scripted to fail. They are what the parallel-shutdown tests observe
+	// concurrency with: how many hosts are inside PowerOff at once is the
+	// only externally visible difference between shutting a batch down
+	// together and shutting it down one host at a time. Both run outside
+	// f.mu, so a hook may call back into the fake.
+	onPowerOffStart func(h inventory.Host)
+	onPowerOffEnd   func(h inventory.Host)
 	// wakeErr scripts a Wake failure for a named host, the same way
 	// powerOffErr does for PowerOff -- used by on()'s abort tests to prove a
 	// magic packet that fails mid-sequence stops the rest of the hosts from
 	// being woken.
 	wakeErr map[string]error
 
-	poweroffs []string
-	wakes     []string
+	// agentVerbErr scripts an AgentVerb failure for a named host. off()'s
+	// CARP quiesce runs through AgentVerb, and a member that cannot be
+	// quiesced is what sends the whole run down the sequential path -- so a
+	// test needs to be able to fail exactly one host's verb.
+	agentVerbErr map[string]error
+
+	poweroffs  []string
+	wakes      []string
+	agentVerbs []string
 }
 
 func (f *fakePower) Wake(h inventory.Host) error {
@@ -92,11 +108,31 @@ func (f *fakePower) wakeCalls() []string {
 	return append([]string(nil), f.wakes...)
 }
 
-func (f *fakePower) AgentVerb(context.Context, inventory.Host, string) (string, error) {
-	return "", nil
+func (f *fakePower) AgentVerb(_ context.Context, h inventory.Host, verb string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.agentVerbs = append(f.agentVerbs, verb+":"+h.Name)
+	return "", f.agentVerbErr[h.Name]
+}
+
+// verbCalls returns the "<verb>:<host>" pairs AgentVerb was called with.
+//
+// Sorted rather than in call order: the quiesce runs its hosts concurrently,
+// so call order is genuinely undefined and asserting on it would produce a
+// test that fails once a fortnight for no reason.
+func (f *fakePower) verbCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := append([]string(nil), f.agentVerbs...)
+	sort.Strings(out)
+	return out
 }
 
 func (f *fakePower) PowerOff(_ context.Context, h inventory.Host) (out, diag string, err error) {
+	if f.onPowerOffStart != nil {
+		f.onPowerOffStart(h)
+	}
+
 	f.mu.Lock()
 	f.poweroffs = append(f.poweroffs, h.Name)
 	err = f.powerOffErr[h.Name]
@@ -107,6 +143,9 @@ func (f *fakePower) PowerOff(_ context.Context, h inventory.Host) (out, diag str
 	}
 	if err == nil && f.onPowerOff != nil {
 		f.onPowerOff(h)
+	}
+	if f.onPowerOffEnd != nil {
+		f.onPowerOffEnd(h)
 	}
 	return "", "", err
 }

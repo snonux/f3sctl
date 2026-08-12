@@ -33,6 +33,15 @@ const powerDownTimeout = 2 * time.Minute
 // host concurrently rather than one at a time, so it contributes once, not
 // once per host.
 //
+// Since the CARP quiesce (see Engine.quiesceCARP) a healthy run no longer
+// walks the hosts one at a time -- everything but the storage master goes
+// down together, so the real worst case is two VMShutdownTimeouts, not four.
+// This still counts all four deliberately: shutdownEach falls back to the
+// sequential order whenever the CARP failover daemons could not be stopped,
+// and that fallback is exactly the case where a job must not also be declared
+// stale out from under itself. A ceiling that is too generous costs a late "gave up" message; one
+// that is too tight kills healthy jobs.
+//
 // It deliberately leaves out the zusb pre-flight, the local NFS unmount and
 // the Gogios mute calls that run before shutdownEach: none of them carries a
 // timeout of its own (each is bounded only by ctx, which every caller here

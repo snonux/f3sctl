@@ -139,6 +139,30 @@ func (inv Inventory) EveryFHost() []Host { return inv.ByRole(RoleF) }
 // (f3s-storage-ha, 192.168.1.138) and serves NFS. f1 is its BACKUP.
 const StorageMaster = "f0"
 
+// StorageBackup is the other half of the CARP pair: the host that takes the
+// VIP, and with it the NFS export, when the master stops advertising.
+const StorageBackup = "f1"
+
+// CARPMembers returns the hosts in the CARP pair that are present in hosts,
+// in the order given.
+//
+// A shutdown needs to know this set for one reason: a CARP transition on a
+// host that is on its way down runs carpcontrol.sh there, which starts (or
+// stops) rpcbind/mountd/nfsd/nfsuserd and stunnel at the worst possible
+// moment -- the 2026-08-08 wedge described on ShutdownOrder. Anything else in
+// the rack can be powered off in any order without a daemon reacting to it;
+// these two cannot, so they are the hosts Engine.quiesceCARP stops those
+// daemons on before a parallel shutdown.
+func CARPMembers(hosts []Host) []Host {
+	var out []Host
+	for _, h := range hosts {
+		if h.Name == StorageMaster || h.Name == StorageBackup {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 // ShutdownOrder returns the power group ordered so the CARP storage master is
 // powered off LAST.
 //

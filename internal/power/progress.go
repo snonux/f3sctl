@@ -64,6 +64,19 @@ func (e *Engine) WithReporter(r Reporter) *Engine {
 	return e
 }
 
+// serialized returns a writer that performs each Write under a lock, so
+// concurrent writers cannot interleave a line.
+//
+// Engine.off wraps its log in this because a parallel shutdown has several:
+// one goroutine per host flushing its block, plus the stderr diagnostics
+// logWarnings routes in from those same goroutines. It reuses teeLogger --
+// which already is a mutex around a fan-out of writers -- with a fan-out of
+// one, rather than adding a second nearly identical type. Wrapping twice is
+// harmless: the CGI's teeLogger and this one lock independently.
+func serialized(w io.Writer) io.Writer {
+	return &teeLogger{w: []io.Writer{w}}
+}
+
 // teeLogger duplicates the human-readable log to a second writer, so the job
 // log on disk and the terminal show the same thing.
 type teeLogger struct {

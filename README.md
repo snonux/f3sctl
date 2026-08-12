@@ -77,20 +77,35 @@ irreversible happens:
    snapshot, clean export and disk spin-down instead of having USB power cut
    from under it. A no-op on the hosts that do not have it.
 3. **Mute Gogios** — so a deliberate shutdown does not page.
-4. **Stop guests, then power off** — **storage master last**. Powering `f0`
-   off first fails the CARP storage VIP over to `f1`, which then starts NFS
-   seconds before it is itself shut down and hangs in the final phase, powered
-   on and unwakeable. That is what wedged f1 on 2026-08-08. Guests get two SIGTERMs and
+4. **Stop the CARP failover daemons** — `devd` and `cron` on `f0` and `f1`,
+   so nothing reacts to a host receiving the storage VIP while it is shutting
+   down, and f0's minutely auto-failback stops promoting. (Stopping the
+   daemons, rather than `carp auto-failback disable`, because that command's
+   block file lives on the NFS dataset and would outlive the reboot.) A host
+   that takes the VIP runs `carpcontrol.sh`,
+   which starts NFS on a machine that is seconds from powering off; that is
+   what wedged f1 on 2026-08-08 — powered on, off the network, and unwakeable.
+   The NFS daemons themselves are deliberately left running: the guests
+   elsewhere are still writing to that export while they stop.
+5. **Stop guests, then power off** — every host except the storage master
+   **in parallel**, then the master on its own. Stopping those daemons is what makes
+   the batch safe; the master still goes last for an unrelated reason, namely
+   that the other hosts' guests mount their PVs from the VIP over NFS and are
+   still using them while they stop. If those daemons could *not* be stopped, the run
+   falls back to the old one-at-a-time order. Guests get two SIGTERMs and
    240 s, then SIGKILL. That bound must stay below the hosts'
    `rcshutdown_timeout` (300 s): if `rc.shutdown` overruns its watchdog, init
    drops the host to single-user *still powered on with no network*, and
    Wake-on-LAN cannot wake a NIC that never powered down. Recovering from that
    needs physical access.
-5. **Confirm they actually went down** — accepting a shutdown is not the same
+6. **Confirm they actually went down** — accepting a shutdown is not the same
    as completing one. Any host still answering ICMP after two minutes is
    reported as a failure, because it is powered on, off the network, and
    Wake-on-LAN will not wake it.
-6. **Fans off** — only once every host is genuinely down.
+7. **Fans off** — only once every host is genuinely down.
+
+Every run ends with a timing summary — each stage and each host, longest
+called out — so "why did that take so long" is a question the log answers.
 
 ## The API
 
@@ -124,9 +139,9 @@ thing. On every target:
 - `ForceCommand /usr/local/bin/f3sctl agent` in `sshd_config`, which overrides
   whatever the key file says — the restriction is root-owned daemon config, not
   a key option;
-- an allowlist of four single-word verbs, none of which takes an argument, so
+- an allowlist of five single-word verbs, none of which takes an argument, so
   there is nothing a key holder can vary;
-- `doas` rules keyed to exact argv for the three verbs that need root.
+- `doas` rules keyed to exact argv for the four verbs that need root.
 
 On pi0/pi1 the CGI needs **no** privilege escalation at all: Wake-on-LAN is an
 unprivileged UDP broadcast, ICMP comes from the setuid `/sbin/ping`, and the

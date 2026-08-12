@@ -49,6 +49,7 @@ func verbs() []verb {
 		{name: "probe", privileged: true, run: runProbe},
 		{name: "zusb-status", run: runZusbStatus},
 		{name: "zusb-unload", privileged: true, run: runZusbUnload},
+		{name: "carp-quiesce", privileged: true, run: runCARPQuiesce},
 		{name: "poweroff", privileged: true, run: runPoweroff},
 	}
 }
