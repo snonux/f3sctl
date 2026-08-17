@@ -125,10 +125,21 @@ three modes, the packages, a shutdown end to end, and the two-node story.
 **Writing a client: [`docs/CLIENT.md`](docs/CLIENT.md)**, with a dependency-free
 reference implementation in [`docs/client-reference.js`](docs/client-reference.js).
 
+**Managing API keys: [`docs/API-KEYS.md`](docs/API-KEYS.md)** — generating,
+adding, listing, removing and rotating the keys the server accepts.
+
 Authentication is an `X-API-Key` header, compared in constant time. It is never
 accepted in the query string — bozohttpd logs request URIs to syslog and relayd
 logs connections, so a key in a URL would be written to two logs on three
 machines.
+
+The key file (`api_key_file`) may list **several accepted keys, one per line**.
+Issuing a new client its own key is then a matter of appending a line on each
+API node (pi0 *and* pi1 — the key file must match on both, since relayd
+load-balances them); revoking one is deleting its line. Blank lines and
+`#`-comment lines are ignored, so each key can be labelled with the client it
+belongs to. The file is re-read on every request, so neither change needs a
+restart. A single-line file behaves exactly as before.
 
 ## Security model
 

@@ -47,8 +47,11 @@ type Config struct {
 	// ShellyPasswordFile lists candidate files whose first line is the
 	// Shelly plug's digest password.
 	ShellyPasswordFile []string `json:"shelly_password_file"`
-	// APIKeyFile holds the API key: the single key accepted in CGI mode, and
-	// the key presented in --remote mode.
+	// APIKeyFile is the file holding the accepted API key(s). On the API
+	// nodes (pi0/pi1, CGI mode) it may list several keys, one per line, so
+	// each client can be issued its own key without rotating the rest; blank
+	// and '#'-comment lines are ignored. On a client (--remote mode) the
+	// first non-blank, non-comment line is the key this client presents.
 	APIKeyFile string `json:"api_key_file"`
 	// StateDir holds the job lock, job state and job log.
 	StateDir string `json:"state_dir"`
@@ -209,11 +212,17 @@ func (c Config) ResolveAPIKey() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading the API key from %s: %w (or set F3SCTL_KEY)", c.APIKeyFile, err)
 	}
-	key := strings.TrimSpace(string(raw))
-	if key == "" {
-		return "", fmt.Errorf("%s is empty", c.APIKeyFile)
+	// The key file may list several accepted keys (one per line, for the
+	// server side); a client presents only its own, which is the first
+	// non-blank, non-comment line. A single-line file behaves as before.
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		return line, nil
 	}
-	return key, nil
+	return "", fmt.Errorf("%s is empty", c.APIKeyFile)
 }
 
 // ResolveAPIURL returns the endpoint --remote talks to.
