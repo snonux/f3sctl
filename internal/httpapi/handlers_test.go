@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -348,5 +349,106 @@ func TestSetFansRespectsTheRequestContext(t *testing.T) {
 	}
 	if got := plug.setCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: the cancelled context should have stopped the request before it was sent", got)
+	}
+}
+
+// fakePeerJobServer answers every GET with a canned /job document, recording
+// whether any request carried coordination.PeerQueryParam. It stands in for
+// the other API node in the handleJob/handleStatus merge tests below.
+func fakePeerJobServer(t *testing.T, body string) (*httptest.Server, *bool) {
+	t.Helper()
+	asked := new(bool)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*asked = true
+		fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, asked
+}
+
+const peerRunningJobBody = `{"properties":{"id":"peer-job","state":"running","node":"pi1","started":"2026-08-16T12:00:00Z"}}`
+
+// TestHandleJobMergesLocalAndPeerJobs pins currentJob's purpose end to end:
+// GET /job answers with whichever of the local and the peer's job is
+// authoritative (coordination.NewestJob) -- here, the peer's running job over
+// a finished local one -- so a client sees the same job regardless of which
+// of pi0/pi1 it asked, closing the gap reported against the "all-on" job that
+// prompted this.
+func TestHandleJobMergesLocalAndPeerJobs(t *testing.T) {
+	peerSrv, _ := fakePeerJobServer(t, peerRunningJobBody)
+	srv := &Server{
+		router: NewRouter(""),
+		node:   "test",
+		jobs:   coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
+		peers:  &coordination.PeerSet{Nodes: []string{peerSrv.Listener.Addr().String()}, JobPath: "/job"},
+	}
+	local := &coordination.Job{ID: "local-job", State: coordination.JobDone, Started: "2026-08-16T09:00:00Z"}
+
+	e, status, err := srv.handleJob(context.Background(), State{Job: local}, request{APIKey: "k"})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("handleJob: status=%d err=%v", status, err)
+	}
+	if id, _ := e.Properties["id"].(string); id != "peer-job" {
+		t.Errorf("properties.id = %q, want %q: a running peer job must win over a finished local one", id, "peer-job")
+	}
+}
+
+// TestHandleJobDoesNotMergeAPeerOriginatedQuery pins the other half of
+// PeerQueryParam's contract: a GET /job carrying that marker -- i.e. this
+// node answering another node's own peer check -- must report its own job
+// only, even with a peer configured that would otherwise be asked, or two
+// nodes merging on every request would ask each other forever (see
+// PeerQueryParam's doc comment).
+func TestHandleJobDoesNotMergeAPeerOriginatedQuery(t *testing.T) {
+	peerSrv, asked := fakePeerJobServer(t, peerRunningJobBody)
+	srv := &Server{
+		router: NewRouter(""),
+		node:   "test",
+		jobs:   coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
+		peers:  &coordination.PeerSet{Nodes: []string{peerSrv.Listener.Addr().String()}, JobPath: "/job"},
+	}
+	local := &coordination.Job{ID: "local-job", State: coordination.JobDone, Started: "2026-08-16T09:00:00Z"}
+	req := request{APIKey: "k", Query: url.Values{coordination.PeerQueryParam: []string{"1"}}}
+
+	e, _, err := srv.handleJob(context.Background(), State{Job: local}, req)
+	if err != nil {
+		t.Fatalf("handleJob: %v", err)
+	}
+	if id, _ := e.Properties["id"].(string); id != "local-job" {
+		t.Errorf("properties.id = %q, want %q: a peer-marked request must not merge", id, "local-job")
+	}
+	if *asked {
+		t.Error("the peer was asked despite the request carrying PeerQueryParam")
+	}
+}
+
+// TestHandleStatusEmbedsThePeersJobWhenLocalHasNone pins that /status, like
+// /job, does not omit the job entity just because this node's own job.json is
+// empty: the peer's job is worth surfacing there too, via the same currentJob
+// merge -- /status is never itself asked as a peer query, so it always
+// merges, unlike /job.
+func TestHandleStatusEmbedsThePeersJobWhenLocalHasNone(t *testing.T) {
+	peerSrv, _ := fakePeerJobServer(t, peerRunningJobBody)
+	srv := &Server{
+		router: NewRouter(""),
+		node:   "test",
+		jobs:   coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
+		peers:  &coordination.PeerSet{Nodes: []string{peerSrv.Listener.Addr().String()}, JobPath: "/job"},
+	}
+
+	e, _, err := srv.handleStatus(context.Background(), State{}, request{APIKey: "k"})
+	if err != nil {
+		t.Fatalf("handleStatus: %v", err)
+	}
+	var found bool
+	for _, sub := range e.Entities {
+		if len(sub.Class) > 0 && sub.Class[0] == "job" {
+			if id, _ := sub.Properties["id"].(string); id == "peer-job" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("handleStatus did not embed the peer's job when this node had none")
 	}
 }

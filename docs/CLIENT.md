@@ -209,10 +209,12 @@ GET  {job link}             -> poll
 - Poll the `job` link every **5–15 seconds**. Faster buys nothing: the
   underlying operation moves on a scale of minutes.
 - **Check `properties.id` matches the job you started.** relayd load-balances
-  the two nodes, so a poll routinely lands on the node that did *not* run your
-  job — and that node holds a **different** job, quite possibly an old failed
-  one. Treat any other id as "no news", not as your result. A client that skips
-  this will report healthy shutdowns as failures; it has happened.
+  the two nodes, and whichever one answers asks its peer for the job before
+  replying (see §9) — but that ask is best-effort: if the two nodes cannot
+  reach each other at that moment, a poll can still land on a node holding a
+  **different**, older job of its own. Treat any other id as "no news", not as
+  your result. A client that skips this will report healthy shutdowns as
+  failures; it has happened.
 - Stop when `properties.state` is no longer `"running"`. It becomes `"done"` or
   `"failed"`.
 - Read `properties.rc` (the exit code) and `properties.error` for the reason.
@@ -442,15 +444,23 @@ What this means:
 
 - **Host and fan state are authoritative from either node.** Both probe the
   same network and get the same answer.
-- **Job state is local to the node that ran the job.** A `POST` may land on
-  pi0 and the follow-up `GET /job` on pi1, which has no record of it.
+- **Job state is asked for from both nodes and merged.** A `POST` may land on
+  pi0; the follow-up `GET /job` on pi1 asks pi0 for its job before answering,
+  so it reports the same job pi0 would -- a running job always wins over a
+  merely finished one, and otherwise whichever job started more recently
+  does. This costs one extra, short (3s-bounded) request behind the scenes;
+  it is not visible on the wire as anything but `GET /job` taking slightly
+  longer when it has to happen.
 
-So a client polling a job SHOULD tolerate the job resource reporting
-`state: "none"` or a different node's older job. Do not treat that as failure.
-The reliable completion signal is the **host state** reaching what you asked
-for: after `power-off`, the f-hosts stop answering; after `power-on`, they
-start. Use the job for the reason when something goes wrong, and the host state
-for whether it worked.
+That merge is best-effort, not a guarantee: **when a node cannot reach its
+peer at all** — the peer is down, or the LAN path between the two Pis is cut,
+as opposed to relayd merely routing a request to one or the other — `GET
+/job` falls back to answering from local state alone, which may be
+`state: "none"` or an older job than the one you started. A client polling a
+job SHOULD still tolerate that. The reliable completion signal is the **host
+state** reaching what you asked for: after `power-off`, the f-hosts stop
+answering; after `power-on`, they start. Use the job for the reason when
+something goes wrong, and the host state for whether it worked.
 
 ---
 

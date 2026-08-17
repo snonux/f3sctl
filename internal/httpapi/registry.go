@@ -26,6 +26,13 @@ import (
 // answer wait on the other's.
 const jobPath = "/job"
 
+// statusPath is PATH_INFO for the status route, named for the same reason as
+// jobPath: Server.enrichState excludes it from its own, separate peer-busy
+// check, because handleStatus already makes its own single peer round trip
+// (for the job it embeds) and reuses that answer rather than paying for a
+// second one -- see enrichState and handleStatus.
+const statusPath = "/status"
+
 // State is a snapshot of the world, taken once per request before anything is
 // rendered.
 //
@@ -245,7 +252,7 @@ func resourceRoutes() []route {
 		},
 		{
 			Name: "status", Title: "Host and rack status",
-			Method: http.MethodGet, Path: "/status",
+			Method: http.MethodGet, Path: statusPath,
 			Handle: (*Server).handleStatus,
 		},
 		{

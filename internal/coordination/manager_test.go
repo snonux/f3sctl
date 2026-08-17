@@ -473,3 +473,54 @@ func TestManagerFinishErrorsWhenNoJobExists(t *testing.T) {
 		t.Error("Finish succeeded with no job ever recorded, want an error")
 	}
 }
+
+// TestNewestJobPrefersEitherNilSide pins the two base cases: with only one
+// side present, that side is the answer regardless of which argument
+// position it is in.
+func TestNewestJobPrefersEitherNilSide(t *testing.T) {
+	j := &Job{ID: "x", State: JobDone, Started: "2026-08-16T10:00:00Z"}
+
+	if got := NewestJob(j, nil); got != j {
+		t.Errorf("NewestJob(j, nil) = %v, want j", got)
+	}
+	if got := NewestJob(nil, j); got != j {
+		t.Errorf("NewestJob(nil, j) = %v, want j", got)
+	}
+	if got := NewestJob(nil, nil); got != nil {
+		t.Errorf("NewestJob(nil, nil) = %v, want nil", got)
+	}
+}
+
+// TestNewestJobPrefersARunningJobOverAFinishedOne pins the core reason this
+// exists: PeerSet.Busy already guarantees at most one node can be running a
+// job at a time, so a running job is never stale in the way a merely
+// finished one on the other node can be -- even if that finished job started
+// more recently (e.g. a quick single-host action on one node while a slower
+// cluster-wide job is still going on the other).
+func TestNewestJobPrefersARunningJobOverAFinishedOne(t *testing.T) {
+	running := &Job{ID: "running", State: JobRunning, Started: "2026-08-16T09:00:00Z"}
+	laterButDone := &Job{ID: "done", State: JobDone, Started: "2026-08-16T10:00:00Z"}
+
+	if got := NewestJob(running, laterButDone); got != running {
+		t.Errorf("NewestJob(running, laterButDone) = %v, want the running job", got)
+	}
+	if got := NewestJob(laterButDone, running); got != running {
+		t.Errorf("NewestJob(laterButDone, running) = %v, want the running job", got)
+	}
+}
+
+// TestNewestJobPrefersTheLaterStartedJobWhenNeitherIsRunning is the ordinary
+// case once both jobs have stopped: whichever action was actually taken more
+// recently on either node is "the last job", not whichever node a request
+// happened to land on.
+func TestNewestJobPrefersTheLaterStartedJobWhenNeitherIsRunning(t *testing.T) {
+	earlier := &Job{ID: "earlier", State: JobDone, Started: "2026-08-16T09:00:00Z"}
+	later := &Job{ID: "later", State: JobFailed, Started: "2026-08-16T10:00:00Z"}
+
+	if got := NewestJob(earlier, later); got != later {
+		t.Errorf("NewestJob(earlier, later) = %v, want the later job", got)
+	}
+	if got := NewestJob(later, earlier); got != later {
+		t.Errorf("NewestJob(later, earlier) = %v, want the later job", got)
+	}
+}

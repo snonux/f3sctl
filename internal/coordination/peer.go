@@ -52,7 +52,7 @@ type PeerSet struct {
 	// fetch retrieves one peer's current job over HTTP. Nil means the real
 	// network call; only tests substitute anything else -- the same seam as
 	// power.Engine.isUp.
-	fetch func(addr, path, apiKey string) (*peerJob, error)
+	fetch func(addr, path, apiKey string) (*Job, error)
 	// localAddrs lists this machine's own network addresses. Nil means the
 	// real net.InterfaceAddrs; only tests substitute anything else.
 	localAddrs func() ([]net.Addr, error)
@@ -72,12 +72,6 @@ type PeerSet struct {
 // jobPath.
 func NewPeerSet(nodes []string, jobPath string) *PeerSet {
 	return &PeerSet{Nodes: nodes, JobPath: jobPath}
-}
-
-// peerJob is the sliver of a peer's job entity this package needs.
-type peerJob struct {
-	State string
-	Node  string
 }
 
 // Busy reports whether any other node in the set currently has a job
@@ -108,14 +102,46 @@ func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 			ps.warnFunc()(addr, err)
 			continue
 		}
-		if job != nil && job.State == string(JobRunning) {
+		if job != nil && job.State == JobRunning {
 			return true, job.Node
 		}
 	}
 	return false, ""
 }
 
-func (ps *PeerSet) fetchPeer(addr, apiKey string) (*peerJob, error) {
+// FetchJob asks each node in the set for its current or last job in turn,
+// returning the first one that answers -- so that GET /job (httpapi's
+// currentJob) can report the same job regardless of which of pi0/pi1 relayd
+// routed the request to. self and apiKey are as in Busy.
+//
+// Consulting more than one node only matters once the set holds more than
+// the pair this project actually runs; with exactly one peer it is just
+// "ask it". A peer that cannot be reached, same as Busy, is skipped rather
+// than treated as an error -- this node's own job then simply stands alone,
+// which is what happened before this existed. A peer that answers but
+// reports no job at all (fetchPeerJob's nil, nil case) is likewise skipped,
+// so a later, reachable peer that *does* have one still gets a chance.
+func (ps *PeerSet) FetchJob(self, apiKey string) *Job {
+	selfHost := shortHost(self)
+
+	for _, addr := range ps.Nodes {
+		if ps.isSelf(addr, selfHost) {
+			continue
+		}
+
+		job, err := ps.fetchPeer(addr, apiKey)
+		if err != nil {
+			ps.warnFunc()(addr, err)
+			continue
+		}
+		if job != nil {
+			return job
+		}
+	}
+	return nil
+}
+
+func (ps *PeerSet) fetchPeer(addr, apiKey string) (*Job, error) {
 	if ps.fetch != nil {
 		return ps.fetch(addr, ps.JobPath, apiKey)
 	}
@@ -184,13 +210,37 @@ func (e *peerHTTPStatusError) Error() string {
 	return fmt.Sprintf("peer %s returned %s", e.addr, e.status)
 }
 
+// PeerQueryParam marks a GET /job request as one node asking another for its
+// own job, as opposed to an ordinary client request.
+//
+// httpapi.handleJob normally answers with currentJob's merge of its own job
+// and its peer's (see that function), so that /job reads the same regardless
+// of which of pi0/pi1 a request landed on. Left unchecked, that merge would
+// recurse forever: fetchPeerJob asking pi1 for its job would have pi1's own
+// handleJob ask pi0 back, which would ask pi1 back, and so on. Every
+// peer-to-peer job fetch -- both this one and Busy's -- carries this marker
+// so the node answering it reports its own local job only, never merged,
+// breaking the cycle at the first hop. See handleJob for the other end of
+// this contract.
+const PeerQueryParam = "peer"
+
 // fetchPeerJob reads the peer's current job.
 //
 // The peer is asked over plain HTTP on the LAN rather than through relayd,
 // because going out through the load balancer could route the question
 // straight back to this node.
-func fetchPeerJob(addr, path, apiKey string) (*peerJob, error) {
-	url := fmt.Sprintf("http://%s%s", addr, path)
+//
+// The response decodes straight into Job: the wire property names already
+// match Job's own json tags, since it is the identical document jobEntity
+// renders locally. A peer that has never run a job answers with
+// properties.state "none" (httpapi.handleJob's no-job case) rather than a
+// real job at all; that is reported here as (nil, nil) -- reached the peer,
+// nothing to show -- which is a different outcome from (nil, err) and must
+// stay one: the latter is what Busy and FetchJob warn about and skip past as
+// "peer unreachable", while the former is a peer that answered perfectly
+// well and simply has no job to report.
+func fetchPeerJob(addr, path, apiKey string) (*Job, error) {
+	url := fmt.Sprintf("http://%s%s?%s=1", addr, path, PeerQueryParam)
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -212,10 +262,7 @@ func fetchPeerJob(addr, path, apiKey string) (*peerJob, error) {
 	}
 
 	var e struct {
-		Properties struct {
-			State string `json:"state"`
-			Node  string `json:"node"`
-		} `json:"properties"`
+		Properties Job `json:"properties"`
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
@@ -225,7 +272,11 @@ func fetchPeerJob(addr, path, apiKey string) (*peerJob, error) {
 		return nil, err
 	}
 
-	return &peerJob{State: e.Properties.State, Node: e.Properties.Node}, nil
+	if e.Properties.State == "" || e.Properties.State == "none" {
+		return nil, nil
+	}
+	job := e.Properties
+	return &job, nil
 }
 
 // isSelf reports whether addr is one of this machine's own addresses, so a

@@ -78,6 +78,42 @@ type HostProgress struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// NewestJob picks which of two jobs -- typically this node's own and its
+// peer's, see httpapi.currentJob and PeerSet.FetchJob -- is the one to
+// report for "current or last power job". Either argument may be nil,
+// meaning that side has none.
+//
+// A running job always wins over one that has already stopped: PeerSet.Busy
+// is asked before a job starts precisely so at most one node can ever be
+// running one at a time, so a running job is never stale in the way a merely
+// finished one can be. Otherwise the job with the later Started timestamp
+// wins, since "last" means whichever action was actually taken more
+// recently, not whichever node happens to answer a given request.
+//
+// Started strings compare correctly as plain strings because Manager.Start
+// always formats them with time.RFC3339 in UTC: fixed-width, zero-padded
+// fields sort identically whether compared as text or parsed and compared as
+// time.Time, so there is no need to parse either side just to pick the later
+// one.
+func NewestJob(a, b *Job) *Job {
+	if a == nil {
+		return b
+	}
+	if b == nil {
+		return a
+	}
+	if aRunning, bRunning := a.State == JobRunning, b.State == JobRunning; aRunning != bRunning {
+		if aRunning {
+			return a
+		}
+		return b
+	}
+	if b.Started > a.Started {
+		return b
+	}
+	return a
+}
+
 // newJobID returns a random identifier for a job. Random rather than a
 // counter: the two API nodes keep separate state and must never mint the same
 // ID.

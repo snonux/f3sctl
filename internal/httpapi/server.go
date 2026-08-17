@@ -310,7 +310,7 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// Ask the other node whether it is mid-job, so actions this node advertises
 	// account for a job running over there.
 	//
-	// Two routes are excluded, and /job is excluded for a reason worth stating:
+	// Three routes are excluded. /job is excluded for a reason worth stating:
 	// the peer check *is* a GET of the peer's /job. Letting /job trigger one
 	// makes each node's answer depend on the other's, so a single question
 	// bounces between them until the 3s client timeout fires and the peer is
@@ -319,10 +319,24 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// /job renders no actions, so it has no use for the answer anyway.
 	// openapi.json describes the surface rather than the moment.
 	//
+	// /job does still make its own, separate peer round trip -- handleJob's
+	// currentJob, so a client sees the same "current or last job" regardless
+	// of which of pi0/pi1 it asked -- but that one is bounded the other way:
+	// PeerQueryParam on the outgoing request tells the node answering it to
+	// skip its own currentJob merge, so the bounce this comment describes
+	// cannot happen there either. See coordination.PeerQueryParam.
+	//
+	// /status is excluded for a cheaper reason: it makes exactly the same
+	// peer round trip currentJob does (it embeds the merged job too), so
+	// paying for a second, separate one here would double /status's
+	// worst-case latency against a peer that is genuinely down or timing out
+	// (2x3s instead of 3s) for no benefit -- handleStatus derives its own
+	// PeerBusy from the one peer fetch it already makes. See handleStatus.
+	//
 	// An unreachable peer counts as idle, for the same reason PeerSet.Busy
 	// gives: if one node is down the other must still be able to power the
 	// cluster on.
-	if req.Path != openAPIPath && req.Path != jobPath {
+	if req.Path != openAPIPath && req.Path != jobPath && req.Path != statusPath {
 		state.PeerBusy, _ = s.peers.Busy(s.node, req.APIKey)
 	}
 

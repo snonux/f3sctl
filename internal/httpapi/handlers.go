@@ -32,7 +32,18 @@ func (s *Server) handleRoot(_ context.Context, state State, _ request) (Entity, 
 
 // handleStatus renders every host plus the fan state in one response, so a
 // watchface needs a single request per refresh.
-func (s *Server) handleStatus(_ context.Context, state State, _ request) (Entity, int, error) {
+//
+// /status makes its own single peer round trip -- via s.peerJob, the same
+// helper currentJob uses -- rather than also relying on enrichState's
+// PeerBusy (statusPath is excluded from that, see enrichState): this route
+// needs the peer's *job*, not just whether it is running, to embed the
+// merged job entity, so deriving PeerBusy from that same fetch avoids paying
+// for a second, separate peer round trip against a peer that may be slow or
+// unreachable.
+func (s *Server) handleStatus(_ context.Context, state State, req request) (Entity, int, error) {
+	peer := s.peerJob(req.APIKey)
+	state.PeerBusy = peer != nil && peer.State == coordination.JobRunning
+
 	e := Entity{
 		Class:      []string{"status"},
 		Title:      "Host and rack status",
@@ -49,8 +60,8 @@ func (s *Server) handleStatus(_ context.Context, state State, _ request) (Entity
 	}
 	e.Entities = append(e.Entities, s.fansEntity(state))
 
-	if state.Job != nil {
-		e.Entities = append(e.Entities, s.jobEntity(*state.Job))
+	if job := coordination.NewestJob(state.Job, peer); job != nil {
+		e.Entities = append(e.Entities, s.jobEntity(*job))
 	}
 	return e, http.StatusOK, nil
 }
@@ -249,11 +260,24 @@ func (s *Server) setMute(ctx context.Context, state State, mute bool) (Entity, i
 }
 
 // handleJob renders the current or last power operation.
-func (s *Server) handleJob(_ context.Context, state State, _ request) (Entity, int, error) {
-	if state.Job == nil {
+//
+// A GET carrying PeerQueryParam is another node's own peer check (Busy or
+// FetchJob asking this node for its job), not a client -- and must get this
+// node's own job back, unmerged, or the two nodes would ask each other
+// forever. Only a request without that marker gets currentJob's merge, so an
+// ordinary client sees the same job regardless of which of pi0/pi1 it landed
+// on -- see currentJob and coordination.PeerQueryParam for the rest of this
+// contract.
+func (s *Server) handleJob(_ context.Context, state State, req request) (Entity, int, error) {
+	job := state.Job
+	if req.Query.Get(coordination.PeerQueryParam) == "" {
+		job = s.currentJob(state.Job, req.APIKey)
+	}
+
+	if job == nil {
 		return Entity{
 			Class:      []string{"job"},
-			Title:      "No power operation has run on this node",
+			Title:      "No power operation has run on either API node",
 			Properties: map[string]any{"state": "none", "node": s.node},
 			Links: []Link{
 				{Rel: []string{"self"}, Href: s.router.Href("/job")},
@@ -262,10 +286,32 @@ func (s *Server) handleJob(_ context.Context, state State, _ request) (Entity, i
 		}, http.StatusOK, nil
 	}
 
-	e := s.jobEntity(*state.Job)
+	e := s.jobEntity(*job)
 	e.Rel = nil
 	e.Links = append(e.Links, Link{Rel: []string{"up"}, Href: s.router.Href("/")})
 	return e, http.StatusOK, nil
+}
+
+// currentJob is what makes GET /job report the same job regardless of which
+// of pi0/pi1 answered: it merges this node's own last job with its peer's,
+// via coordination.NewestJob. See peerJob for the fallback when there is no
+// peer to ask.
+func (s *Server) currentJob(local *coordination.Job, apiKey string) *coordination.Job {
+	return coordination.NewestJob(local, s.peerJob(apiKey))
+}
+
+// peerJob asks this node's peer for its own current or last job, tolerating
+// no PeerSet at all (nil-safe, matching every other s.peers seam in this
+// package) or a peer that cannot be reached -- both report as nil here, the
+// same "continue anyway" tolerance PeerSet.Busy already applies before
+// starting a job. Shared by currentJob and handleStatus so a route that needs
+// both the job and whether the peer is busy pays for one peer round trip, not
+// two.
+func (s *Server) peerJob(apiKey string) *coordination.Job {
+	if s.peers == nil {
+		return nil
+	}
+	return s.peers.FetchJob(s.node, apiKey)
 }
 
 func (s *Server) jobEntity(j coordination.Job) Entity {
