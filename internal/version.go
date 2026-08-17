@@ -6,4 +6,4 @@ package internal
 //
 // NetBSD package names use a dash to separate name from version, so this must
 // never contain a dash (use "1.2.3rc1", not "1.2.3-rc1").
-const Version = "v0.5.1"
+const Version = "v0.6.0"
