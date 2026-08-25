@@ -1,6 +1,7 @@
 package coordination
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -20,9 +21,9 @@ type fetchCall struct {
 func fakeFetcher(byAddr map[string]struct {
 	job *Job
 	err error
-}) (func(addr, path, apiKey string) (*Job, error), *[]fetchCall) {
+}) (func(ctx context.Context, addr, path, apiKey string) (*Job, error), *[]fetchCall) {
 	calls := &[]fetchCall{}
-	fn := func(addr, path, apiKey string) (*Job, error) {
+	fn := func(ctx context.Context, addr, path, apiKey string) (*Job, error) {
 		*calls = append(*calls, fetchCall{addr, path, apiKey})
 		r, ok := byAddr[addr]
 		if !ok {
@@ -44,7 +45,7 @@ func TestPeerSetBusyDetectsPeerRunning(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/cgi-bin/f3sctl/job", fetch: fetch}
 
-	busy, node := ps.Busy("pi0", "sekrit")
+	busy, node := ps.Busy(context.Background(), "pi0", "sekrit")
 	if !busy {
 		t.Fatal("Busy() = false, want true: the peer reported a running job")
 	}
@@ -67,7 +68,7 @@ func TestPeerSetBusyReturnsFalseWhenPeerIsIdle(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
 
-	if busy, node := ps.Busy("pi0", "k"); busy {
+	if busy, node := ps.Busy(context.Background(), "pi0", "k"); busy {
 		t.Errorf("Busy() = (true, %q), want false: the peer's job is done, not running", node)
 	}
 }
@@ -85,7 +86,7 @@ func TestPeerSetBusyTreatsAnUnreachablePeerAsIdle(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
 
-	busy, _ := ps.Busy("pi0", "k")
+	busy, _ := ps.Busy(context.Background(), "pi0", "k")
 	if busy {
 		t.Error("Busy() = true, want false: an unreachable peer must count as idle")
 	}
@@ -107,7 +108,7 @@ func TestPeerSetBusyChecksEveryNodeUntilOneIsBusy(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, JobPath: "/job", fetch: fetch}
 
-	busy, node := ps.Busy("pi0", "k")
+	busy, node := ps.Busy(context.Background(), "pi0", "k")
 	if !busy || node != "third" {
 		t.Errorf("Busy() = (%v, %q), want (true, \"third\")", busy, node)
 	}
@@ -139,7 +140,7 @@ func TestPeerSetBusySkipsItselfByInterfaceAddress(t *testing.T) {
 		},
 	}
 
-	busy, node := ps.Busy("earth", "k")
+	busy, node := ps.Busy(context.Background(), "earth", "k")
 	if !busy || node != "other" {
 		t.Fatalf("Busy() = (%v, %q), want (true, \"other\")", busy, node)
 	}
@@ -174,7 +175,7 @@ func TestPeerSetBusySkipsItselfByHostnameLookup(t *testing.T) {
 		localAddrs: func() ([]net.Addr, error) { return nil, nil },
 	}
 
-	busy, node := ps.Busy("pi0.mesh.internal", "k")
+	busy, node := ps.Busy(context.Background(), "pi0.mesh.internal", "k")
 	if !busy || node != "pi1" {
 		t.Fatalf("Busy() = (%v, %q), want (true, \"pi1\")", busy, node)
 	}
@@ -228,7 +229,7 @@ func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
 		warn:    func(addr string, err error) { warns = append(warns, warnCall{addr, err}) },
 	}
 
-	ps.Busy("pi0", "k")
+	ps.Busy(context.Background(), "pi0", "k")
 
 	if len(warns) != 1 {
 		t.Fatalf("warn called %d times, want exactly 1", len(warns))
@@ -273,7 +274,7 @@ func TestPeerSetFetchJobReturnsThePeersJob(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
 
-	got := ps.FetchJob("pi0", "k")
+	got := ps.FetchJob(context.Background(), "pi0", "k")
 	if got == nil || got.ID != "abc" {
 		t.Fatalf("FetchJob() = %v, want the peer's job (id \"abc\")", got)
 	}
@@ -295,7 +296,7 @@ func TestPeerSetFetchJobReturnsNilWhenUnreachable(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
 
-	if got := ps.FetchJob("pi0", "k"); got != nil {
+	if got := ps.FetchJob(context.Background(), "pi0", "k"); got != nil {
 		t.Errorf("FetchJob() = %v, want nil for an unreachable peer", got)
 	}
 }
@@ -314,7 +315,7 @@ func TestPeerSetFetchJobSkipsAPeerWithNoJobInFavourOfOneWithOne(t *testing.T) {
 	})
 	ps := &PeerSet{Nodes: []string{"10.0.0.1", "10.0.0.2"}, JobPath: "/job", fetch: fetch}
 
-	got := ps.FetchJob("pi0", "k")
+	got := ps.FetchJob(context.Background(), "pi0", "k")
 	if got == nil || got.ID != "found" {
 		t.Errorf("FetchJob() = %v, want the second node's job", got)
 	}
@@ -333,7 +334,7 @@ func TestFetchPeerJobMarksTheRequestAsAPeerQuery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	job, err := fetchPeerJob(srv.Listener.Addr().String(), "/job", "k")
+	job, err := fetchPeerJob(context.Background(), srv.Listener.Addr().String(), "/job", "k")
 	if err != nil {
 		t.Fatalf("fetchPeerJob: %v", err)
 	}
@@ -356,7 +357,7 @@ func TestFetchPeerJobReportsNoJobAsNilNotError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	job, err := fetchPeerJob(srv.Listener.Addr().String(), "/job", "k")
+	job, err := fetchPeerJob(context.Background(), srv.Listener.Addr().String(), "/job", "k")
 	if err != nil {
 		t.Fatalf("fetchPeerJob: %v, want nil error for a peer reporting no job", err)
 	}

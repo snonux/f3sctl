@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/snonux/f3sctl/internal/client"
 	"github.com/snonux/f3sctl/internal/config"
@@ -113,6 +117,14 @@ func isShutdown(args []string) bool {
 }
 
 // runRemote drives the command through the HTTP API.
+//
+// The work -- a remote power-off -- is long: the job it starts polls for up
+// to jobWaitTimeout (~25m) while the rack shuts down and comes back up. A
+// context bound to SIGINT lets a Ctrl-C cancel that poll (and any in-flight
+// HTTP request) instead of being ignored for the whole wait, which is the
+// difference between an interruptible tool and one a stuck operator has to
+// kill from another terminal. The cancellation is cooperative: every client
+// round trip and waitForJob's loop honors ctx.Done().
 func runRemote(cfg config.Config, args []string, flags globalFlags, stdout, stderr io.Writer) error {
 	key, err := cfg.ResolveAPIKey()
 	if err != nil {
@@ -130,5 +142,8 @@ func runRemote(cfg config.Config, args []string, flags globalFlags, stdout, stde
 		fmt.Fprintf(stderr, "f3sctl: API base %s\n", url)
 		c.Verbose(stderr)
 	}
-	return client.Run(c, args, flags.force)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return client.Run(ctx, c, args, flags.force)
 }

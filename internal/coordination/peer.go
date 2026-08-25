@@ -10,6 +10,7 @@
 package coordination
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,7 +53,7 @@ type PeerSet struct {
 	// fetch retrieves one peer's current job over HTTP. Nil means the real
 	// network call; only tests substitute anything else -- the same seam as
 	// power.Engine.isUp.
-	fetch func(addr, path, apiKey string) (*Job, error)
+	fetch func(ctx context.Context, addr, path, apiKey string) (*Job, error)
 	// localAddrs lists this machine's own network addresses. Nil means the
 	// real net.InterfaceAddrs; only tests substitute anything else.
 	localAddrs func() ([]net.Addr, error)
@@ -78,6 +79,12 @@ func NewPeerSet(nodes []string, jobPath string) *PeerSet {
 // running. self is this node's own hostname (so it is never asked), and
 // apiKey authenticates the request the same way a client would.
 //
+// ctx bounds the peer fetch: an unreachable peer already fails fast through
+// the client's own 3s timeout (see fetchPeerJob), but a cancelled request
+// context -- the CGI request that started this action going home, say -- now
+// stops waiting on a peer that is neither idle nor answering rather than
+// running the request's full deadline out first.
+//
 // Failing to reach a peer is deliberately NOT treated as "busy": the peers
 // are the machines that answer this API, and if one is unreachable the other
 // must still be able to power the cluster on. Refusing to act because a peer
@@ -89,7 +96,7 @@ func NewPeerSet(nodes []string, jobPath string) *PeerSet {
 // look identical, from the field, to a peer that is genuinely down. The
 // behaviour -- treat as idle -- does not change; only whether anything is
 // left behind to debug it with.
-func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
+func (ps *PeerSet) Busy(ctx context.Context, self, apiKey string) (bool, string) {
 	selfHost := shortHost(self)
 
 	for _, addr := range ps.Nodes {
@@ -97,7 +104,7 @@ func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 			continue
 		}
 
-		job, err := ps.fetchPeer(addr, apiKey)
+		job, err := ps.fetchPeer(ctx, addr, apiKey)
 		if err != nil {
 			ps.warnFunc()(addr, err)
 			continue
@@ -112,7 +119,8 @@ func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 // FetchJob asks each node in the set for its current or last job in turn,
 // returning the first one that answers -- so that GET /job (httpapi's
 // currentJob) can report the same job regardless of which of pi0/pi1 relayd
-// routed the request to. self and apiKey are as in Busy.
+// routed the request to. self and apiKey are as in Busy; ctx is as in Busy
+// too (bounds the peer fetch against the request that asked for it).
 //
 // Consulting more than one node only matters once the set holds more than
 // the pair this project actually runs; with exactly one peer it is just
@@ -121,7 +129,7 @@ func (ps *PeerSet) Busy(self, apiKey string) (bool, string) {
 // which is what happened before this existed. A peer that answers but
 // reports no job at all (fetchPeerJob's nil, nil case) is likewise skipped,
 // so a later, reachable peer that *does* have one still gets a chance.
-func (ps *PeerSet) FetchJob(self, apiKey string) *Job {
+func (ps *PeerSet) FetchJob(ctx context.Context, self, apiKey string) *Job {
 	selfHost := shortHost(self)
 
 	for _, addr := range ps.Nodes {
@@ -129,7 +137,7 @@ func (ps *PeerSet) FetchJob(self, apiKey string) *Job {
 			continue
 		}
 
-		job, err := ps.fetchPeer(addr, apiKey)
+		job, err := ps.fetchPeer(ctx, addr, apiKey)
 		if err != nil {
 			ps.warnFunc()(addr, err)
 			continue
@@ -141,11 +149,11 @@ func (ps *PeerSet) FetchJob(self, apiKey string) *Job {
 	return nil
 }
 
-func (ps *PeerSet) fetchPeer(addr, apiKey string) (*Job, error) {
+func (ps *PeerSet) fetchPeer(ctx context.Context, addr, apiKey string) (*Job, error) {
 	if ps.fetch != nil {
-		return ps.fetch(addr, ps.JobPath, apiKey)
+		return ps.fetch(ctx, addr, ps.JobPath, apiKey)
 	}
-	return fetchPeerJob(addr, ps.JobPath, apiKey)
+	return fetchPeerJob(ctx, addr, ps.JobPath, apiKey)
 }
 
 // warnFunc returns the peer-fetch-failure reporter, falling back to the real
@@ -239,10 +247,10 @@ const PeerQueryParam = "peer"
 // stay one: the latter is what Busy and FetchJob warn about and skip past as
 // "peer unreachable", while the former is a peer that answered perfectly
 // well and simply has no job to report.
-func fetchPeerJob(addr, path, apiKey string) (*Job, error) {
+func fetchPeerJob(ctx context.Context, addr, path, apiKey string) (*Job, error) {
 	url := fmt.Sprintf("http://%s%s?%s=1", addr, path, PeerQueryParam)
 
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}

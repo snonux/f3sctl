@@ -40,8 +40,8 @@ func (s *Server) handleRoot(_ context.Context, state State, _ request) (Entity, 
 // merged job entity, so deriving PeerBusy from that same fetch avoids paying
 // for a second, separate peer round trip against a peer that may be slow or
 // unreachable.
-func (s *Server) handleStatus(_ context.Context, state State, req request) (Entity, int, error) {
-	peer := s.peerJob(req.APIKey)
+func (s *Server) handleStatus(ctx context.Context, state State, req request) (Entity, int, error) {
+	peer := s.peerJob(ctx, req.APIKey)
 	state.PeerBusy = peer != nil && peer.State == coordination.JobRunning
 
 	e := Entity{
@@ -268,10 +268,10 @@ func (s *Server) setMute(ctx context.Context, state State, mute bool) (Entity, i
 // ordinary client sees the same job regardless of which of pi0/pi1 it landed
 // on -- see currentJob and coordination.PeerQueryParam for the rest of this
 // contract.
-func (s *Server) handleJob(_ context.Context, state State, req request) (Entity, int, error) {
+func (s *Server) handleJob(ctx context.Context, state State, req request) (Entity, int, error) {
 	job := state.Job
 	if req.Query.Get(coordination.PeerQueryParam) == "" {
-		job = s.currentJob(state.Job, req.APIKey)
+		job = s.currentJob(ctx, state.Job, req.APIKey)
 	}
 
 	if job == nil {
@@ -296,8 +296,8 @@ func (s *Server) handleJob(_ context.Context, state State, req request) (Entity,
 // of pi0/pi1 answered: it merges this node's own last job with its peer's,
 // via coordination.NewestJob. See peerJob for the fallback when there is no
 // peer to ask.
-func (s *Server) currentJob(local *coordination.Job, apiKey string) *coordination.Job {
-	return coordination.NewestJob(local, s.peerJob(apiKey))
+func (s *Server) currentJob(ctx context.Context, local *coordination.Job, apiKey string) *coordination.Job {
+	return coordination.NewestJob(local, s.peerJob(ctx, apiKey))
 }
 
 // peerJob asks this node's peer for its own current or last job, tolerating
@@ -307,11 +307,11 @@ func (s *Server) currentJob(local *coordination.Job, apiKey string) *coordinatio
 // starting a job. Shared by currentJob and handleStatus so a route that needs
 // both the job and whether the peer is busy pays for one peer round trip, not
 // two.
-func (s *Server) peerJob(apiKey string) *coordination.Job {
+func (s *Server) peerJob(ctx context.Context, apiKey string) *coordination.Job {
 	if s.peers == nil {
 		return nil
 	}
-	return s.peers.FetchJob(s.node, apiKey)
+	return s.peers.FetchJob(ctx, s.node, apiKey)
 }
 
 func (s *Server) jobEntity(j coordination.Job) Entity {
@@ -380,18 +380,21 @@ func jobHostProps(hosts map[string]coordination.HostProgress) map[string]any {
 // The response is 202: the work has been accepted, not completed. A client
 // follows the job link until its state leaves "running".
 func handleAction(action string) func(*Server, context.Context, State, request) (Entity, int, error) {
-	// ctx is unused here: neither PeerSet.Busy (its own short client timeout,
-	// see its doc comment) nor Manager.Start takes one. Start spawns a
-	// detached child that re-execs and outlives this CGI request by design --
-	// see internal/coordination/run.go -- so even if Start grew a context
-	// parameter, the request's ctx would be the wrong one to give it; the job
-	// must keep running after the response that started it has been sent.
-	return func(s *Server, _ context.Context, _ State, req request) (Entity, int, error) {
+	// ctx bounds the peer-busy check (PeerSet.Busy now takes one): the
+	// other API node is asked before the local flock is taken, and a
+	// cancelled request -- the CGI client that went home -- stops waiting on
+	// a peer that is neither idle nor answering. It is NOT threaded into
+	// Manager.Start: Start spawns a detached child that re-execs and outlives
+	// this CGI request by design -- see internal/coordination/run.go -- so
+	// even if Start grew a context parameter, the request's ctx would be the
+	// wrong one to give it; the job must keep running after the response that
+	// started it has been sent.
+	return func(s *Server, ctx context.Context, _ State, req request) (Entity, int, error) {
 		// Ask the other API node first. The local flock only serialises
 		// requests that reach THIS node, and relayd load-balances the two, so
 		// without this two clicks seconds apart start two shutdowns against
 		// the same hosts -- observed on 2026-08-08.
-		if busy, node := s.peers.Busy(s.node, req.APIKey); busy {
+		if busy, node := s.peers.Busy(ctx, s.node, req.APIKey); busy {
 			return Entity{}, http.StatusConflict,
 				fmt.Errorf("a power operation is already running on %s", node)
 		}

@@ -21,6 +21,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -247,7 +248,14 @@ func (c *Client) resolve(href string) (string, error) {
 }
 
 // do performs one request and decodes the entity.
-func (c *Client) do(href, method string, form url.Values) (Entity, error) {
+//
+// ctx bounds the round trip: it is plumbed into http.NewRequestWithContext so a
+// cancelled caller -- the CGI request that went home, or a `--remote` job
+// poll interrupted with Ctrl-C (see waitForJob) -- stops the in-flight HTTP
+// call rather than running the client's own 60s timeout out first. The
+// client's per-request Timeout still applies as a backstop for a caller that
+// hands over an unbounded context.
+func (c *Client) do(ctx context.Context, href, method string, form url.Values) (Entity, error) {
 	var e Entity
 
 	abs, err := c.resolve(href)
@@ -260,7 +268,7 @@ func (c *Client) do(href, method string, form url.Values) (Entity, error) {
 		body = bytes.NewBufferString(form.Encode())
 	}
 
-	req, err := http.NewRequest(method, abs, body)
+	req, err := http.NewRequestWithContext(ctx, method, abs, body)
 	if err != nil {
 		return e, err
 	}
@@ -351,8 +359,8 @@ func traceFields(form url.Values) string {
 }
 
 // Root fetches the entry point and checks the API version.
-func (c *Client) Root() (Entity, error) {
-	e, err := c.do("", http.MethodGet, nil)
+func (c *Client) Root(ctx context.Context) (Entity, error) {
+	e, err := c.do(ctx, "", http.MethodGet, nil)
 	if err != nil {
 		return e, err
 	}
@@ -370,19 +378,19 @@ func (c *Client) Root() (Entity, error) {
 const SupportedAPIVersion = 1
 
 // Follow fetches a linked resource by relation.
-func (c *Client) Follow(from Entity, rel string) (Entity, error) {
+func (c *Client) Follow(ctx context.Context, from Entity, rel string) (Entity, error) {
 	href, ok := from.Link(rel)
 	if !ok {
 		return Entity{}, fmt.Errorf("the API offers no %q resource", rel)
 	}
-	return c.do(href, http.MethodGet, nil)
+	return c.do(ctx, href, http.MethodGet, nil)
 }
 
 // Perform invokes an action, filling any fields it declares.
 //
 // Nothing here knows what a particular field means: a required checkbox is
 // satisfied by confirm, and its own title is what gets shown when it is not.
-func (c *Client) Perform(a Action, confirm bool) (Entity, error) {
+func (c *Client) Perform(ctx context.Context, a Action, confirm bool) (Entity, error) {
 	form := url.Values{}
 	sawForce := false
 	for _, f := range a.Fields {
@@ -414,5 +422,5 @@ func (c *Client) Perform(a Action, confirm bool) (Entity, error) {
 		form.Set("force", "true")
 	}
 
-	return c.do(a.Href, a.Method, form)
+	return c.do(ctx, a.Href, a.Method, form)
 }

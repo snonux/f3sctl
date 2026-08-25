@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -182,7 +183,7 @@ func TestRunFansOffForceSendsTheForceFieldWhenAdvertised(t *testing.T) {
 	api := newFakeAPI(t, "correct-key")
 	c := newTestClient(t, api.srv.URL, "correct-key")
 
-	if err := Run(c, []string{"fans", "off"}, true); err != nil {
+	if err := Run(context.Background(), c, []string{"fans", "off"}, true); err != nil {
 		t.Fatalf("Run(fans off, force=true): %v", err)
 	}
 
@@ -201,7 +202,7 @@ func TestRunFansOffWithoutForceIsRefusedBeforeAnyRequestIsSent(t *testing.T) {
 	api := newFakeAPI(t, "correct-key")
 	c := newTestClient(t, api.srv.URL, "correct-key")
 
-	err := Run(c, []string{"fans", "off"}, false)
+	err := Run(context.Background(), c, []string{"fans", "off"}, false)
 	if err == nil {
 		t.Fatal("Run(fans off, force=false) succeeded; the required checkbox was never confirmed")
 	}
@@ -228,7 +229,7 @@ func TestRunFansOffForceIsSentEvenWhenTheColdSnapshotOmittedTheField(t *testing.
 	api.coldSnapshot = true
 	c := newTestClient(t, api.srv.URL, "correct-key")
 
-	if err := Run(c, []string{"fans", "off"}, true); err != nil {
+	if err := Run(context.Background(), c, []string{"fans", "off"}, true); err != nil {
 		t.Fatalf("Run(fans off, force=true) against a cold-snapshot advertisement: %v", err)
 	}
 
@@ -249,7 +250,7 @@ func TestRunFansOffWithoutForceStill409sWhenTheConfirmingProbeDisagrees(t *testi
 	api.coldSnapshot = true
 	c := newTestClient(t, api.srv.URL, "correct-key")
 
-	err := Run(c, []string{"fans", "off"}, false)
+	err := Run(context.Background(), c, []string{"fans", "off"}, false)
 	if err == nil {
 		t.Fatal("Run(fans off, force=false) succeeded even though the confirming probe found a host up")
 	}
@@ -268,7 +269,7 @@ func TestRunRejectsAWrongAPIKey(t *testing.T) {
 	api := newFakeAPI(t, "correct-key")
 	c := newTestClient(t, api.srv.URL, "wrong-key")
 
-	err := Run(c, []string{"fans", "off"}, true)
+	err := Run(context.Background(), c, []string{"fans", "off"}, true)
 	if err == nil {
 		t.Fatal("Run with a wrong API key succeeded")
 	}
@@ -290,7 +291,7 @@ func TestRootRejectsAMalformedResponse(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := newTestClient(t, srv.URL, "any-key")
-	_, err := c.Root()
+	_, err := c.Root(context.Background())
 	if err == nil {
 		t.Fatal("Root() against a malformed response succeeded")
 	}
@@ -310,7 +311,7 @@ func TestRunReportsAnUnreachableServer(t *testing.T) {
 	srv.Close() // closed before any request is made, so the port refuses the connection
 
 	c := newTestClient(t, base, "any-key")
-	err := Run(c, []string{"fans", "off"}, true)
+	err := Run(context.Background(), c, []string{"fans", "off"}, true)
 	if err == nil {
 		t.Fatal("Run against a closed server succeeded")
 	}

@@ -350,7 +350,7 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// gives: if one node is down the other must still be able to power the
 	// cluster on.
 	if req.Path != openAPIPath && req.Path != jobPath && req.Path != statusPath {
-		state.PeerBusy, _ = s.peers.Busy(s.node, req.APIKey)
+		state.PeerBusy, _ = s.peers.Busy(ctx, s.node, req.APIKey)
 	}
 
 	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round

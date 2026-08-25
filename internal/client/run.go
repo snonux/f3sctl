@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -56,20 +57,26 @@ func (c *Client) jobWaitTimeout() time.Duration {
 }
 
 // Run executes a CLI command against the remote API.
-func Run(c *Client, args []string, force bool) error {
+//
+// ctx bounds every round trip and the job poll: a `--remote` run interrupted
+// with Ctrl-C (runRemote wires signal.NotifyContext) stops mid-poll rather
+// than looping for up to jobWaitTimeout (~25m) with no way out, and a
+// cancelled HTTP call stops the in-flight request rather than running the
+// client's own 60s timeout out first.
+func Run(ctx context.Context, c *Client, args []string, force bool) error {
 	cmd := strings.Join(args, " ")
 
 	if cmd == "power status" || cmd == "fans status" {
-		return c.showStatus()
+		return c.showStatus(ctx)
 	}
 	if cmd == "monitoring status" {
-		return c.showMonitoring()
+		return c.showMonitoring(ctx)
 	}
 
 	// args[0] is the CLI noun ("power", "fans", "monitoring"). Where the root
 	// has a link with that rel, the matching resource is where the action is
 	// advertised -- see runAction.
-	return c.runAction(cmd, args[0], force)
+	return c.runAction(ctx, cmd, args[0], force)
 }
 
 // runAction performs the action whose declared CLI verb is cmd, looking for
@@ -93,15 +100,15 @@ func Run(c *Client, args []string, force bool) error {
 // The rel is derived from the CLI noun and checked against the root's links, so
 // this stays discovery-driven: no action name or path is hard-coded, and a
 // noun with no matching link (like "power") simply falls back to the root.
-func (c *Client) runAction(cmd, holderRel string, force bool) error {
-	root, err := c.Root()
+func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force bool) error {
+	root, err := c.Root(ctx)
 	if err != nil {
 		return err
 	}
 
 	holder := root
 	if _, ok := root.Link(holderRel); ok {
-		if e, err := c.Follow(root, holderRel); err == nil {
+		if e, err := c.Follow(ctx, root, holderRel); err == nil {
 			holder = e
 		}
 	}
@@ -115,12 +122,12 @@ func (c *Client) runAction(cmd, holderRel string, force bool) error {
 		// judged against is more useful than a bare error.
 		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
 		if holderRel == "monitoring" {
-			return c.showMonitoring()
+			return c.showMonitoring(ctx)
 		}
-		return c.showStatus()
+		return c.showStatus(ctx)
 	}
 
-	result, err := c.Perform(action, force)
+	result, err := c.Perform(ctx, action, force)
 	if err != nil {
 		return err
 	}
@@ -130,15 +137,15 @@ func (c *Client) runAction(cmd, holderRel string, force bool) error {
 	if state, _ := result.Properties["state"].(string); state == "running" {
 		id, _ := result.Properties["id"].(string)
 		fmt.Fprintf(c.stdout, "%s accepted; waiting for it to finish...\n", action.Name)
-		return c.waitForJob(root, id)
+		return c.waitForJob(ctx, root, id)
 	}
 
 	if strings.HasPrefix(action.Name, "monitoring-") {
-		return c.showMonitoring()
+		return c.showMonitoring(ctx)
 	}
 
 	fmt.Fprintf(c.stdout, "%s: done\n", action.Name)
-	return c.showStatus()
+	return c.showStatus(ctx)
 }
 
 // showMonitoring renders the Gogios mute for each gateway.
@@ -146,12 +153,12 @@ func (c *Client) runAction(cmd, holderRel string, force bool) error {
 // Followed from the root's "monitoring" link rather than fetched from a known
 // path: the state is only read when asked for, because it costs the server an
 // SSH round trip to each gateway.
-func (c *Client) showMonitoring() error {
-	root, err := c.Root()
+func (c *Client) showMonitoring(ctx context.Context) error {
+	root, err := c.Root(ctx)
 	if err != nil {
 		return err
 	}
-	mon, err := c.Follow(root, "monitoring")
+	mon, err := c.Follow(ctx, root, "monitoring")
 	if err != nil {
 		return err
 	}
@@ -197,14 +204,28 @@ func (c *Client) showMonitoring() error {
 // tracks the server's actual worst-case runtime -- see jobWaitTimeout's
 // comment for why an independent constant caused a "gave up" report on
 // 2026-08-09 for a job that succeeded moments later.
-func (c *Client) waitForJob(root Entity, id string) error {
+func (c *Client) waitForJob(ctx context.Context, root Entity, id string) error {
 	timeout := c.jobWaitTimeout()
-	deadline := time.Now().Add(timeout)
+	// Bound the wait by BOTH the caller's ctx and the server's worst-case
+	// runtime: a Ctrl-C (runRemote wires signal.NotifyContext) cancels ctx, and
+	// a caller that handed over an unbounded context still gives up after
+	// jobWaitTimeout rather than looping forever. Whichever fires first wins.
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	for time.Now().Before(deadline) {
-		time.Sleep(jobPollInterval)
+	for {
+		select {
+		case <-ctx.Done():
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("gave up waiting for the job after %s", timeout)
+			}
+			// The caller cancelled (Ctrl-C, or the request that drove this went
+			// home). Surface that rather than reporting a synthetic "gave up".
+			return ctx.Err()
+		case <-time.After(jobPollInterval):
+		}
 
-		job, err := c.pollJob(root, id)
+		job, err := c.pollJob(ctx, root, id)
 		if err != nil {
 			// A transient network blip mid-shutdown is expected -- the
 			// cluster is, after all, being taken apart.
@@ -234,10 +255,9 @@ func (c *Client) waitForJob(root Entity, id string) error {
 			} else {
 				fmt.Fprintf(c.stdout, "job %s\n", state)
 			}
-			return c.showStatus()
+			return c.showStatus(ctx)
 		}
 	}
-	return fmt.Errorf("gave up waiting for the job after %s", timeout)
 }
 
 // jobPollInterval is the gap between polling cycles, and jobPollRetries is how
@@ -262,15 +282,22 @@ const (
 //
 // The retries are deliberately bounded and slow enough to stay polite: this is
 // a CGI on a Raspberry Pi, and the job it is reporting on takes minutes.
-func (c *Client) pollJob(root Entity, id string) (*Entity, error) {
+func (c *Client) pollJob(ctx context.Context, root Entity, id string) (*Entity, error) {
 	var lastErr error
 
 	for attempt := 0; attempt < jobPollRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(jobRetryGap)
+			// Stop retrying the moment the caller is cancelled, rather than
+			// paying jobPollRetries more reads into a poll nobody is waiting
+			// on.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(jobRetryGap):
+			}
 		}
 
-		job, err := c.Follow(root, "job")
+		job, err := c.Follow(ctx, root, "job")
 		if err != nil {
 			lastErr = err
 			continue
@@ -292,12 +319,12 @@ func (c *Client) pollJob(root Entity, id string) (*Entity, error) {
 // this was unified -- see ry0. ShowRole is deliberately false: see
 // presenter.Options.ShowRole for why the remote client does not reach into a
 // host entity's "class" array for the role hiding there.
-func (c *Client) showStatus() error {
-	root, err := c.Root()
+func (c *Client) showStatus(ctx context.Context) error {
+	root, err := c.Root(ctx)
 	if err != nil {
 		return err
 	}
-	statusEntity, err := c.Follow(root, "status")
+	statusEntity, err := c.Follow(ctx, root, "status")
 	if err != nil {
 		return err
 	}
