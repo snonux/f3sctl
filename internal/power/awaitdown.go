@@ -43,11 +43,15 @@ const powerDownTimeout = 2 * time.Minute
 // that is too tight kills healthy jobs.
 //
 // It deliberately leaves out the zusb pre-flight, the local NFS unmount and
-// the Gogios mute calls that run before shutdownEach: none of them carries a
-// timeout of its own (each is bounded only by ctx, which every caller here
-// leaves open-ended), so there is no config value to derive a number for.
-// They finish in seconds on a healthy run; coordination.staleBuffer's slack
-// exists to absorb that, not this function.
+// the Gogios mute calls that run before shutdownEach. They each now carry
+// a per-operation backstop timeout of their own (cfg.UmountTimeout for the
+// umount, cfg.SSHVerbTimeout for the zusb and Gogios verbs), so a wedge
+// aborts in bounded time rather than holding the lock open-ended; this
+// function still excludes them because on a healthy run they finish in
+// seconds and coordination.staleBuffer's slack exists to absorb that
+// (and, now, the bounded abort), not because the number is unknowable.
+// staleBuffer absorbs a *bounded* wedge, so the ceiling it computes must
+// not also count it, or a healthy run would be double-counted.
 //
 // Exported so coordination.NewManager can derive the server's job-staleness
 // ceiling from it -- see kz0. Using cfg.VMShutdownTimeout here is that

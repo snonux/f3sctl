@@ -113,6 +113,47 @@ type Config struct {
 
 	// SSHConnectTimeout bounds establishing an SSH connection to a host.
 	SSHConnectTimeout Duration `json:"ssh_connect_timeout"`
+
+	// SSHVerbTimeout bounds a single agent verb run over SSH end-to-end:
+	// connection establishment plus the verb's execution on the remote host.
+	// It is a backstop against a verb that hangs for a reason the remote
+	// agent does not bound itself -- a wedged ssh(1) after connect, a verb
+	// other than poweroff whose remote work has no internal deadline -- so a
+	// wedge becomes a clean abort the caller can report rather than a job
+	// that holds its lock until stale() fires.
+	//
+	// It must exceed VMShutdownTimeout + SSHConnectTimeout: the poweroff verb
+	// legitimately waits up to VMShutdownTimeout for its bhyve guests to stop
+	// (see VMShutdownTimeout's own doc, and the agent's internal bound in
+	// internal/agent/poweroff.go), plus connect time on top. The poweroff verb
+	// returns at `poweroff`(8), which signals init and comes back before the
+	// host's rc.shutdown runs to completion, so SSHVerbTimeout has no coupling
+	// to rcshutdown_timeout -- that constraint belongs to VMShutdownTimeout
+	// alone. The default leaves generous slack above the legitimate bound so
+	// a healthy shutdown is never cut short while a genuinely wedged verb
+	// still aborts in minutes, not tens of them.
+	SSHVerbTimeout Duration `json:"ssh_verb_timeout"`
+
+	// UmountTimeout bounds a single umount(8) of a locally mounted NFS
+	// filesystem during the shutdown pre-flight (checkLocalNFS). A hard NFS
+	// mount against a server that has gone away blocks umount(8) indefinitely,
+	// which used to wedge the whole power-off job -- holding its lock until
+	// stale() fired ~20 minutes later. Bounding it turns that wedge into a
+	// clean error checkLocalNFS already knows how to act on (abort the
+	// shutdown before the rack is touched). 30s is generous for a healthy
+	// unmount, which is sub-second, and short enough that a dead server does
+	// not stall a shutdown the operator is watching.
+	UmountTimeout Duration `json:"umount_timeout"`
+
+	// CGITimeout bounds a single CGI request served by the HTTP API. The
+	// detached power job is spawned by the request but deliberately outlives
+	// it (see handleAction), so this bounds only the request itself: the
+	// fleet probe, the Shelly plug read, the peer job round trip and the
+	// fan-guard re-confirm a `fans off` runs -- all of which finish in tens of
+	// seconds on a healthy rack. It is a backstop so a request wedged on a
+	// slow or dead backend aborts cleanly rather than holding the CGI
+	// process open indefinitely.
+	CGITimeout Duration `json:"cgi_timeout"`
 }
 
 // Default returns the compiled-in configuration.
@@ -138,6 +179,9 @@ func Default() Config {
 		UnmuteTimeout:     Duration(1200 * time.Second),
 		ProbeTimeout:      Duration(2 * time.Second),
 		SSHConnectTimeout: Duration(5 * time.Second),
+		SSHVerbTimeout:    Duration(360 * time.Second),
+		UmountTimeout:     Duration(30 * time.Second),
+		CGITimeout:        Duration(120 * time.Second),
 	}
 }
 

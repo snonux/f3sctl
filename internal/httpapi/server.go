@@ -194,7 +194,15 @@ func (s *Server) serve(out io.Writer, req request) error {
 		return s.siren.WriteError(out, http.StatusNotFound, "no such resource: "+req.Path)
 	}
 
-	ctx := context.Background()
+	// Bound the request itself. The detached power job is spawned by the
+	// request but deliberately outlives it (handleAction passes no context to
+	// jobs.Start), so this never cancels a running job -- it bounds only what
+	// this request does synchronously: the fleet probe, the Shelly read, the
+	// peer job round trip and the fan-guard re-confirm a `fans off` runs. A
+	// request wedged on a slow or dead backend aborts here cleanly rather
+	// than holding the CGI process open indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.CGITimeout.D())
+	defer cancel()
 	state := s.enrichState(ctx, s.snapshot(ctx, req), req)
 
 	// An action that is not currently available is refused here, before any

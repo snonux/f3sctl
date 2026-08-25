@@ -198,6 +198,13 @@ func (n execNFS) Unmount(ctx context.Context, mountpoint string) (out string, er
 	if bin == "" {
 		return "", errors.New("umount(8) not found")
 	}
+	// Bound the umount itself: a hard NFS mount against a server that has
+	// gone away blocks umount(8) indefinitely, which used to wedge the whole
+	// power-off job (holding its lock until stale() fired ~20 minutes later).
+	// A timeout turns that wedge into a clean error checkLocalNFS already
+	// knows how to act on -- abort the shutdown before the rack is touched.
+	ctx, cancel := context.WithTimeout(ctx, n.e.cfg.UmountTimeout.D())
+	defer cancel()
 	raw, err := exec.CommandContext(ctx, bin, mountpoint).CombinedOutput()
 	return strings.TrimSpace(string(raw)), err
 }

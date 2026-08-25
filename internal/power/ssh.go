@@ -100,6 +100,16 @@ func (r *runner) agentVerbFull(ctx context.Context, h inventory.Host, verb strin
 	}
 	args := append(r.sshArgs(h, identity), verb)
 
+	// Bound the verb end-to-end (connect + execution) so a verb that hangs for
+	// a reason the remote agent does not bound itself -- a wedged ssh(1) after
+	// connect, a verb whose remote work has no internal deadline -- becomes a
+	// clean abort the caller can report, rather than holding its lock until
+	// stale() fires. The bound exceeds VMShutdownTimeout + connect so a
+	// legitimate poweroff (which waits up to VMShutdownTimeout for its guests
+	// to stop) is never cut short; see cfg.SSHVerbTimeout's doc.
+	ctx, cancel := context.WithTimeout(ctx, r.cfg.SSHVerbTimeout.D())
+	defer cancel()
+
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdout = &stdout
