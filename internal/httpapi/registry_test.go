@@ -24,10 +24,10 @@ func TestDefaultPeerJobPathIsDerived(t *testing.T) {
 
 // TestOpenAPICoversEveryRoute is the guard that keeps the two halves of
 // "self-describing" honest: the Siren actions a client sees at runtime and the
-// OpenAPI document a generator reads must both come from routes(), with
+// OpenAPI document a generator reads must both come from routes(inventory.Default()), with
 // neither inventing nor omitting an endpoint.
 func TestOpenAPICoversEveryRoute(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl")
+	router := NewRouter("/cgi-bin/f3sctl", inventory.Default())
 	doc := NewOpenAPIBuilder(router).Build()
 
 	paths, ok := doc["paths"].(map[string]any)
@@ -35,7 +35,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 		t.Fatal("openapi document has no paths object")
 	}
 
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if r.Path == openAPIPath {
 			continue
 		}
@@ -52,7 +52,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 	// And nothing in the document that is not a real route.
 	for path := range paths {
 		found := false
-		for _, r := range routes() {
+		for _, r := range routes(inventory.Default()) {
 			if router.Href(r.Path) == path {
 				found = true
 				break
@@ -68,7 +68,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 // which would make dispatch depend on declaration order.
 func TestRoutesAreUnique(t *testing.T) {
 	seen := map[string]string{}
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		key := r.Method + " " + r.Path
 		if prev, dup := seen[key]; dup {
 			t.Errorf("%s is served by both %q and %q", key, prev, r.Name)
@@ -285,7 +285,7 @@ func TestFansUnavailableWhenPlugUnreadable(t *testing.T) {
 // TestGETRoutesAreLinksNotActions ensures read-only routes never appear as
 // actions, which clients treat as state changes.
 func TestGETRoutesAreLinksNotActions(t *testing.T) {
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if r.Method == http.MethodGet && r.Action {
 			t.Errorf("route %q is a GET but marked as an action", r.Name)
 		}
@@ -299,7 +299,7 @@ func TestGETRoutesAreLinksNotActions(t *testing.T) {
 // without a matching CLI invocation, which would accept a request and then do
 // nothing at all.
 func TestEveryActionHasJobArgs(t *testing.T) {
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
 			continue
 		}
@@ -312,7 +312,7 @@ func TestEveryActionHasJobArgs(t *testing.T) {
 		case "power-off":
 			action = "off"
 		}
-		if args := jobArgs(action); len(args) == 0 {
+		if args := jobArgsFrom(routes(inventory.Default()), action); len(args) == 0 {
 			t.Errorf("action %q maps to no CLI invocation", r.Name)
 		}
 	}
@@ -327,7 +327,7 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 			if _, ok := routeByName(name); !ok {
 				t.Errorf("no %q action; %s cannot be powered individually", name, h.Name)
 			}
-			if _, ok := NewRouter("").Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
+			if _, ok := NewRouter("", inventory.Default()).Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
 				t.Errorf("no route serving POST /power/%s/%s", h.Name, verb)
 			}
 		}
@@ -440,7 +440,7 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 		// Job is nil: this node itself is idle, which is the whole point.
 	}
 
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
 			continue
 		}
@@ -526,7 +526,7 @@ func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
 	}
 	unprobed := State{}
 
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.SkipsProbe {
 			continue
 		}
@@ -547,7 +547,7 @@ func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
 }
 
 func routeByName(name string) (route, bool) {
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if r.Name == name {
 			return r, true
 		}

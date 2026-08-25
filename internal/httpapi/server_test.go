@@ -12,6 +12,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -42,7 +43,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 	}
 
 	pc := &probeCounter{}
-	router := NewRouter("")
+	router := NewRouter("", inventory.Default())
 	srv := &Server{
 		cfg:     config.Default(),
 		jobs:    coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
@@ -82,7 +83,7 @@ func getRequest(path string) request {
 // rather than a hardcoded literal, so remounting the CGI script needs one
 // change, not a config edit on top of it.
 func TestResolvePeerJobPathDerivesFromSCRIPTNAME(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl")
+	router := NewRouter("/cgi-bin/f3sctl", inventory.Default())
 	cfg := config.Default()
 	cfg.PeerJobPath = ""
 
@@ -97,7 +98,7 @@ func TestResolvePeerJobPathDerivesFromSCRIPTNAME(t *testing.T) {
 // other node's real path, so an explicit config value must win over the
 // SCRIPT_NAME-derived default.
 func TestResolvePeerJobPathHonoursExplicitOverride(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl")
+	router := NewRouter("/cgi-bin/f3sctl", inventory.Default())
 	cfg := config.Default()
 	cfg.PeerJobPath = "/somewhere/else/job"
 
@@ -117,7 +118,7 @@ func TestResolvePeerJobPathHonoursExplicitOverride(t *testing.T) {
 // prevent. With an empty router base and no explicit override,
 // resolvePeerJobPath must fall back to defaultCGIMount instead.
 func TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty(t *testing.T) {
-	router := NewRouter("") // SCRIPT_NAME empty or unset
+	router := NewRouter("", inventory.Default()) // SCRIPT_NAME empty or unset
 	cfg := config.Default()
 	cfg.PeerJobPath = ""
 
@@ -179,12 +180,12 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 // and handleUnmute all render only state.Monitoring; see handlers.go.
 func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
 	for _, path := range []string{"/monitoring", "/monitoring/mute", "/monitoring/unmute"} {
-		if !skipsProbe(path) {
+		if !skipsProbe(inventory.Default(), path) {
 			t.Errorf("skipsProbe(%q) = false, want true: no monitoring handler reads state.Hosts or state.Fans", path)
 		}
 	}
 	for _, path := range []string{"/", "/status", "/fans", "/fans/on", "/fans/off", "/power/off"} {
-		if skipsProbe(path) {
+		if skipsProbe(inventory.Default(), path) {
 			t.Errorf("skipsProbe(%q) = true, want false: this route's handler or Available predicates do read the probe", path)
 		}
 	}

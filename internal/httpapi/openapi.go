@@ -49,7 +49,7 @@ func NewOpenAPIBuilder(router *Router) *OpenAPIBuilder {
 func (b *OpenAPIBuilder) Build() map[string]any {
 	paths := map[string]any{}
 
-	for _, r := range routes() {
+	for _, r := range routes(b.router.inv) {
 		if r.Path == openAPIPath {
 			continue
 		}

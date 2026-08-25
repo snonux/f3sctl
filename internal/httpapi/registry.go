@@ -219,7 +219,18 @@ type route struct {
 // the cluster-wide power pair, per-host power, the fan plug, the Gogios mute
 // -- and grouping them by that concern keeps every one of these functions
 // short enough to read in one go, per this repo's function-length rule.
-func routes() []route {
+//
+// The per-host routes are generated from inv, the inventory this server was
+// configured with, NOT from inventory.Default(): power.New, ProbeAll and
+// every other site resolve the inventory through injected config.Config, so
+// the route table must too. Reading the compiled-in global here would build
+// the action routes from a different inventory than the one the engine acts
+// on -- an operator who overrode "inventory" in f3sctl.json would get new
+// hosts probed and shown in /status but no action route for them, and removed
+// hosts would keep a dead route -- and jobArgsFrom derives the detached
+// child's argv from these same routes, so the CLI<->API<->job contract would
+// miss the host as well.
+func routes(inv inventory.Inventory) []route {
 	out := resourceRoutes()
 	out = append(out, powerRoutes()...)
 	out = append(out, allHostsRoutes()...)
@@ -230,7 +241,7 @@ func routes() []route {
 	// Generated from the inventory rather than written out four times: adding
 	// a host to the inventory should not mean remembering to add two routes,
 	// two OpenAPI entries and two client mappings by hand.
-	for _, h := range inventory.Default().ByRole(inventory.RoleF) {
+	for _, h := range inv.ByRole(inventory.RoleF) {
 		out = append(out, hostRoutes(h.Name)...)
 	}
 

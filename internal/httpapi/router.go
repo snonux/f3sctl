@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net/http"
 	"slices"
+
+	"github.com/snonux/f3sctl/internal/inventory"
 )
 
 // Router owns the HTTP-facing side of the route registry: matching a request
@@ -18,11 +20,20 @@ type Router struct {
 	// SCRIPT_NAME, e.g. "/cgi-bin/f3sctl". Hrefs are absolute paths so a
 	// client never has to know how the API is mounted.
 	base string
+	// inv is the inventory the route table is generated from. It is the
+	// configured inventory (config.Config.Inventory), not the compiled-in
+	// inventory.Default(), so the per-host action routes match exactly the
+	// hosts the engine acts on; see routes' doc comment. Held here rather
+	// than re-read from a config on every call so every Router method and
+	// the OpenAPIBuilder share one route table that cannot disagree with
+	// itself.
+	inv inventory.Inventory
 }
 
-// NewRouter returns a Router that builds hrefs under base.
-func NewRouter(base string) *Router {
-	return &Router{base: base}
+// NewRouter returns a Router that builds hrefs under base and generates its
+// route table from inv.
+func NewRouter(base string, inv inventory.Inventory) *Router {
+	return &Router{base: base, inv: inv}
 }
 
 // Href builds an absolute path for a route.
@@ -35,7 +46,7 @@ func (rt *Router) Href(path string) string {
 
 // Lookup finds the route serving method and path.
 func (rt *Router) Lookup(method, path string) (route, bool) {
-	for _, r := range routes() {
+	for _, r := range routes(rt.inv) {
 		if r.Method == method && r.Path == path {
 			return r, true
 		}
@@ -46,7 +57,7 @@ func (rt *Router) Lookup(method, path string) (route, bool) {
 // PathExists reports whether any route serves this path, regardless of
 // method. It is what separates a 404 from a 405.
 func (rt *Router) PathExists(path string) bool {
-	for _, r := range routes() {
+	for _, r := range routes(rt.inv) {
 		if r.Path == path {
 			return true
 		}
@@ -57,7 +68,7 @@ func (rt *Router) PathExists(path string) bool {
 // Links renders every resource as a navigable link.
 func (rt *Router) Links() []Link {
 	var out []Link
-	for _, r := range routes() {
+	for _, r := range routes(rt.inv) {
 		if r.Action || r.Method != http.MethodGet {
 			continue
 		}
@@ -73,7 +84,7 @@ func (rt *Router) Links() []Link {
 // given, and never needs to encode a rule about when something is allowed.
 func (rt *Router) Actions(state State) []Action {
 	var out []Action
-	for _, r := range routes() {
+	for _, r := range routes(rt.inv) {
 		if !r.Action || !r.available(state) {
 			continue
 		}
@@ -86,7 +97,7 @@ func (rt *Router) Actions(state State) []Action {
 // should only advertise their own controls.
 func (rt *Router) ActionsFor(state State, names ...string) []Action {
 	var out []Action
-	for _, r := range routes() {
+	for _, r := range routes(rt.inv) {
 		if !r.Action || !r.available(state) || !slices.Contains(names, r.Name) {
 			continue
 		}

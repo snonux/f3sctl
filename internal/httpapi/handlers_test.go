@@ -83,7 +83,7 @@ func testServer(t *testing.T, plug *fakePlug, confirm func(context.Context) powe
 	if err != nil {
 		t.Fatalf("power.New: %v", err)
 	}
-	return &Server{cfg: cfg, engine: eng, node: "test", router: NewRouter(""), rackConfirm: confirm}
+	return &Server{cfg: cfg, engine: eng, node: "test", router: NewRouter("", inventory.Default()), rackConfirm: confirm}
 }
 
 // fState builds one f-host's probe result. known=false is the probe that never
@@ -121,7 +121,7 @@ func TestJobEntityAdvertisesStaleAfterSecondsFromTheManager(t *testing.T) {
 		t.Run(unmute.String(), func(t *testing.T) {
 			srv := &Server{
 				jobs:   coordination.NewManager(t.TempDir(), unmute, power.ShutdownWorstCase(config.Default())),
-				router: NewRouter(""),
+				router: NewRouter("", inventory.Default()),
 			}
 			want := int(srv.jobs.StaleCeiling().Seconds())
 
@@ -377,7 +377,7 @@ const peerRunningJobBody = `{"properties":{"id":"peer-job","state":"running","no
 func TestHandleJobMergesLocalAndPeerJobs(t *testing.T) {
 	peerSrv, _ := fakePeerJobServer(t, peerRunningJobBody)
 	srv := &Server{
-		router: NewRouter(""),
+		router: NewRouter("", inventory.Default()),
 		node:   "test",
 		jobs:   coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers:  &coordination.PeerSet{Nodes: []string{peerSrv.Listener.Addr().String()}, JobPath: "/job"},
@@ -402,7 +402,7 @@ func TestHandleJobMergesLocalAndPeerJobs(t *testing.T) {
 func TestHandleJobDoesNotMergeAPeerOriginatedQuery(t *testing.T) {
 	peerSrv, asked := fakePeerJobServer(t, peerRunningJobBody)
 	srv := &Server{
-		router: NewRouter(""),
+		router: NewRouter("", inventory.Default()),
 		node:   "test",
 		jobs:   coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers:  &coordination.PeerSet{Nodes: []string{peerSrv.Listener.Addr().String()}, JobPath: "/job"},
@@ -430,7 +430,7 @@ func TestHandleJobDoesNotMergeAPeerOriginatedQuery(t *testing.T) {
 func TestHandleStatusEmbedsThePeersJobWhenLocalHasNone(t *testing.T) {
 	peerSrv, _ := fakePeerJobServer(t, peerRunningJobBody)
 	srv := &Server{
-		router: NewRouter(""),
+		router: NewRouter("", inventory.Default()),
 		node:   "test",
 		jobs:   coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers:  &coordination.PeerSet{Nodes: []string{peerSrv.Listener.Addr().String()}, JobPath: "/job"},

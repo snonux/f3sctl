@@ -11,6 +11,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -118,7 +119,7 @@ func newServer(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	node, _ := os.Hostname()
-	router := NewRouter(strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/"))
+	router := NewRouter(strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/"), cfg.Inventory)
 	return &Server{
 		cfg:     cfg,
 		engine:  eng,
@@ -234,7 +235,7 @@ func (s *Server) serve(out io.Writer, req request) error {
 func (s *Server) snapshot(ctx context.Context, req request) State {
 	st := State{Job: s.jobs.Read()}
 
-	if !skipsProbe(req.Path) {
+	if !skipsProbe(s.router.inv, req.Path) {
 		st.Hosts = s.probeHostsFn()(ctx)
 		st.Fans, st.FansErr = s.fansStatusFn()(ctx)
 	}
@@ -245,6 +246,10 @@ func (s *Server) snapshot(ctx context.Context, req request) State {
 // State.Hosts or State.Fans -- in its Handle, or in any Available/Fields
 // predicate the router evaluates while rendering it -- so snapshot() can
 // skip the fleet probe and the Shelly read for it entirely.
+//
+// The route table is read from inv (s.router.inv in snapshot), so the
+// exemption set is the same inventory the engine acts on -- not the
+// compiled-in inventory.Default(); see routes' doc comment in registry.go.
 //
 // This used to be a hardcoded set of path prefixes (/job, /openapi.json,
 // /monitoring), correct only because it was checked by hand against every
@@ -275,8 +280,8 @@ func (s *Server) snapshot(ctx context.Context, req request) State {
 // by contrast, evaluate every action route's Available predicate including
 // ones that do read Hosts/Fans -- but "/" and "/status" are not SkipsProbe
 // routes, so that is never an issue for them.
-func skipsProbe(path string) bool {
-	for _, r := range routes() {
+func skipsProbe(inv inventory.Inventory, path string) bool {
+	for _, r := range routes(inv) {
 		if r.Path == path {
 			return r.SkipsProbe
 		}

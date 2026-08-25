@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/client"
+	"github.com/snonux/f3sctl/internal/inventory"
 )
 
 // This file is sy0's single-source-of-truth guard: it walks the real
@@ -22,7 +23,7 @@ import (
 // typo, or a CLIVerb with extra whitespace -- fails a test instead of
 // shipping a job-run invocation nobody asked for.
 func TestJobArgsDerivedFromEveryRoutesCLIVerb(t *testing.T) {
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.Action {
 			continue
 		}
@@ -32,7 +33,7 @@ func TestJobArgsDerivedFromEveryRoutesCLIVerb(t *testing.T) {
 		}
 
 		want := append([]string{"job-run"}, strings.Fields(r.CLIVerb)...)
-		got := jobArgs(r.jobAction())
+		got := jobArgsFrom(routes(inventory.Default()), r.jobAction())
 		if !equalArgs(got, want) {
 			t.Errorf("jobArgs(%q) = %v, want %v (derived from CLIVerb %q)",
 				r.jobAction(), got, want, r.CLIVerb)
@@ -45,7 +46,7 @@ func TestJobArgsDerivedFromEveryRoutesCLIVerb(t *testing.T) {
 // happened to be advertised first.
 func TestEveryActionsCLIVerbIsUnique(t *testing.T) {
 	seen := map[string]string{}
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.Action || r.CLIVerb == "" {
 			continue
 		}
@@ -70,7 +71,7 @@ func TestEveryActionsCLIVerbIsUnique(t *testing.T) {
 // Action.CLIVerb (router.go's Router.action) ever broke.
 func TestClientResolvesEveryRoutesCLIVerbToItsName(t *testing.T) {
 	var actions []client.Action
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.Action || r.CLIVerb == "" {
 			continue
 		}
@@ -78,7 +79,7 @@ func TestClientResolvesEveryRoutesCLIVerbToItsName(t *testing.T) {
 	}
 	holder := client.Entity{Actions: actions}
 
-	for _, r := range routes() {
+	for _, r := range routes(inventory.Default()) {
 		if !r.Action || r.CLIVerb == "" {
 			continue
 		}
@@ -113,7 +114,7 @@ func TestJobArgsFromRouteWithoutCLIVerb(t *testing.T) {
 // the registry) must not silently return an empty-but-non-nil slice or
 // someone else's argv.
 func TestJobArgsUnrecognizedAction(t *testing.T) {
-	if got := jobArgs("totally-not-a-real-action"); got != nil {
+	if got := jobArgsFrom(routes(inventory.Default()), "totally-not-a-real-action"); got != nil {
 		t.Errorf("jobArgs(unrecognized) = %v, want nil", got)
 	}
 }

@@ -396,7 +396,7 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 				fmt.Errorf("a power operation is already running on %s", node)
 		}
 
-		job, err := s.jobs.Start(action, jobArgs(action))
+		job, err := s.jobs.Start(action, s.jobArgs(action))
 		if errors.Is(err, coordination.ErrJobRunning) {
 			return Entity{}, http.StatusConflict, err
 		}
@@ -415,8 +415,12 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 // child runs. It is jobArgsFrom bound to the real route table; see that
 // function for the derivation and consistency_test.go's consistency tests for
 // what it guards against.
-func jobArgs(action string) []string {
-	return jobArgsFrom(routes(), action)
+//
+// A Server method rather than a free function so the route table is read
+// from this server's configured inventory (s.router.inv), the same one the
+// engine acts on -- see routes' doc comment in registry.go.
+func (s *Server) jobArgs(action string) []string {
+	return jobArgsFrom(routes(s.router.inv), action)
 }
 
 // jobArgsFrom finds the route whose job action identifier (route.jobAction,
