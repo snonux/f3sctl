@@ -107,10 +107,10 @@ type Engine struct {
 // a gap in the OCP story backends.go describes, it is the other half of it:
 // off, on, shutdownEach, fansOffOnceTheRackIsIdle and the rest of Engine's
 // policy methods depend only on PowerBackend/ProbeBackend/FansBackend/
-// NFSChecker/ZusbChecker, never on shellyRPC, magicPacket or ssh(1) directly,
-// so a second fan switch or wake mechanism (IPMI, say) is a new type
-// implementing the relevant interface plus a few lines here choosing it --
-// never an edit to those policy methods. Exactly this seam is what
+// NFSChecker/ZusbChecker, never on the Shelly RPC client, magicPacket or
+// ssh(1) directly, so a second fan switch or wake mechanism (IPMI, say) is a
+// new type implementing the relevant interface plus a few lines here choosing
+// it -- never an edit to those policy methods. Exactly this seam is what
 // backends_test.go/engine_test.go already exercise, substituting fakes for
 // every one of these fields; nothing about a real second implementation
 // would work any differently.
@@ -133,8 +133,8 @@ func New(cfg config.Config) (*Engine, error) {
 	}
 	e.isUp = e.pingOnce
 	e.power = execPower{e}
-	e.probe = execProbe{e}
-	e.fans = execFans{e}
+	e.probe = execProbe{client: newProbeClient(cfg.ProbeTimeout.D())}
+	e.fans = execFans{shelly: newShellyClient(cfg.Inventory.ShellyIP, cfg.ResolveShellyPassword)}
 	e.nfs = execNFS{e}
 	e.zusb = execZusb{e}
 	return e, nil
@@ -228,7 +228,7 @@ func (e *Engine) powerBackend() PowerBackend {
 // liveness.
 func (e *Engine) probeBackend() ProbeBackend {
 	if e.probe == nil {
-		return execProbe{e}
+		return execProbe{client: newProbeClient(e.cfg.ProbeTimeout.D())}
 	}
 	return e.probe
 }
@@ -238,7 +238,7 @@ func (e *Engine) probeBackend() ProbeBackend {
 // liveness.
 func (e *Engine) fansBackend() FansBackend {
 	if e.fans == nil {
-		return execFans{e}
+		return execFans{shelly: newShellyClient(e.cfg.Inventory.ShellyIP, e.cfg.ResolveShellyPassword)}
 	}
 	return e.fans
 }

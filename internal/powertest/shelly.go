@@ -21,9 +21,9 @@ import (
 // It answers the two RPCs the engine uses (Switch.Set and Switch.GetStatus)
 // and records every requested state, which is what tests assert on: "did the
 // fans actually get switched" is the question, not "what did the CLI print".
-// Digest auth is deliberately not offered -- shellyRPC only performs the
-// challenge-response when it gets a 401, so answering 200 straight away keeps
-// the fixture to what is under test.
+// Digest auth is deliberately not offered -- ShellyClient.RPC only performs
+// the challenge-response when it gets a 401, so answering 200 straight away
+// keeps the fixture to what is under test.
 type FakeShelly struct {
 	srv *httptest.Server
 

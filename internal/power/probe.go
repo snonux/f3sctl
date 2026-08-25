@@ -2,8 +2,6 @@ package power
 
 import (
 	"context"
-	"net"
-	"strconv"
 	"sync"
 	"time"
 
@@ -128,18 +126,11 @@ func (e *Engine) pingOnce(ctx context.Context, ip string) (up, known bool) {
 // executable standing in for ping, without ICMP, root, or a network. The
 // tri-state contract (see infra.Ping's doc) is enforced there, not here; this
 // is only the seam plus the timeout this Engine is configured with.
+//
+// The ICMP mechanism itself lives in infra.Ping; this and infra.ProbeClient.Ping
+// are the same mechanism reachable two ways (see ProbeBackend's doc in
+// backends.go) -- both call infra.Ping with this Engine's configured timeout,
+// so they can never disagree about what a probe concluded.
 func (e *Engine) pingWith(ctx context.Context, bin, ip string) (up, known bool) {
 	return infra.Ping(ctx, bin, ip, e.cfg.ProbeTimeout.D())
-}
-
-// dialSSH reports whether the host's sshd is accepting connections. This is
-// the "finished booting" signal; no authentication is attempted.
-func (e *Engine) dialSSH(ctx context.Context, h inventory.Host) bool {
-	d := net.Dialer{Timeout: e.cfg.ProbeTimeout.D()}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(h.IP, strconv.Itoa(h.SSHPort)))
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
 }

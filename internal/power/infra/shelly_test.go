@@ -1,4 +1,4 @@
-package power
+package infra
 
 import (
 	"strings"
