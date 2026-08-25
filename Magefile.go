@@ -72,7 +72,20 @@ func LintInstall() error {
 	return sh.RunV("go", "install", "github.com/golangci/golangci-lint/cmd/golangci-lint@latest")
 }
 
-// Test runs all unit tests.
+// Test runs all unit tests under the race detector.
+//
+// The detector is on for the standard target rather than hidden behind a
+// separate TestRace target because the codebase runs real goroutine
+// concurrency that plain `go test` never validates: power.Probe and
+// RackActivity probe every host in parallel, shutdownTogether runs a
+// whole shutdown batch concurrently, and quiesceEach fans a CARP-quiesce
+// out across the batch -- none of which the race-free test build so much
+// as looks at. A data race here is a silent job.json corruption or a torn
+// shutdown progress update, so paying the ~30% the detector costs on every
+// test run is the cheaper option.
+//
+// -race needs cgo and a C compiler, which the dev host has; this is a
+// homelab tool built on the machine it runs on, not a hermetic CI matrix.
 //
 // This deliberately does NOT clean the test cache first: go's own test
 // caching is what makes repeated `mage test` runs fast, and there was no
@@ -81,8 +94,8 @@ func LintInstall() error {
 // that cost on every invocation. Run `go clean -testcache` by hand if a
 // forced re-run is ever actually needed.
 func Test() error {
-	fmt.Println("Running tests...")
-	return sh.RunV("go", "test", "./...")
+	fmt.Println("Running tests with the race detector...")
+	return sh.RunV("go", "test", "-race", "./...")
 }
 
 // Install builds for the host platform and installs into ~/bin, which is how
