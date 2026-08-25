@@ -48,6 +48,13 @@ func newProbeClient(timeout time.Duration) *infra.ProbeClient {
 // agent verbs, poweroff included.
 type execPower struct{ e *Engine }
 
+// Compile-time assertion that execPower is the PowerBackend adapter. A
+// signature drift (a renamed interface method, a wrong return type) surfaces
+// here, at the adapter's definition, rather than only at the call site in
+// power.New that wires it -- which is the one place the concrete adapter is
+// allowed to be named.
+var _ PowerBackend = (*execPower)(nil)
+
 func (p execPower) Wake(h inventory.Host) error { return p.e.Wake(h) }
 
 func (p execPower) AgentVerb(ctx context.Context, h inventory.Host, verb string) (string, error) {
@@ -73,6 +80,10 @@ func (p execPower) PowerOff(ctx context.Context, h inventory.Host) (out, diag st
 // seam, so probeOne reaches it through here.
 type execProbe struct{ client *infra.ProbeClient }
 
+// Compile-time assertion that execProbe is the ProbeBackend adapter; see
+// execPower's note for why.
+var _ ProbeBackend = (*execProbe)(nil)
+
 func (p execProbe) Ping(ctx context.Context, ip string) (up, known bool) {
 	return p.client.Ping(ctx, ip)
 }
@@ -91,6 +102,10 @@ func (p execProbe) SSH(ctx context.Context, h inventory.Host) bool {
 // policy; this carries the I/O and the settle read-back the plug's slow
 // relay forces.
 type execFans struct{ shelly *infra.ShellyClient }
+
+// Compile-time assertion that execFans is the FansBackend adapter; see
+// execPower's note for why.
+var _ FansBackend = (*execFans)(nil)
 
 func (f execFans) Status(ctx context.Context) (FansState, error) {
 	on, err := f.shelly.Status(ctx)
@@ -170,6 +185,10 @@ func (f execFans) Set(ctx context.Context, on bool) (FansState, error) {
 // substitute.
 type execNFS struct{ e *Engine }
 
+// Compile-time assertion that execNFS is the NFSChecker adapter; see
+// execPower's note for why.
+var _ NFSChecker = (*execNFS)(nil)
+
 func (n execNFS) Mounts(ctx context.Context) ([]string, error) {
 	return n.e.localMounts(ctx)
 }
@@ -186,6 +205,10 @@ func (n execNFS) Unmount(ctx context.Context, mountpoint string) (out string, er
 // execZusb is the ZusbChecker adapter: the zusb-status and zusb-unload agent
 // verbs zusbPreflight runs before any host in the shutdown list loses power.
 type execZusb struct{ e *Engine }
+
+// Compile-time assertion that execZusb is the ZusbChecker adapter; see
+// execPower's note for why.
+var _ ZusbChecker = (*execZusb)(nil)
 
 func (z execZusb) Status(ctx context.Context, h inventory.Host) (string, error) {
 	return z.e.ssh.agentVerb(ctx, h, "zusb-status")
