@@ -174,7 +174,18 @@ func staleCeilingFor(unmuteTimeout, offWorstCase time.Duration) time.Duration {
 // progress, and reading the result back for a client to render.
 //
 // It knows nothing about HTTP: internal/httpapi renders what Manager reports,
-// and RunJob (in run.go) is what the detached child calls into on its way out.
+// and the detached job child (internal/jobrun, the composition root) is what
+// calls Progress and Finish on its way out.
+//
+// JobRecorder is the narrow seam Manager exposes to that runner: Progress to
+// advance the job's state and Finish to close it. Defined here, on the leaf
+// that owns job.json, so internal/jobrun depends on the behaviour it needs
+// rather than on *Manager -- and so coordination stays import-free of cli.
+type JobRecorder interface {
+	Progress(step, host, phase, detail string)
+	Finish(rc int, errMsg string) error
+}
+
 type Manager struct {
 	// dir holds job.json, job.lock and job.log.
 	dir string
@@ -201,11 +212,17 @@ type Manager struct {
 // UnmuteTimeout and power.ShutdownWorstCase(cfg) -- passed as plain
 // time.Duration values rather than the whole config, the same minimal-surface
 // pattern NewPeerSet uses for PeerNodes/jobPath. Both callers (httpapi's
-// newServer, coordination.RunJob) already have a full config.Config in hand,
+// newServer, jobrun.Run) already have a full config.Config in hand,
 // so computing offWorstCase is one call at the construction site rather than
 // giving Manager its own opinion about inventory or VMShutdownTimeout. Used
 // only to derive staleCeiling; see staleCeilingFor and staleBuffer's doc
 // comments for why the ceiling must track both.
+// Compile-time assertion that Manager is the JobRecorder the detached
+// child (internal/jobrun) records progress and completion through. A
+// signature drift on Progress or Finish surfaces here, at the seam, rather
+// than only at the jobrun call site.
+var _ JobRecorder = (*Manager)(nil)
+
 func NewManager(dir string, unmuteTimeout, offWorstCase time.Duration) *Manager {
 	return &Manager{dir: dir, staleCeiling: staleCeilingFor(unmuteTimeout, offWorstCase)}
 }
@@ -378,7 +395,7 @@ func (m *Manager) doSpawn(args []string) error {
 // Setsid puts the child in its own session so bozohttpd tearing down the CGI's
 // process group cannot take the shutdown with it, and Release lets this
 // process exit without reaping. The child records its own completion via
-// `f3sctl job-run`, which calls RunJob.
+// `f3sctl job-run`, which calls jobrun.Run.
 func (m *Manager) spawn(args []string) error {
 	self, err := os.Executable()
 	if err != nil {
@@ -444,7 +461,7 @@ func (m *Manager) Progress(step string, host string, phase, detail string) {
 	_ = m.write(*j)
 }
 
-// Finish records a completed job. Called by the detached child (via RunJob)
+// Finish records a completed job. Called by the detached child (via jobrun.Run)
 // on its way out.
 func (m *Manager) Finish(rc int, errMsg string) error {
 	j := m.Read()

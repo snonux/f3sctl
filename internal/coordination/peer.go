@@ -1,7 +1,8 @@
 // Package coordination implements the fleet-coordination logic the HTTP API
 // depends on but that is not itself HTTP: whether the other API node has a
 // job in flight right now (PeerSet, this file), and the lifecycle of a job
-// this node started (Manager and RunJob, in manager.go and run.go).
+// this node started (Manager, in manager.go). The detached job
+// child itself lives in internal/jobrun, the composition root.
 //
 // It exists as its own package so internal/httpapi can stay pure HTTP
 // transport and rendering: parse a request, ask this package what is true,
@@ -174,7 +175,7 @@ func (ps *PeerSet) warnFunc() func(addr string, err error) {
 // into the web server's own error log, matching the
 // fmt.Fprintf(os.Stderr, ...) pattern this project already uses for
 // out-of-band diagnostics that have nowhere else to go (see
-// cmd/f3sctl/main.go and internal/coordination/run.go).
+// cmd/f3sctl/main.go and internal/jobrun).
 //
 // The message distinguishes a connection-level failure (peer down,
 // unreachable, timed out -- *peerHTTPStatusError is not among err's chain)

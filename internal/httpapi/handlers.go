@@ -385,7 +385,7 @@ func handleAction(action string) func(*Server, context.Context, State, request) 
 	// cancelled request -- the CGI client that went home -- stops waiting on
 	// a peer that is neither idle nor answering. It is NOT threaded into
 	// Manager.Start: Start spawns a detached child that re-execs and outlives
-	// this CGI request by design -- see internal/coordination/run.go -- so
+	// this CGI request by design -- see internal/jobrun -- so
 	// even if Start grew a context parameter, the request's ctx would be the
 	// wrong one to give it; the job must keep running after the response that
 	// started it has been sent.

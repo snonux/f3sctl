@@ -208,7 +208,7 @@ type route struct {
 	// It is not threaded into coordination.Manager.Start's detached child
 	// spawn -- that job deliberately outlives the CGI request that started
 	// it, so it must not be cancelled when this context is (see
-	// handleAction and internal/coordination/run.go).
+	// handleAction and internal/jobrun).
 	Handle func(*Server, context.Context, State, request) (Entity, int, error)
 }
 

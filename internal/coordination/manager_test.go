@@ -143,7 +143,7 @@ func TestManagerStartFailsWhileTheLockIsHeld(t *testing.T) {
 
 // TestManagerStartRecordsFailureWhenSpawnFails pins that a spawn failure is
 // not silently dropped: the job is recorded failed so a polling client can
-// see why, per RunJob's own doc comment about failures being written rather
+// see why, per jobrun.Run's own doc comment about failures being written rather
 // than only returned.
 func TestManagerStartRecordsFailureWhenSpawnFails(t *testing.T) {
 	m := newTestManager(t)
