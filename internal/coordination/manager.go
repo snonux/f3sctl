@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -204,6 +205,20 @@ type Manager struct {
 	// Start's locking and bookkeeping can be verified without spawning a real
 	// process.
 	spawnFunc func(args []string) error
+
+	// mu serializes the read-modify-write Progress and Finish do on job.json.
+	// The parallel shutdown path (power.shutdownTogether) runs one goroutine
+	// per host, and each calls Progress (via the job Reporter) concurrently;
+	// without a lock, two goroutines Read the same record, each add their own
+	// host, and the second write overwrites the first -- a polling client
+	// sees an incomplete hosts map, and two writers racing the single .tmp
+	// path can even corrupt job.json. The lock is per-Manager (one node, one
+	// job) and Progress is not hot, so a mutex is the right shape. It does not
+	// cross processes: the detached child and the CGI serving reads are
+	// separate processes with separate mutexes, and the write-then-rename in
+	// write() is what keeps a concurrent reader from seeing a half-written
+	// record across that boundary.
+	mu sync.Mutex
 }
 
 // NewManager returns a Manager whose state lives under dir.
@@ -439,7 +454,17 @@ func (m *Manager) spawn(args []string) error {
 // arrive a few times a minute at most, and the alternative -- holding state in
 // memory -- would not survive the detached child being the only writer while a
 // separate CGI process serves the reads.
+//
+// The read-modify-write is serialized under mu: the parallel shutdown path
+// (power.shutdownTogether) calls Progress from one goroutine per host, and
+// without the lock those goroutines would Read the same record, each add only
+// their own host, and the second write would overwrite the first -- losing the
+// other hosts' updates and, racing the single .tmp path, occasionally
+// corrupting job.json. See the mu field's doc comment.
 func (m *Manager) Progress(step string, host string, phase, detail string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	j := m.Read()
 	if j == nil {
 		return
@@ -462,8 +487,13 @@ func (m *Manager) Progress(step string, host string, phase, detail string) {
 }
 
 // Finish records a completed job. Called by the detached child (via jobrun.Run)
-// on its way out.
+// on its way out. It takes the same mu as Progress so a late Progress from one
+// of the parallel-shutdown goroutines cannot race Finish's read-then-write and
+// overwrite the terminal state with a stale host map.
 func (m *Manager) Finish(rc int, errMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	j := m.Read()
 	if j == nil {
 		return fs.ErrNotExist

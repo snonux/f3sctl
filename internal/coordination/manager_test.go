@@ -2,7 +2,9 @@ package coordination
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -525,5 +527,98 @@ func TestNewestJobPrefersTheLaterStartedJobWhenNeitherIsRunning(t *testing.T) {
 	}
 	if got := NewestJob(later, earlier); got != later {
 		t.Errorf("NewestJob(later, earlier) = %v, want the later job", got)
+	}
+}
+
+// TestManagerProgressIsSafeForConcurrentHostUpdates is the regression test for
+// g51: Progress is a read-modify-write of job.json, and the parallel shutdown
+// path (power.shutdownTogether) calls it from one goroutine per host. Without
+// serialization, N goroutines each Read the same record, each add only their
+// own host to j.Hosts, and the second write overwrites the first -- so a
+// polling client sees fewer hosts than the batch is actually shutting down,
+// and writers racing the single .tmp path can corrupt job.json. With the
+// Manager's mutex, every host's update survives.
+//
+// Run with -race (mage test does): the lost-update is asserted directly here,
+// and the race detector flags the unsynchronised file/map access a build
+// without the lock would still have even when the count happened to come out
+// right.
+func TestManagerProgressIsSafeForConcurrentHostUpdates(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.write(Job{ID: "g51", State: JobRunning}); err != nil {
+		t.Fatalf("seeding a job: %v", err)
+	}
+
+	const n = 32
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m.Progress("", fmt.Sprintf("h%d", i), "working", "shutting down")
+		}(i)
+	}
+	wg.Wait()
+
+	got := m.Read()
+	if got == nil {
+		t.Fatal("Read() = nil after concurrent Progress; job.json was likely corrupted by racing writes")
+	}
+	if len(got.Hosts) != n {
+		t.Fatalf("Hosts has %d entries, want all %d: the parallel Progress calls lost updates (g51)", len(got.Hosts), n)
+	}
+	for i := 0; i < n; i++ {
+		hp, ok := got.Hosts[fmt.Sprintf("h%d", i)]
+		if !ok {
+			t.Errorf("Hosts[\"h%d\"] missing: its Progress update was lost to a concurrent write", i)
+			continue
+		}
+		if hp.Phase != "working" {
+			t.Errorf("Hosts[\"h%d\"].Phase = %q, want %q", i, hp.Phase, "working")
+		}
+	}
+}
+
+// TestManagerProgressAndFinishDoNotRaceTheTerminalState pins the other half of
+// g51: a late Progress from one of the parallel-shutdown goroutines must not
+// race Finish's read-then-write and overwrite the terminal state with a stale
+// host map. Finish takes the same mutex as Progress, so a Finish that runs
+// after the last Progress sees every host and writes the terminal record
+// atomically with respect to them.
+func TestManagerProgressAndFinishDoNotRaceTheTerminalState(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.write(Job{ID: "g51f", State: JobRunning}); err != nil {
+		t.Fatalf("seeding a job: %v", err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m.Progress("", fmt.Sprintf("h%d", i), "working", "")
+		}(i)
+	}
+	// A Finish concurrent with the last Progress updates: it must not lose a
+	// host to a racing Progress, and the terminal state must read as done.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := m.Finish(0, ""); err != nil {
+			t.Errorf("Finish: %v", err)
+		}
+	}()
+	wg.Wait()
+
+	got := m.Read()
+	if got == nil {
+		t.Fatal("Read() = nil after concurrent Progress+Finish; job.json was likely corrupted")
+	}
+	if got.State != JobDone {
+		t.Errorf("State = %q, want %q: a racing Progress overwrote the terminal state", got.State, JobDone)
+	}
+	if len(got.Hosts) != n {
+		t.Errorf("Hosts has %d entries, want all %d: a late Progress raced Finish and lost a host", len(got.Hosts), n)
 	}
 }
