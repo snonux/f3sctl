@@ -62,7 +62,10 @@ func (e *Engine) Wake(h inventory.Host) error {
 	if err != nil {
 		return fmt.Errorf("opening broadcast socket: %w", err)
 	}
-	defer conn.Close()
+	// The socket has done its one job (sending the magic packet); its close
+	// error is not actionable, and is explicitly discarded rather than ignored
+	// so errcheck (see .golangci.yml) stays a meaningful guardrail.
+	defer func() { _ = conn.Close() }()
 
 	if _, err := conn.Write(pkt); err != nil {
 		return fmt.Errorf("sending magic packet for %s: %w", h.Name, err)

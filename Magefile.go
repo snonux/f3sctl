@@ -60,10 +60,22 @@ func Vet() error {
 	return sh.RunV("go", "vet", "./...")
 }
 
-// Lint runs golangci-lint.
+// Lint runs golangci-lint, whose .golangci.yml pins errcheck into the
+// standard default set -- so this is the errcheck guardrail as well as the
+// usual lints. It is a dependency of Publish, so an ignored error return
+// value never ships.
 func Lint() error {
 	fmt.Println("Linting...")
 	return sh.RunV("golangci-lint", "run")
+}
+
+// Errcheck runs only the errcheck linter, with the same .golangci.yml
+// exclusions as Lint, for a fast focused guardrail run without the rest of
+// the standard set. Lint (and thus Publish) already runs errcheck via the
+// config; this target exists for when only the errcheck question matters.
+func Errcheck() error {
+	fmt.Println("Running errcheck...")
+	return sh.RunV("golangci-lint", "run", "--default=none", "--enable=errcheck")
 }
 
 // LintInstall installs golangci-lint.
@@ -145,7 +157,7 @@ func Cross() error {
 // publish through it too) and owns the repo layout, the build hosts and the
 // pkg_summary regeneration. Duplicating any of it here would guarantee drift.
 func Publish() error {
-	mg.Deps(Test)
+	mg.Deps(Test, Lint)
 	src, err := os.Getwd()
 	if err != nil {
 		return err

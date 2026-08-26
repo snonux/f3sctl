@@ -46,7 +46,10 @@ func linuxNFSMounts() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	// /proc/mounts is read and parsed; the close error is not actionable and
+	// is explicitly discarded so errcheck keeps flagging write-path os.File
+	// closes (see .golangci.yml).
+	defer func() { _ = f.Close() }()
 	return parseProcMounts(f)
 }
 

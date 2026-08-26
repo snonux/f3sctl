@@ -1,0 +1,57 @@
+# golangci-lint config for f3sctl.
+#
+# The guardrail this file exists to enforce is errcheck: an ignored error
+# return value is a real defect waiting to happen, and the only thing that
+# keeps the repo honest about them is a lint run that fails on one. It is run
+# by `mage lint` and is a dependency of `mage publish` (see Magefile.go), so a
+# regression never ships.
+#
+# Two categories of errcheck finding are excluded as deliberately benign for
+# this codebase, rather than silenced per-call:
+#
+#  - fmt.Fprint/Fprintf/Fprintln. f3sctl surfaces its real failures through
+#    returned errors and os.Exit, not through the success of a print; forcing
+#    every fmt.Fprintln to handle a writer error would bury the code in
+#    ceremony for no safety gain (a write to stdout/stderr failing is not an
+#    outcome this tool can usefully act on, and the lines in question are
+#    human-facing status, not data).
+#
+#  - Close on the read/dial-path Closer types that have no write-path in
+#    this codebase: net.Conn (a one-shot TCP dial closed after probing sshd,
+#    infra.ProbeClient.SSH) and io.ReadCloser (an HTTP response body drained
+#    and discarded, infra.ShellyClient / client / coordination.fetchPeerJob).
+#    The close error on either is genuinely not actionable, and neither type
+#    has a write-path use here, so excluding them cannot hide a regression of
+#    the write-path Close this guardrail exists for.
+#
+#    *os.File is deliberately NOT excluded, even though several read/lock
+#    os.File closes (config.firstReadable's readability probe, the job lock
+#    in coordination.Manager, /proc/mounts in infra.NFSMounts) would also be
+#    covered: os.File is the one Closer type here that has a write path too
+#    (the job log in coordination.Manager.spawn, the only record of a
+#    detached shutdown), so a future ignored write-path os.File.Close must
+#    stay flaggable. Those read/lock os.File closes are handled in code with
+#    an explicit `defer func(){ _ = ... }()` discard, and the write-path
+#    job-log Close surfaces its error to stderr. The WoL UDP socket close
+#    (power.wol) is the same explicit discard.
+#
+# Everything else errcheck reports is treated as a real defect: the goal is a
+# clean `golangci-lint run`, not a noisy one selective humans must re-triage.
+version: "2"
+
+linters:
+  # Keep the standard default linter set (the same one `golangci-lint run`
+  # used before this config existed), so the errcheck guardrail is added
+  # without losing the other lints that already run.
+  default: standard
+  settings:
+    errcheck:
+      exclude-functions:
+        # Print/log style writes whose error is not actionable for this tool.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Read/dial-path Closes; see the file header for why each is excluded
+        # and why the two write-path Closes are handled in code instead.
+        - (net.Conn).Close
+        - (io.ReadCloser).Close

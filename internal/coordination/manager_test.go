@@ -120,11 +120,14 @@ func TestManagerStartFailsWhileTheLockIsHeld(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening the lock file: %v", err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatalf("taking the lock: %v", err)
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	// Unlock on exit; the error is not actionable (the fd closes and releases the
+	// lock anyway), so it is explicitly discarded rather than ignored --
+	// keeping errcheck able to flag a future ignored Flock *acquire*.
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
 
 	spawned := false
 	m.spawnFunc = func([]string) error { spawned = true; return nil }

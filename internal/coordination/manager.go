@@ -319,12 +319,18 @@ func (m *Manager) Start(action string, args []string) (Job, error) {
 	if err != nil {
 		return Job{}, fmt.Errorf("opening the job lock: %w", err)
 	}
-	defer lock.Close()
+	// The lock file is released by the Flock unlock below and the fd close;
+	// its close error is not actionable and is explicitly discarded so
+	// errcheck keeps flagging write-path os.File closes (see .golangci.yml).
+	defer func() { _ = lock.Close() }()
 
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return Job{}, ErrJobRunning
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	// Unlock on exit; the error is not actionable (the fd closes and releases the
+	// lock anyway), so it is explicitly discarded rather than ignored --
+	// keeping errcheck able to flag a future ignored Flock *acquire*.
+	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
 
 	// Re-check under the lock: the previous holder may have finished between
 	// our state read and acquiring it.
@@ -383,7 +389,18 @@ func (m *Manager) spawn(args []string) error {
 	if err != nil {
 		return fmt.Errorf("opening the job log: %w", err)
 	}
-	defer logFile.Close()
+	// The job log is the only record of a detached shutdown, so a failure to
+	// close it is surfaced to stderr (captured into bozohttpd's error log, the
+	// one out-of-band channel a CGI child has) rather than discarded -- a
+	// swallowed close error here is the one write-path errcheck finding this
+	// codebase actually cares about. The child holds its own copy of the fd
+	// (cmd.Stdout below), so this close releases only the parent's; the
+	// child's writes are not affected.
+	defer func() {
+		if err := logFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "f3sctl: closing the job log: %v\n", err)
+		}
+	}()
 
 	cmd := exec.Command(self, args...)
 	cmd.Stdout = logFile

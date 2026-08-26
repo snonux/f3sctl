@@ -298,7 +298,10 @@ func firstReadable(candidates []string, what string) (string, error) {
 		if err != nil {
 			continue
 		}
-		f.Close()
+		// firstReadable only opens to confirm the file is openable; the close
+		// error is not actionable and is explicitly discarded so errcheck (see
+		// .golangci.yml) keeps flagging ignored write-path os.File closes.
+		_ = f.Close()
 		return p, nil
 	}
 	return "", fmt.Errorf("no readable %s; tried: %s", what, strings.Join(tried, ", "))
