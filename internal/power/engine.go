@@ -78,7 +78,7 @@ type Engine struct {
 	powerDownTimeout time.Duration
 
 	// power, probe, fans, nfs and zusb are the abstractions Engine's policy
-	// methods (off, on, awaitPowerDown, zusbPreflight, eachGateway, and the
+	// methods (off, on, awaitPowerDown, zusbPreflight, and the
 	// smaller steps they call) act through, rather than shelling out to
 	// ssh(1), dialling the Shelly plug's HTTP RPC or exec'ing umount(8)
 	// themselves. See backends.go for what each interface promises and why
@@ -92,6 +92,15 @@ type Engine struct {
 	fans  FansBackend
 	nfs   NFSChecker
 	zusb  ZusbChecker
+	// monitor is the Gogios monitoring concern: muting, un-muting and reading
+	// the gateways' alerting state, plus the wake path's wait for the k3s nodes
+	// before it clears a mute. Split off Engine (see o51) so the gateway and
+	// cluster-wait mechanism is held here, not mixed into the shutdown/fan-guard
+	// policy; Engine delegates its MuteGogios/UnmuteGogios/UnmuteNow/
+	// MonitoringStatus methods to monitorBackend(). New wires it; only tests
+	// substitute anything else, following the same nil-safe seam pattern as the
+	// backends above.
+	monitor *Monitor
 }
 
 // New returns an Engine.
@@ -137,6 +146,7 @@ func New(cfg config.Config) (*Engine, error) {
 	e.fans = execFans{shelly: newShellyClient(cfg.Inventory.ShellyIP, cfg.ResolveShellyPassword)}
 	e.nfs = execNFS{e}
 	e.zusb = execZusb{e}
+	e.monitor = NewMonitor(cfg, e.powerBackend(), e.Probe)
 	return e, nil
 }
 

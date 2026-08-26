@@ -7,8 +7,8 @@ import (
 )
 
 // This file collects the interfaces Engine's policy methods (Off, On,
-// awaitPowerDown, zusbPreflight, eachGateway, and the smaller steps they call
-// -- checkLocalNFS, shutdownEach, fansOffOnceTheRackIsIdle) depend on, instead
+// awaitPowerDown, zusbPreflight, and the smaller steps they call --
+// checkLocalNFS, shutdownEach, fansOffOnceTheRackIsIdle) depend on, instead
 // of reaching exec(2), an SSH client or an HTTP client directly. Each one is
 // deliberately narrow -- one capability, not "do anything on a host" -- so a
 // fake can stand in for exactly what a given policy method needs and nothing
