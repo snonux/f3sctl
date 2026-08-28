@@ -335,6 +335,27 @@ func TestGogiosE2ECheckDetailNotFound(t *testing.T) {
 	}
 }
 
+// TestGogiosE2ECheckDetailUpstreamUnreachable pins the one place scope item
+// 7's "unreachable upstream" case takes a materially different wire shape:
+// handleGogiosCheck (unlike handleGogios/handleGogiosStatus) returns a hard
+// 502 rather than a 200 with an "error" property, because a single-entity
+// lookup cannot answer "does this check exist" at all without the report.
+// This is already pinned at the handler-unit level (handlers_test.go); this
+// is the one place it is proven over the real wire.
+func TestGogiosE2ECheckDetailUpstreamUnreachable(t *testing.T) {
+	upstream, _ := gogiosE2EUpstream(t, "boom", http.StatusInternalServerError)
+	e2e, _, apiKey := gogiosE2EServer(t, upstream)
+
+	status, body := e2eGetRaw(t, e2e.URL, apiKey, "/gogios/check?name="+url.QueryEscape("anything"))
+	if status != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", status, http.StatusBadGateway)
+	}
+	props, _ := body["properties"].(map[string]any)
+	if msg, _ := props["message"].(string); !strings.Contains(msg, "fetching the Gogios report") {
+		t.Errorf("message = %q, want it to say the report could not be fetched", msg)
+	}
+}
+
 // TestGogiosE2ECacheServesWithinTTLThenRefetchesAfterExpiry pins scope item
 // 4: a cold cache fetches once; a second read within GogiosCacheTTL is
 // served from disk without a second fetch; once the cache is backdated past
