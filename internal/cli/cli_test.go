@@ -824,17 +824,19 @@ func TestParseGogiosArgsValidatesSpellings(t *testing.T) {
 
 // gogiosReportJSON is a small, valid Gogios report fixture for the local-path
 // tests below: one unhandled CRITICAL, one stale WARNING (lifecycle stale,
-// severity WARNING -- the case gogiosChecksForStatus' split exists for), and
-// one OK. Mirrors the shape internal/gogios/gogios_test.go's own fixture
-// documents.
+// severity WARNING), one suppressed UNKNOWN (lifecycle suppressed, severity
+// UNKNOWN -- the other lifecycle-vs-severity case gogiosChecksForStatus'
+// split exists for), and one OK. Mirrors the shape
+// internal/gogios/gogios_test.go's own fixture documents.
 const gogiosReportJSON = `{
-  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:0 OK:1]",
+  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:1 OK:1]",
   "lastUpdated": "2026-08-27T08:58:18+02:00",
-  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":0,"ok":1},
+  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":1,"ok":1},
   "sections": {
     "unhandled": [{"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","output":"timed out","epoch":1}],
     "stale": [{"name":"Check SWAP blowfish","status":"WARNING","output":"SWAP WARNING","epoch":2,"lastCheckedAgeSeconds":99999}],
-    "ok": [{"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":3}]
+    "suppressed": [{"name":"Check Disk fishfinger","status":"UNKNOWN","output":"no data","epoch":3}],
+    "ok": [{"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":4}]
   }
 }`
 
@@ -885,19 +887,33 @@ func TestGogiosLocalShowsTheOverview(t *testing.T) {
 	}
 }
 
-// TestGogiosLocalDrillsDownByCategory pins the lifecycle-vs-severity split at
-// the local layer: "stale" must list the WARNING check by lifecycle, not by
-// (nonexistent) "STALE" severity.
+// TestGogiosLocalDrillsDownByCategory pins gogiosChecksForStatus' full split
+// at the local layer, both branches: "critical" goes through the default
+// case (Report.ByStatus, a severity), while "stale" and "suppressed" go
+// through their own cases (Report.Sections, a lifecycle grouping) -- each
+// must list its check by lifecycle/severity, not by a (nonexistent) "STALE"
+// or "SUPPRESSED" Status value.
 func TestGogiosLocalDrillsDownByCategory(t *testing.T) {
-	srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
-	cfg := gogiosTestConfig(t, srv)
+	for _, tc := range []struct {
+		status string
+		want   string
+	}{
+		{"critical", "Check Ping6 r1.wg0.wan.buetow.org"},
+		{"stale", "Check SWAP blowfish"},
+		{"suppressed", "Check Disk fishfinger"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+			cfg := gogiosTestConfig(t, srv)
 
-	out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", "stale")
-	if err != nil {
-		t.Fatalf("--local gogios stale: %v", err)
-	}
-	if !strings.Contains(out, "Check SWAP blowfish") {
-		t.Errorf("output = %q, want the stale check listed", out)
+			out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", tc.status)
+			if err != nil {
+				t.Fatalf("--local gogios %s: %v", tc.status, err)
+			}
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("output = %q, want %q listed", out, tc.want)
+			}
+		})
 	}
 }
 

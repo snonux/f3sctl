@@ -104,6 +104,12 @@ func TestPrintGogiosCheckShowsOnlyThePresentOptionalFields(t *testing.T) {
 type fakeGogiosAPI struct {
 	srv *httptest.Server
 
+	// broken, when true, makes GET /gogios answer with an "error" property
+	// instead of a real report -- the unreachable-backend case
+	// handleGogios/handleGogiosStatus render as a 200 with "error" rather
+	// than a non-2xx status (see internal/httpapi/handlers.go).
+	broken bool
+
 	mu          sync.Mutex
 	cacheClears int
 }
@@ -124,6 +130,10 @@ func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
 			Links:      []Link{{Rel: []string{"gogios"}, Href: "/gogios"}},
 		})
 	case r.URL.Path == "/gogios" && r.Method == http.MethodGet:
+		if f.broken {
+			writeEntity(w, Entity{Class: []string{"gogios"}, Properties: map[string]any{"error": "gogios at https://gogios.buetow.org/index.json returned 502 Bad Gateway"}})
+			return
+		}
 		f.mu.Lock()
 		cleared := f.cacheClears
 		f.mu.Unlock()
@@ -152,8 +162,15 @@ func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
 		writeEntity(w, Entity{Entities: []Entity{
 			{Properties: map[string]any{"name": "Check Ping6 r1", "status": "CRITICAL", "output": "timed out"}},
 		}})
+	case r.URL.Path == "/gogios/suppressed" && r.Method == http.MethodGet:
+		// The last category gogiosStatuses tries before "ok": a check here
+		// proves showGogiosCheck's search keeps going past every earlier
+		// category's non-match rather than stopping at the first one tried.
+		writeEntity(w, Entity{Entities: []Entity{
+			{Properties: map[string]any{"name": "Check Disk fishfinger", "status": "UNKNOWN", "output": "no data"}},
+		}})
 	case strings.HasPrefix(r.URL.Path, "/gogios/") && r.URL.Path != "/gogios/critical" &&
-		r.URL.Path != "/gogios/cache/clear" && r.Method == http.MethodGet:
+		r.URL.Path != "/gogios/suppressed" && r.URL.Path != "/gogios/cache/clear" && r.Method == http.MethodGet:
 		writeEntity(w, Entity{}) // every other drill-down category is empty
 	case r.URL.Path == "/gogios/cache/clear" && r.Method == http.MethodPost:
 		f.mu.Lock()
@@ -197,8 +214,8 @@ func TestRunGogiosDrillsDownByCategory(t *testing.T) {
 }
 
 // TestRunGogiosDetailFindsACheckAcrossCategories pins showGogiosCheck's
-// search: the check lives under "critical", and "detail" is not told which
-// category to look in.
+// search: the check lives under "critical" -- the first category tried --
+// and "detail" is not told which category to look in.
 func TestRunGogiosDetailFindsACheckAcrossCategories(t *testing.T) {
 	api := newFakeGogiosAPI(t)
 	c := newTestClient(t, api.srv.URL, "k")
@@ -209,6 +226,27 @@ func TestRunGogiosDetailFindsACheckAcrossCategories(t *testing.T) {
 		t.Fatalf("runGogios(detail): %v", err)
 	}
 	if !strings.Contains(out.String(), "name:   Check Ping6 r1") {
+		t.Errorf("output = %q, want the check's detail", out.String())
+	}
+}
+
+// TestRunGogiosDetailFindsACheckInALaterCategory is
+// TestRunGogiosDetailFindsACheckAcrossCategories' complement: the check
+// lives under "suppressed", the last category gogiosStatuses tries before
+// "ok". A bug that stopped the search at the first non-matching category
+// (e.g. an accidental early return instead of continuing the loop) would
+// report "no such Gogios check" here even though this test's earlier sibling
+// still passed.
+func TestRunGogiosDetailFindsACheckInALaterCategory(t *testing.T) {
+	api := newFakeGogiosAPI(t)
+	c := newTestClient(t, api.srv.URL, "k")
+	var out bytes.Buffer
+	c.stdout = &out
+
+	if err := c.runGogios(context.Background(), []string{"detail", "Check", "Disk", "fishfinger"}, false); err != nil {
+		t.Fatalf("runGogios(detail): %v", err)
+	}
+	if !strings.Contains(out.String(), "name:   Check Disk fishfinger") {
 		t.Errorf("output = %q, want the check's detail", out.String())
 	}
 }
@@ -247,6 +285,26 @@ func TestRunGogiosCacheClearInvokesTheActionAndReFetches(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "GOGIOS Report") {
 		t.Errorf("output = %q, want the re-fetched overview", out.String())
+	}
+}
+
+// TestRunGogiosShowsAnUnreachableReportEndToEnd pins the "error" property
+// convention (internal/httpapi/handlers.go's handleGogios) through the whole
+// dispatch path, not just printGogiosOverview in isolation: runGogios ->
+// showGogios -> Follow -> printGogiosOverview must render "unknown" and the
+// server's message rather than an error return or an empty successful render.
+func TestRunGogiosShowsAnUnreachableReportEndToEnd(t *testing.T) {
+	api := newFakeGogiosAPI(t)
+	api.broken = true
+	c := newTestClient(t, api.srv.URL, "k")
+	var out bytes.Buffer
+	c.stdout = &out
+
+	if err := c.runGogios(context.Background(), nil, false); err != nil {
+		t.Fatalf("runGogios against an unreachable report: %v", err)
+	}
+	if !strings.Contains(out.String(), "unknown") || !strings.Contains(out.String(), "Bad Gateway") {
+		t.Errorf("output = %q, want it to say unknown and name the error", out.String())
 	}
 }
 
