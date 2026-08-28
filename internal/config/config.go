@@ -154,6 +154,24 @@ type Config struct {
 	// slow or dead backend aborts cleanly rather than holding the CGI
 	// process open indefinitely.
 	CGITimeout Duration `json:"cgi_timeout"`
+
+	// GogiosURL is where f3sctl fetches the Gogios alert report from. The
+	// default is the relayd-fronted, federated endpoint -- each OpenBSD
+	// frontend peers with the other, so one fetch is the merged view. An
+	// operator can point this at a per-frontend URL or a LAN address if that
+	// endpoint is the wrong path from the API node.
+	GogiosURL string `json:"gogios_url"`
+
+	// GogiosFetchTimeout bounds the HTTP GET of the Gogios report.
+	GogiosFetchTimeout Duration `json:"gogios_fetch_timeout"`
+
+	// GogiosCacheTTL is how long the on-disk cache of the report is served
+	// before f3sctl re-fetches. A browse session (overview, drill-down by
+	// status, per-check detail) reads the report several times in quick
+	// succession; the cache stops each click re-fetching. The report itself
+	// is only refreshed by Gogios every few minutes, so a short TTL is mostly
+	// a polite-traffic measure, not a freshness one.
+	GogiosCacheTTL Duration `json:"gogios_cache_ttl"`
 }
 
 // Default returns the compiled-in configuration.
@@ -174,14 +192,17 @@ func Default() Config {
 		PeerNodes:  []string{"192.168.1.125", "192.168.1.126"},
 		// PeerJobPath is left empty so it is derived from this node's own
 		// SCRIPT_NAME at request time -- see the field's doc comment.
-		PeerJobPath:       "",
-		VMShutdownTimeout: Duration(240 * time.Second),
-		UnmuteTimeout:     Duration(1200 * time.Second),
-		ProbeTimeout:      Duration(2 * time.Second),
-		SSHConnectTimeout: Duration(5 * time.Second),
-		SSHVerbTimeout:    Duration(360 * time.Second),
-		UmountTimeout:     Duration(30 * time.Second),
-		CGITimeout:        Duration(120 * time.Second),
+		PeerJobPath:        "",
+		VMShutdownTimeout:  Duration(240 * time.Second),
+		UnmuteTimeout:      Duration(1200 * time.Second),
+		ProbeTimeout:       Duration(2 * time.Second),
+		SSHConnectTimeout:  Duration(5 * time.Second),
+		SSHVerbTimeout:     Duration(360 * time.Second),
+		UmountTimeout:      Duration(30 * time.Second),
+		CGITimeout:         Duration(120 * time.Second),
+		GogiosURL:          "https://gogios.buetow.org/index.json",
+		GogiosFetchTimeout: Duration(10 * time.Second),
+		GogiosCacheTTL:     Duration(60 * time.Second),
 	}
 }
 

@@ -363,6 +363,36 @@ func TestLoadOverlaysOntoDefaultsKeepingAbsentKeys(t *testing.T) {
 		t.Errorf("StateDir = %q, want the default %q (absent key must keep its default)",
 			cfg.StateDir, def.StateDir)
 	}
+	if cfg.GogiosURL != def.GogiosURL {
+		t.Errorf("GogiosURL = %q, want the default %q (absent key must keep its default)",
+			cfg.GogiosURL, def.GogiosURL)
+	}
+	if cfg.GogiosFetchTimeout != def.GogiosFetchTimeout {
+		t.Errorf("GogiosFetchTimeout = %v, want the default %v (absent key must keep its default)",
+			cfg.GogiosFetchTimeout, def.GogiosFetchTimeout)
+	}
+	if cfg.GogiosCacheTTL != def.GogiosCacheTTL {
+		t.Errorf("GogiosCacheTTL = %v, want the default %v (absent key must keep its default)",
+			cfg.GogiosCacheTTL, def.GogiosCacheTTL)
+	}
+}
+
+// TestDefaultGogiosValues pins the literal Gogios defaults: the federated
+// endpoint, a 10s fetch timeout, and a 60s cache TTL. Unlike the other
+// Duration fields (only checked relative to Default() elsewhere), these are
+// asserted against their literal values once so a typo in Default() is
+// caught directly.
+func TestDefaultGogiosValues(t *testing.T) {
+	def := Default()
+	if def.GogiosURL != "https://gogios.buetow.org/index.json" {
+		t.Errorf("GogiosURL = %q, want the federated endpoint", def.GogiosURL)
+	}
+	if def.GogiosFetchTimeout != Duration(10*time.Second) {
+		t.Errorf("GogiosFetchTimeout = %v, want 10s", def.GogiosFetchTimeout)
+	}
+	if def.GogiosCacheTTL != Duration(60*time.Second) {
+		t.Errorf("GogiosCacheTTL = %v, want 60s", def.GogiosCacheTTL)
+	}
 }
 
 // TestLoadAcceptsANumberDurationInTheOverlay pins that the seconds form
