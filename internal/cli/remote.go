@@ -72,7 +72,7 @@ func (f globalFlags) useAPI(args []string) bool {
 	if f.remote {
 		return true
 	}
-	return isShutdown(args) || isMonitoring(args)
+	return isShutdown(args) || isMonitoring(args) || isGogios(args)
 }
 
 // isMonitoring reports whether args name a valid `monitoring` command.
@@ -94,6 +94,25 @@ func isMonitoring(args []string) bool {
 		return false
 	}
 	_, ok := parseMonitoringArgs(args[1:])
+	return ok
+}
+
+// isGogios reports whether args name a valid `gogios` command.
+//
+// Every gogios verb routes through the API by default, for a different
+// reason than isShutdown/isMonitoring -- see runGogios's doc comment
+// (cli.go) for why: reading the report needs no restricted key, but the
+// on-disk cache it reads/clears is per-process-tree, so acting locally from
+// a laptop would silently touch a cache nobody else reads from.
+//
+// Built on parseGogiosArgs -- the same parse runGogios uses (cli.go) --
+// rather than a bare arity check, the same reasoning as
+// isMonitoring/parseMonitoringArgs.
+func isGogios(args []string) bool {
+	if len(args) == 0 || args[0] != "gogios" {
+		return false
+	}
+	_, ok := parseGogiosArgs(args[1:])
 	return ok
 }
 

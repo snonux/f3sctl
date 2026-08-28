@@ -189,6 +189,48 @@ func TestIsMonitoringAgreesWithParseMonitoringArgs(t *testing.T) {
 	}
 }
 
+// TestIsGogiosAgreesWithParseGogiosArgs is the gogios sibling of
+// TestIsMonitoringAgreesWithParseMonitoringArgs: isGogios must agree with
+// parseGogiosArgs on every case, or a malformed verb of otherwise-plausible
+// shape (e.g. a real word in the wrong slot) would be routed to the API's
+// confusing no-op instead of reaching runGogios's own local validation.
+func TestIsGogiosAgreesWithParseGogiosArgs(t *testing.T) {
+	for _, args := range [][]string{
+		{"gogios"},
+		{"gogios", "status"},
+		{"gogios", "critical"},
+		{"gogios", "stale"},
+		{"gogios", "detail", "x"},
+		{"gogios", "detail"},
+		{"gogios", "cache", "clear"},
+		{"gogios", "cache"},
+		{"gogios", "xyz"}, // the misclassified spelling
+		{"monitoring", "status"},
+		{},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var want bool
+			if len(args) > 0 && args[0] == "gogios" {
+				_, ok := parseGogiosArgs(args[1:])
+				want = ok
+			}
+			if got := isGogios(args); got != want {
+				t.Errorf("isGogios(%v) = %v, want %v", args, got, want)
+			}
+		})
+	}
+
+	if isGogios([]string{"gogios", "xyz"}) {
+		t.Error(`isGogios([]string{"gogios", "xyz"}) = true, want false: not a real gogios verb`)
+	}
+	if (globalFlags{}).useAPI([]string{"gogios", "xyz"}) {
+		t.Error(`globalFlags{}.useAPI on "gogios xyz" = true, want false: must stay local and hit runGogios's validation`)
+	}
+	if !(globalFlags{}).useAPI([]string{"gogios", "status"}) {
+		t.Error(`globalFlags{}.useAPI on "gogios status" = false, want true: gogios defaults through the API, like monitoring`)
+	}
+}
+
 // fakeRemoteAPI is a minimal Siren-over-HTTP fixture for driving runRemote
 // end to end: GET / (root, linking to "fans" and "status"), GET /fans
 // (advertising fans-off with its required force checkbox, exactly as

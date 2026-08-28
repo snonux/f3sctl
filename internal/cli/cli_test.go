@@ -5,11 +5,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -768,6 +772,216 @@ func TestPowerActionForBindsTheRightMethod(t *testing.T) {
 			}
 			if tt.host != "" && (len(spy.hosts) != 1 || spy.hosts[0] != tt.host) {
 				t.Errorf("hosts = %v, want [%s]", spy.hosts, tt.host)
+			}
+		})
+	}
+}
+
+// TestParseGogiosArgsValidatesSpellings pins the whole `gogios` grammar in
+// one table: every documented spelling parses to the spelling it names, and
+// every plausible malformed one (trailing junk, a missing "detail" name, a
+// half-written "cache clear") is rejected rather than guessed at.
+func TestParseGogiosArgsValidatesSpellings(t *testing.T) {
+	tests := []struct {
+		args []string
+		want gogiosSpelling
+		ok   bool
+	}{
+		{nil, gogiosSpelling{verb: "status"}, true},
+		{[]string{"status"}, gogiosSpelling{verb: "status"}, true},
+		{[]string{"critical"}, gogiosSpelling{verb: "critical"}, true},
+		{[]string{"warning"}, gogiosSpelling{verb: "warning"}, true},
+		{[]string{"unknown"}, gogiosSpelling{verb: "unknown"}, true},
+		{[]string{"stale"}, gogiosSpelling{verb: "stale"}, true},
+		{[]string{"suppressed"}, gogiosSpelling{verb: "suppressed"}, true},
+		{[]string{"ok"}, gogiosSpelling{verb: "ok"}, true},
+		{[]string{"detail", "x"}, gogiosSpelling{verb: "detail", name: "x"}, true},
+		{[]string{"detail", "Check", "Ping6", "r1"}, gogiosSpelling{verb: "detail", name: "Check Ping6 r1"}, true},
+		{[]string{"cache", "clear"}, gogiosSpelling{verb: "cache-clear"}, true},
+
+		{[]string{"bogus"}, gogiosSpelling{}, false},
+		{[]string{"status", "junk"}, gogiosSpelling{}, false},
+		{[]string{"critical", "junk"}, gogiosSpelling{}, false},
+		{[]string{"detail"}, gogiosSpelling{}, false},
+		{[]string{"cache"}, gogiosSpelling{}, false},
+		{[]string{"cache", "junk"}, gogiosSpelling{}, false},
+		{[]string{"cache", "clear", "junk"}, gogiosSpelling{}, false},
+	}
+
+	for _, tt := range tests {
+		name := strings.Join(tt.args, "_")
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			got, ok := parseGogiosArgs(tt.args)
+			if ok != tt.ok || got != tt.want {
+				t.Errorf("parseGogiosArgs(%v) = %+v, %v, want %+v, %v", tt.args, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
+// gogiosReportJSON is a small, valid Gogios report fixture for the local-path
+// tests below: one unhandled CRITICAL, one stale WARNING (lifecycle stale,
+// severity WARNING -- the case gogiosChecksForStatus' split exists for), and
+// one OK. Mirrors the shape internal/gogios/gogios_test.go's own fixture
+// documents.
+const gogiosReportJSON = `{
+  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:0 OK:1]",
+  "lastUpdated": "2026-08-27T08:58:18+02:00",
+  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":0,"ok":1},
+  "sections": {
+    "unhandled": [{"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","output":"timed out","epoch":1}],
+    "stale": [{"name":"Check SWAP blowfish","status":"WARNING","output":"SWAP WARNING","epoch":2,"lastCheckedAgeSeconds":99999}],
+    "ok": [{"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":3}]
+  }
+}`
+
+// gogiosFakeServer serves body for every request, counting hits so a test can
+// prove a cache-clear actually forced a second HTTP round trip.
+func gogiosFakeServer(t *testing.T, body string, status int) (*httptest.Server, *int32) {
+	t.Helper()
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// gogiosTestConfig points cfg.GogiosURL at srv and cfg.StateDir at a fresh
+// temp dir, the same hermetic setup internal/gogios/gogios_test.go uses.
+func gogiosTestConfig(t *testing.T, srv *httptest.Server) config.Config {
+	t.Helper()
+	cfg := testConfig(t, powertest.NewFakeShelly(t, true))
+	cfg.GogiosURL = srv.URL
+	cfg.StateDir = t.TempDir()
+	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
+	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
+	return cfg
+}
+
+// TestGogiosLocalShowsTheOverview drives runGogios's local path end to end:
+// --local is required because gogios routes through the API by default (see
+// isGogios), which this test deliberately bypasses to exercise
+// gogios.Fetch directly.
+func TestGogiosLocalShowsTheOverview(t *testing.T) {
+	srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios")
+	if err != nil {
+		t.Fatalf("--local gogios: %v", err)
+	}
+	if !strings.Contains(out, "GOGIOS Report") {
+		t.Errorf("output = %q, want the subject line", out)
+	}
+	if !strings.Contains(out, "critical=1") {
+		t.Errorf("output = %q, want the summary counts", out)
+	}
+}
+
+// TestGogiosLocalDrillsDownByCategory pins the lifecycle-vs-severity split at
+// the local layer: "stale" must list the WARNING check by lifecycle, not by
+// (nonexistent) "STALE" severity.
+func TestGogiosLocalDrillsDownByCategory(t *testing.T) {
+	srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", "stale")
+	if err != nil {
+		t.Fatalf("--local gogios stale: %v", err)
+	}
+	if !strings.Contains(out, "Check SWAP blowfish") {
+		t.Errorf("output = %q, want the stale check listed", out)
+	}
+}
+
+// TestGogiosLocalShowsOneChecksDetail pins the "detail <name>" verb,
+// including a name containing spaces reconstructed from multiple argv words.
+func TestGogiosLocalShowsOneChecksDetail(t *testing.T) {
+	srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", "detail", "Check", "Ping6", "r1.wg0.wan.buetow.org")
+	if err != nil {
+		t.Fatalf("--local gogios detail: %v", err)
+	}
+	if !strings.Contains(out, "name:   Check Ping6 r1.wg0.wan.buetow.org") || !strings.Contains(out, "status: CRITICAL") {
+		t.Errorf("output = %q, want the check's detail", out)
+	}
+}
+
+// TestGogiosLocalDetailReportsAnUnknownName is the negative case: a name
+// matching no check is an error, not a silent empty render.
+func TestGogiosLocalDetailReportsAnUnknownName(t *testing.T) {
+	srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+
+	_, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", "detail", "no", "such", "check")
+	if err == nil || !strings.Contains(err.Error(), "no such Gogios check") {
+		t.Errorf("err = %v, want it to say no such check", err)
+	}
+}
+
+// TestGogiosLocalCacheClearForcesARefetch pins the whole point of the verb:
+// a cache well within its TTL must not be served after a clear -- the very
+// next read has to hit the network again.
+func TestGogiosLocalCacheClearForcesARefetch(t *testing.T) {
+	srv, hits := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+
+	if _, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios"); err != nil {
+		t.Fatalf("priming the cache: %v", err)
+	}
+	if got := atomic.LoadInt32(hits); got != 1 {
+		t.Fatalf("hits after priming = %d, want 1", got)
+	}
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", "cache", "clear")
+	if err != nil {
+		t.Fatalf("--local gogios cache clear: %v", err)
+	}
+	if got := atomic.LoadInt32(hits); got != 2 {
+		t.Errorf("hits after cache clear = %d, want 2 (a clear must force a re-fetch)", got)
+	}
+	if !strings.Contains(out, "gogios cache cleared") || !strings.Contains(out, "GOGIOS Report") {
+		t.Errorf("output = %q, want the cleared confirmation and the fresh overview", out)
+	}
+}
+
+// TestGogiosRejectsUnknownVerbLocally mirrors TestMonitoringRejectsTrailingArgs:
+// none of these route to the API -- isGogios requires a real verb, the same
+// as isMonitoring -- so each reaches runGogios's own validation locally, with
+// no --local flag needed.
+func TestGogiosRejectsUnknownVerbLocally(t *testing.T) {
+	for _, args := range [][]string{
+		{"bogus"},
+		{"status", "junk"},
+		{"critical", "junk"},
+		{"cache"},
+		{"cache", "junk"},
+	} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			cfg := testConfig(t, powertest.NewFakeShelly(t, true))
+
+			out, errOut, err := runCLI(t, cfg, hostsUp(), append([]string{"gogios"}, args...)...)
+			if err == nil {
+				t.Fatalf("gogios %s succeeded; want a usage error", strings.Join(args, " "))
+			}
+			want := fmt.Sprintf("unknown gogios command %q", strings.Join(args, " "))
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %v, want it to contain %q", err, want)
+			}
+			if !strings.Contains(errOut, "f3sctl gogios") {
+				t.Errorf("stderr = %q, want the usage text", errOut)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing: no gogios read may have run", out)
 			}
 		})
 	}

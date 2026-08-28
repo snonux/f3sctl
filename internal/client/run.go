@@ -72,6 +72,9 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 	if cmd == "monitoring status" {
 		return c.showMonitoring(ctx)
 	}
+	if len(args) > 0 && args[0] == "gogios" {
+		return c.runGogios(ctx, args[1:], force)
+	}
 
 	// args[0] is the CLI noun ("power", "fans", "monitoring"). Where the root
 	// has a link with that rel, the matching resource is where the action is
@@ -121,8 +124,11 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 		// httpapi.Router.Actions). Either way, showing the state it was
 		// judged against is more useful than a bare error.
 		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
-		if holderRel == "monitoring" {
+		switch holderRel {
+		case "monitoring":
 			return c.showMonitoring(ctx)
+		case "gogios":
+			return c.showGogios(ctx)
 		}
 		return c.showStatus(ctx)
 	}
@@ -140,6 +146,14 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 		return c.waitForJob(ctx, root, id)
 	}
 
+	if action.Name == "gogios-cache-clear" {
+		// The action's own response already carries the fresh overview
+		// (handleGogiosClearCache re-renders it server-side), but showGogios
+		// re-fetches rather than rendering result directly, the same
+		// "mutate, then re-follow" shape the monitoring-* branch below uses
+		// for consistency across every action in this function.
+		return c.showGogios(ctx)
+	}
 	if strings.HasPrefix(action.Name, "monitoring-") {
 		return c.showMonitoring(ctx)
 	}
