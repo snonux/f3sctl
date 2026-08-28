@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -257,6 +259,173 @@ func (s *Server) setMute(ctx context.Context, state State, mute bool) (Entity, i
 
 	state.Monitoring = s.engine.MonitoringStatus(ctx)
 	return s.handleMonitoring(ctx, state, request{})
+}
+
+// handleGogios renders the Gogios alert report overview: the subject
+// headline, the six summary counts, when it was last updated, and links to
+// each drill-down category plus /monitoring (the separate mute concern).
+//
+// A fetch failure is reported as an "error" property with 200 OK, not a
+// non-2xx status -- the same convention handleFans/handleMonitoring use for a
+// backend that could not be reached: the resource itself (the report, or
+// whether it is currently obtainable) is what a client is asking about, and
+// that is still meaningful to render even when the answer is "unreachable".
+func (s *Server) handleGogios(_ context.Context, state State, _ request) (Entity, int, error) {
+	links := []Link{
+		{Rel: []string{"self"}, Href: s.router.Href("/gogios")},
+		{Rel: []string{"up"}, Href: s.router.Href("/")},
+		{Rel: []string{"monitoring"}, Href: s.router.Href("/monitoring")},
+	}
+	for _, status := range gogiosStatuses {
+		links = append(links, Link{Rel: []string{status}, Href: s.router.Href("/gogios/" + status)})
+	}
+
+	props := map[string]any{"node": s.node}
+	if state.GogiosErr != nil {
+		props["error"] = state.GogiosErr.Error()
+	} else {
+		props["subject"] = state.Gogios.Subject
+		props["lastUpdated"] = state.Gogios.LastUpdated
+		props["summary"] = map[string]any{
+			"critical":   state.Gogios.Summary.Critical,
+			"warning":    state.Gogios.Summary.Warning,
+			"unknown":    state.Gogios.Summary.Unknown,
+			"stale":      state.Gogios.Summary.Stale,
+			"suppressed": state.Gogios.Summary.Suppressed,
+			"ok":         state.Gogios.Summary.Ok,
+		}
+	}
+
+	return Entity{
+		Class:      []string{"gogios"},
+		Title:      "Gogios alert report",
+		Properties: props,
+		Links:      links,
+		Actions:    s.router.ActionsFor(state, "gogios-cache-clear"),
+	}, http.StatusOK, nil
+}
+
+// handleGogiosStatus returns the Handle for one gogiosStatuses drill-down
+// route: the checks in that category, or the fetch error, following the same
+// "error is a property, not a status code" convention as handleGogios.
+//
+// A closure bound to status, the same shape handleAction uses to bind an
+// action identifier -- routes generated in a loop (gogiosRoutes) need one
+// Handle per iteration value, not one shared function that would have to
+// re-derive status from the request path.
+func handleGogiosStatus(status string) func(*Server, context.Context, State, request) (Entity, int, error) {
+	return func(s *Server, _ context.Context, state State, _ request) (Entity, int, error) {
+		props := map[string]any{"status": status, "node": s.node}
+		e := Entity{
+			Class:      []string{"gogios", "checks"},
+			Title:      "Gogios " + strings.ToUpper(status) + " checks",
+			Properties: props,
+			Links: []Link{
+				{Rel: []string{"self"}, Href: s.router.Href("/gogios/" + status)},
+				{Rel: []string{"up"}, Href: s.router.Href("/gogios")},
+			},
+		}
+
+		if state.GogiosErr != nil {
+			props["error"] = state.GogiosErr.Error()
+			return e, http.StatusOK, nil
+		}
+
+		for _, c := range gogiosChecksForStatus(state.Gogios, status) {
+			e.Entities = append(e.Entities, gogiosCheckEntity(s, c))
+		}
+		return e, http.StatusOK, nil
+	}
+}
+
+// gogiosChecksForStatus selects the checks for one gogiosStatuses category.
+//
+// "critical"/"warning"/"unknown"/"ok" are severities: Report.ByStatus groups
+// every check, from every lifecycle section, by its own Status field.
+// "stale"/"suppressed" are lifecycle groupings instead -- a stale check keeps
+// whatever severity it already had, so filtering it out of ByStatus's result
+// would either double-count it under both a severity and a lifecycle
+// category, or require ByStatus to invent a status value Gogios itself never
+// writes. Reading Sections.Stale/Suppressed directly avoids both.
+func gogiosChecksForStatus(r *gogios.Report, status string) []gogios.Check {
+	switch status {
+	case "stale":
+		return r.Sections.Stale
+	case "suppressed":
+		return r.Sections.Suppressed
+	default:
+		return r.ByStatus()[strings.ToUpper(status)]
+	}
+}
+
+// gogiosCheckEntity renders one check, embeddable in a drill-down collection
+// or standalone from handleGogiosCheck.
+func gogiosCheckEntity(s *Server, c gogios.Check) Entity {
+	props := map[string]any{
+		"name":   c.Name,
+		"status": c.Status,
+		"output": c.Output,
+		"epoch":  c.Epoch,
+	}
+	if c.PrevStatus != "" {
+		props["prevStatus"] = c.PrevStatus
+	}
+	if c.FederatedFrom != "" {
+		props["federatedFrom"] = c.FederatedFrom
+	}
+	if c.LastCheckedAgeSeconds != 0 {
+		props["lastCheckedAgeSeconds"] = c.LastCheckedAgeSeconds
+	}
+	return Entity{
+		Class:      []string{"check"},
+		Rel:        []string{"item"},
+		Properties: props,
+		Links: []Link{
+			{Rel: []string{"self"}, Href: s.router.Href("/gogios/check") + "?name=" + url.QueryEscape(c.Name)},
+		},
+	}
+}
+
+// handleGogiosCheck renders one check's full detail, looked up by name from
+// the ?name= query parameter -- a query param rather than a path segment
+// because Router.Lookup matches exact paths only, and a check's name (it
+// mirrors the monitored command, e.g. "Check Ping6 r1.wg0.wan.buetow.org")
+// may itself contain spaces or slashes that a path segment cannot carry.
+//
+// Unlike handleGogios/handleGogiosStatus, a fetch failure here is a hard
+// error (502): those two render a list that can legitimately be empty or
+// degraded, but a single-entity lookup cannot answer "does this check exist"
+// at all without the report, so there is nothing meaningful to return as a
+// 200.
+func (s *Server) handleGogiosCheck(_ context.Context, state State, req request) (Entity, int, error) {
+	if state.GogiosErr != nil {
+		return Entity{}, http.StatusBadGateway, fmt.Errorf("fetching the Gogios report: %w", state.GogiosErr)
+	}
+
+	name := req.Query.Get("name")
+	check, ok := state.Gogios.Check(name)
+	if !ok {
+		return Entity{}, http.StatusNotFound, fmt.Errorf("no such Gogios check: %q", name)
+	}
+
+	e := gogiosCheckEntity(s, check)
+	e.Rel = nil
+	e.Title = "Gogios check: " + check.Name
+	e.Links = append(e.Links, Link{Rel: []string{"up"}, Href: s.router.Href("/gogios")})
+	return e, http.StatusOK, nil
+}
+
+// handleGogiosClearCache clears the on-disk Gogios cache and re-reads it, so
+// the very next read anywhere in the API sees a fresh fetch rather than
+// waiting out cfg.GogiosCacheTTL. Mirrors setMute's shape: mutate, then
+// re-populate state and re-render the overview, rather than assuming success.
+func (s *Server) handleGogiosClearCache(ctx context.Context, state State, _ request) (Entity, int, error) {
+	if err := gogios.ClearCache(s.cfg); err != nil {
+		return Entity{}, http.StatusInternalServerError, err
+	}
+
+	state.Gogios, state.GogiosErr = gogios.Fetch(ctx, s.cfg)
+	return s.handleGogios(ctx, state, request{})
 }
 
 // handleJob renders the current or last power operation.

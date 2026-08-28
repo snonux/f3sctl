@@ -7,6 +7,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -542,6 +543,62 @@ func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
 				t.Errorf("route %q is marked SkipsProbe but Fields depends on the probe: "+
 					"%d fields with a probed state, %d without one", r.Name, got, want)
 			}
+		}
+	}
+}
+
+// TestGogiosRoutesExist pins the full Gogios API surface by name, method and
+// path -- direct regression protection for the route table beyond what the
+// generic TestRoutesAreUnique/TestOpenAPICoversEveryRoute already give it,
+// matching the "Gogios alerting" section of docs/CLIENT.md. Every one of them
+// reads only the cached/fetched report (or, for the drill-down routes,
+// State.Gogios via the closures in gogiosRoutes), so all are
+// SkipsProbe:true -- see gogiosRoutes' doc comment.
+func TestGogiosRoutesExist(t *testing.T) {
+	want := []struct {
+		name, method, path string
+		action             bool
+	}{
+		{"gogios", http.MethodGet, "/gogios", false},
+		{"gogios-critical", http.MethodGet, "/gogios/critical", false},
+		{"gogios-warning", http.MethodGet, "/gogios/warning", false},
+		{"gogios-unknown", http.MethodGet, "/gogios/unknown", false},
+		{"gogios-stale", http.MethodGet, "/gogios/stale", false},
+		{"gogios-suppressed", http.MethodGet, "/gogios/suppressed", false},
+		{"gogios-ok", http.MethodGet, "/gogios/ok", false},
+		{"gogios-check", http.MethodGet, "/gogios/check", false},
+		{"gogios-cache-clear", http.MethodPost, "/gogios/cache/clear", true},
+	}
+
+	for _, tc := range want {
+		r, ok := routeByName(tc.name)
+		if !ok {
+			t.Errorf("no route named %q", tc.name)
+			continue
+		}
+		if r.Method != tc.method || r.Path != tc.path {
+			t.Errorf("route %q = %s %s, want %s %s", tc.name, r.Method, r.Path, tc.method, tc.path)
+		}
+		if r.Action != tc.action {
+			t.Errorf("route %q Action=%v, want %v", tc.name, r.Action, tc.action)
+		}
+		if !r.SkipsProbe {
+			t.Errorf("route %q is not SkipsProbe, but never reads Hosts/Fans", tc.name)
+		}
+	}
+}
+
+// TestGogiosCacheClearIsAlwaysAvailable pins the one Available exception in
+// this group: every other action route withholds itself in some state, but
+// clearing the cache never does.
+func TestGogiosCacheClearIsAlwaysAvailable(t *testing.T) {
+	r, ok := routeByName("gogios-cache-clear")
+	if !ok {
+		t.Fatal("no gogios-cache-clear action")
+	}
+	for _, s := range []State{{}, {GogiosErr: errFake{}}, {Gogios: &gogios.Report{}}} {
+		if !r.available(s) {
+			t.Errorf("gogios-cache-clear unavailable for state %+v, want always available", s)
 		}
 	}
 }

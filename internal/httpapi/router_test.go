@@ -81,6 +81,34 @@ func TestRouterLinksOmitsActions(t *testing.T) {
 	}
 }
 
+// TestRouterLinksOmitsNoRootLinkRoutes is the regression test for the
+// gogios-check root-link bug: a GET resource whose href is meaningless
+// without a query string (?name=...) must not appear in Router.Links(),
+// since a client following docs/CLIENT.md's "use the href exactly as given"
+// rule would otherwise 404 on every root fetch. Every other GET resource
+// still must appear -- this pins the exclusion as an exception, not a
+// regression that silently drops links wholesale.
+func TestRouterLinksOmitsNoRootLinkRoutes(t *testing.T) {
+	rt := NewRouter("", inventory.Default())
+	links := rt.Links()
+
+	for _, l := range links {
+		if len(l.Rel) > 0 && l.Rel[0] == "gogios-check" {
+			t.Errorf("gogios-check rendered as a root link (%+v); its href is meaningless without ?name=", l)
+		}
+	}
+
+	var sawGogios bool
+	for _, l := range links {
+		if len(l.Rel) > 0 && l.Rel[0] == "gogios" {
+			sawGogios = true
+		}
+	}
+	if !sawGogios {
+		t.Error("the gogios overview route was not rendered as a root link, want it present")
+	}
+}
+
 // TestRouterActionsForNarrowsToTheNamedRoutes pins that a resource-scoped
 // actions list never leaks an action belonging to a different resource.
 func TestRouterActionsForNarrowsToTheNamedRoutes(t *testing.T) {

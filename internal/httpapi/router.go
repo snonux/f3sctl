@@ -66,10 +66,13 @@ func (rt *Router) PathExists(path string) bool {
 }
 
 // Links renders every resource as a navigable link.
+//
+// A route may opt out via NoRootLink when its bare href (no query string) is
+// not a meaningful thing to follow -- see that field's doc comment.
 func (rt *Router) Links() []Link {
 	var out []Link
 	for _, r := range routes(rt.inv) {
-		if r.Action || r.Method != http.MethodGet {
+		if r.Action || r.Method != http.MethodGet || r.NoRootLink {
 			continue
 		}
 		out = append(out, Link{Rel: []string{r.Name}, Href: rt.Href(r.Path), Title: r.Title})

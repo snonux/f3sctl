@@ -3,8 +3,10 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -33,6 +35,15 @@ const jobPath = "/job"
 // second one -- see enrichState and handleStatus.
 const statusPath = "/status"
 
+// gogiosStatuses is the fixed set of Gogios drill-down categories, matching
+// the six counts in the report's own subject headline
+// ("[C:.. W:.. U:.. S:.. SU:.. OK:..]"). "stale" and "suppressed" are
+// lifecycle groupings (gogios.Report.Sections.Stale/Suppressed), not
+// severities -- a stale check keeps its own underlying CRITICAL/WARNING/
+// UNKNOWN/OK status -- which is why gogiosChecksForStatus (handlers.go)
+// handles those two differently from the other four.
+var gogiosStatuses = []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
+
 // State is a snapshot of the world, taken once per request before anything is
 // rendered.
 //
@@ -47,6 +58,15 @@ type State struct {
 	// collected for this request: reading it costs two SSH round trips to the
 	// gateways, so only the routes that render it pay for it.
 	Monitoring []power.GatewayMute
+
+	// Gogios is the fetched-or-cached Gogios alert report (internal/gogios),
+	// populated by enrichState only for /gogios* paths -- reading it costs an
+	// HTTP round trip on a cold cache, so only those routes pay for it. Nil
+	// when not collected for this request, or when the fetch failed; the two
+	// are told apart by GogiosErr, the same pattern State.Fans/FansErr uses.
+	Gogios *gogios.Report
+	// GogiosErr is set when the Gogios fetch failed; Gogios is nil in that case.
+	GogiosErr error
 
 	// PeerBusy reports whether the *other* API node is running a job.
 	//
@@ -164,6 +184,17 @@ type route struct {
 	// Action marks a state change (rendered in "actions"). Routes without it
 	// are resources, rendered in "links".
 	Action bool
+	// NoRootLink excludes a GET resource from Router.Links(), the root
+	// entity's own link list. Every other GET route is safe to follow exactly
+	// as its bare href appears there (docs/CLIENT.md tells clients they may
+	// always do that) -- but gogios-check's Path carries no room for the
+	// check name (it is a mandatory query parameter, ?name=...; see
+	// gogiosRoutes' doc comment for why it cannot be a path segment), so its
+	// bare href resolves to nothing and following it as given 404s every
+	// time. Zero value is false: a new GET route is linked from root by
+	// default, and must opt out explicitly, the same "opt-in, not silently
+	// inherited" discipline SkipsProbe uses.
+	NoRootLink bool
 	// SkipsProbe declares that this route's own Handle, and every
 	// Available/Fields predicate the router evaluates while rendering it,
 	// provably never read State.Hosts or State.Fans -- so Server.snapshot
@@ -247,6 +278,7 @@ func routes(inv inventory.Inventory) []route {
 
 	out = append(out, fanActionRoutes()...)
 	out = append(out, monitoringActionRoutes()...)
+	out = append(out, gogiosRoutes()...)
 	return out
 }
 
@@ -440,6 +472,65 @@ func monitoringActionRoutes() []route {
 			Handle: (*Server).handleMute,
 		},
 	}
+}
+
+// gogiosRoutes is the read-only Gogios alert-browse surface: an overview, a
+// fixed drill-down route per gogiosStatuses category, a per-check detail
+// lookup (by ?name=, not a path segment -- Router.Lookup matches exact paths
+// only, and a check name may itself contain spaces/slashes), and the
+// cache-clear action.
+//
+// This is a separate concern from monitoringActionRoutes: that pair mutes or
+// unmutes Gogios alerting on the two gateways (a write, via power.Engine),
+// while this reads the alert report itself (internal/gogios, never touching
+// the engine). handleGogios cross-links to /monitoring so a client can reach
+// the mute controls from the report, but the two surfaces stay independent.
+func gogiosRoutes() []route {
+	out := []route{
+		{
+			Name: "gogios", Title: "Gogios alert report",
+			Method: http.MethodGet, Path: "/gogios",
+			// handleGogios and every /gogios* handler below read only
+			// state.Gogios/state.GogiosErr (populated by enrichState for this
+			// path prefix), never state.Hosts/state.Fans.
+			SkipsProbe: true,
+			Handle:     (*Server).handleGogios,
+		},
+	}
+
+	for _, status := range gogiosStatuses {
+		out = append(out, route{
+			Name: "gogios-" + status, Title: "Gogios " + strings.ToUpper(status) + " checks",
+			Method: http.MethodGet, Path: "/gogios/" + status,
+			SkipsProbe: true,
+			Handle:     handleGogiosStatus(status),
+		})
+	}
+
+	out = append(out,
+		route{
+			Name: "gogios-check", Title: "One Gogios check's detail",
+			Method: http.MethodGet, Path: "/gogios/check",
+			// Not linked from root: its href is meaningless without ?name=,
+			// which Router.Links() has no way to fill in. A client reaches it
+			// through each check entity's own self link instead (see
+			// gogiosCheckEntity, handlers.go) -- handleGogios deliberately
+			// never links to the bare route either.
+			NoRootLink: true,
+			SkipsProbe: true,
+			Handle:     (*Server).handleGogiosCheck,
+		},
+		route{
+			Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
+			Method: http.MethodPost, Path: "/gogios/cache/clear", Action: true,
+			CLIVerb: "gogios cache clear",
+			// Always advertised: unlike the power/fan/monitoring actions, there
+			// is no state in which clearing the cache would fail to make sense.
+			SkipsProbe: true,
+			Handle:     (*Server).handleGogiosClearCache,
+		},
+	)
+	return out
 }
 
 // hostRoutes builds the on/off pair for one f-host.

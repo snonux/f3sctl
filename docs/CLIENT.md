@@ -193,6 +193,40 @@ Treat `muted: true` while the fleet is up as a **warning worth surfacing**. It
 means a shutdown muted alerting and the un-mute never completed — the fleet is
 running with nobody watching it. `monitoring-unmute` is offered exactly then.
 
+### Gogios alerting
+
+Follow the root's `gogios` link for the alert report overview: the subject
+headline, `lastUpdated`, and a `summary` of the six counts Gogios itself
+reports (`critical`/`warning`/`unknown`/`stale`/`suppressed`/`ok`):
+
+```json
+{ "class": ["gogios"],
+  "properties": {"subject": "GOGIOS Report [C:1 W:0 U:0 S:0 SU:0 OK:42]",
+                 "lastUpdated": "2026-08-27T08:58:18+02:00", "node": "pi0",
+                 "summary": {"critical":1,"warning":0,"unknown":0,"stale":0,"suppressed":0,"ok":42}},
+  "links": [ {"rel":["critical"], "href":"/cgi-bin/f3sctl/gogios/critical"},
+             {"rel":["warning"],  "href":"/cgi-bin/f3sctl/gogios/warning"}, "...",
+             {"rel":["monitoring"], "href":"/cgi-bin/f3sctl/monitoring"} ],
+  "actions": [{"name":"gogios-cache-clear", "method":"POST",
+               "href":"/cgi-bin/f3sctl/gogios/cache/clear"}] }
+```
+
+Follow one of the six `rel`s to drill down into that category's checks. Note
+`critical`/`warning`/`unknown`/`ok` group by a check's own severity, while
+`stale`/`suppressed` group by lifecycle instead — a stale check keeps
+whatever severity it already had, so it can legitimately appear under both
+its severity link and `stale`. Each check entity carries its own `self` link
+with `?name=` already filled in; **do not** build that query string yourself
+or reuse the bare route — a check's name is mandatory and the API does not
+advertise a root-level link for it (see the per-check `self` link instead).
+
+A `gogios` (or drill-down) entity carrying `error` instead of its usual
+properties means the report itself is currently unreachable — same
+"unknown, not off" rule as `/fans` and `/monitoring`: render it as unknown,
+never as "no alerts". `gogios-cache-clear` is always offered; it clears the
+server's on-disk cache and returns the fresh overview, for when an operator
+knows Gogios itself just changed and does not want to wait out the cache TTL.
+
 ---
 
 ## 5. Actions that take time

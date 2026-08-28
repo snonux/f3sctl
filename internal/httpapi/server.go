@@ -11,6 +11,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -360,6 +361,17 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// monitoring-mute/unmute are judged against exactly this state.
 	if strings.HasPrefix(req.Path, "/monitoring") {
 		state.Monitoring = s.engine.MonitoringStatus(ctx)
+	}
+
+	// The Gogios alert report is cached on disk (internal/gogios) but still
+	// costs a stat, and on a cold or expired cache an HTTP round trip to the
+	// federated endpoint, so it is fetched only for the routes that render it.
+	// handleGogiosClearCache re-fetches after clearing the cache, so this
+	// fetch's result is discarded there rather than reused -- the same
+	// "populate for availability, then recompute in the handler" shape
+	// setMute already uses for state.Monitoring.
+	if strings.HasPrefix(req.Path, "/gogios") {
+		state.Gogios, state.GogiosErr = gogios.Fetch(ctx, s.cfg)
 	}
 
 	return state
