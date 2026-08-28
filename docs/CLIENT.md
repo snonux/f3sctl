@@ -237,19 +237,17 @@ property rather than sending an empty string or a `0`:
 ```json
 { "class": ["check"], "rel": ["item"],
   "properties": {"name": "Check Ping6 r1.wg0.wan.buetow.org", "status": "CRITICAL",
-                 "output": "connect: no route to host", "epoch": 1798534698,
+                 "output": "connect: no route to host", "epoch": 1787834698,
                  "prevStatus": "OK", "federatedFrom": "fishfinger",
                  "lastCheckedAgeSeconds": 187},
   "links": [ {"rel":["self"],
-              "href":"/cgi-bin/f3sctl/gogios/check?name=Check%20Ping6%20r1.wg0.wan.buetow.org"} ] }
+              "href":"/cgi-bin/f3sctl/gogios/check?name=Check+Ping6+r1.wg0.wan.buetow.org"} ] }
 ```
 
 A check's `name` mirrors the monitored command, so it can contain spaces,
 dots and slashes — the reason it travels as the `?name=` query parameter
-rather than a path segment, and would need URL-encoding if a client ever
-built that query string by hand. It shouldn't have to: as above, every check
-entity's `self` link already carries `name` pre-encoded, so fetch `self`
-rather than assembling `/gogios/check?name=...` yourself.
+(form-encoded, so a space becomes `+`) rather than a path segment. As already
+noted above, fetch it from `self` rather than encoding it by hand.
 
 The report is served from an on-disk cache for `GogiosCacheTTL` (60 seconds
 by default, operator-configurable): a `/gogios*` read may return a report up
