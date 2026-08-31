@@ -111,7 +111,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 func (sf *Surface) reportRoutes() []contract.Route {
 	out := []contract.Route{
 		{
-			Name: "gogios", Title: "Gogios alert report",
+			Name: "gogios", Title: "Gogios status and alerting",
 			Method: http.MethodGet, Path: "/gogios",
 			// handleOverview and every /gogios* handler below read only
 			// state.Gogios/state.GogiosErr (populated by enrichState for this
