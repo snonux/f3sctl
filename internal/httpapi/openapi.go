@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/snonux/f3sctl/internal"
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -15,14 +16,14 @@ import (
 // This is the second half of "self-describing", aimed at a different reader.
 // Siren tells a running client what it may do *at this moment*; OpenAPI tells
 // a code generator, a test, or a person what the surface is in general. Both
-// come from routes(), so neither can describe an endpoint that does not exist
-// or miss one that does.
+// come from the same route registry (registry.go's buildRoutes), so neither
+// can describe an endpoint that does not exist or miss one that does.
 // It is the one route not wrapped in a Siren envelope -- an OpenAPI document
 // has its own well-known shape, and burying it inside "properties" would make
 // it useless to every tool that reads OpenAPI. serve() recognises it by path
 // and writes Properties out as the whole body.
-func (s *Server) handleOpenAPI(_ context.Context, _ State, _ request) (Entity, int, error) {
-	return Entity{Properties: s.openapi.Build()}, http.StatusOK, nil
+func (s *Server) handleOpenAPI(_ context.Context, _ contract.State, _ contract.Request) (contract.Entity, int, error) {
+	return contract.Entity{Properties: s.openapi.Build()}, http.StatusOK, nil
 }
 
 // openAPIPath is the route whose body is emitted raw rather than as Siren.
@@ -30,12 +31,13 @@ const openAPIPath = "/openapi.json"
 
 // OpenAPIBuilder generates the OpenAPI 3.1 document for the API surface.
 //
-// It is generated from the same route declarations (routes()) that drive
-// Router's Siren rendering, so the static document and what a client is
-// actually offered at runtime can never describe two different APIs. It
-// depends only on a Router for href resolution, not on Server, so the whole
-// document can be built and asserted on in a test without an engine, jobs or
-// peers.
+// It is generated from the same route declarations (the Router's table,
+// built by buildRoutes) that drive Router's Siren rendering, so the static
+// document
+// and what a client is actually offered at runtime can never describe two
+// different APIs. It depends only on a Router for route lookup and href
+// resolution, not on Server, so the whole document can be built and asserted
+// on in a test without an engine, jobs or peers.
 type OpenAPIBuilder struct {
 	router *Router
 }
@@ -49,7 +51,7 @@ func NewOpenAPIBuilder(router *Router) *OpenAPIBuilder {
 func (b *OpenAPIBuilder) Build() map[string]any {
 	paths := map[string]any{}
 
-	for _, r := range routes(b.router.inv) {
+	for _, r := range b.router.routes {
 		if r.Path == openAPIPath {
 			continue
 		}
@@ -81,7 +83,7 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 }
 
 // operationFor renders one route's OpenAPI Operation Object.
-func operationFor(r route) map[string]any {
+func operationFor(r contract.Route) map[string]any {
 	op := map[string]any{
 		"operationId": r.Name,
 		"summary":     r.Title,
@@ -121,13 +123,13 @@ func operationFor(r route) map[string]any {
 // one in which every conditional field appears. A static description should
 // list everything an action can ever accept, and say (as the operation
 // description does) that availability is decided at runtime.
-func describeFields(r route) map[string]any {
+func describeFields(r contract.Route) map[string]any {
 	if r.Fields == nil {
 		return nil
 	}
 
 	out := map[string]any{}
-	for _, f := range r.Fields(widestState()) {
+	for _, f := range r.FieldsFor(widestState()) {
 		typ := "string"
 		if f.Type == "checkbox" {
 			typ = "boolean"
@@ -140,8 +142,8 @@ func describeFields(r route) map[string]any {
 // widestState is a synthetic state chosen to make every conditional field
 // appear: an f-host known to be up (which is what adds the fans-off
 // confirmation) and no job running.
-func widestState() State {
-	return State{
+func widestState() contract.State {
+	return contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
 		},

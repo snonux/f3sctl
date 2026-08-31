@@ -5,27 +5,32 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/gogios"
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
 // Server answers one CGI request.
 //
-// It owns no coordination logic of its own, and increasingly little else:
-// whether a job may start, whether the peer node is busy, and the job's
-// lifecycle all live in internal/coordination, injected here as jobs and
-// peers; the API key check, route matching/href-building, response
+// It owns no coordination logic of its own, and little else besides the
+// composition itself: whether a job may start, whether the peer node is busy,
+// and the job's lifecycle all live in internal/coordination, injected here as
+// jobs and peers; the API key check, route matching/href-building, response
 // serialisation and the OpenAPI doc live in Authenticator, Router,
-// SirenRenderer and OpenAPIBuilder, respectively. Server's own job is to
-// compose these -- parse the request, ask engine/jobs/peers/auth/router what
-// is true, hand the answer to siren to render.
+// SirenRenderer and OpenAPIBuilder; and the domain routes and handlers live in
+// the two surface packages, internal/gogiosapi and internal/powerapi, each
+// holding exactly one concern of the API. Server's own job is to compose
+// these -- build the shared collaborators, assemble the route table out of the
+// surfaces, parse the request, ask engine/jobs/peers/auth/router what is true,
+// hand the answer to the route to render.
 type Server struct {
 	cfg    config.Config
 	engine *power.Engine
@@ -44,18 +49,12 @@ type Server struct {
 	// handed back to clients. See Router.
 	router *Router
 	// openapi generates the OpenAPI document served at /openapi.json, from
-	// the same route declarations router uses. See OpenAPIBuilder.
+	// the same route declarations router serves. See OpenAPIBuilder.
 	openapi *OpenAPIBuilder
 	// siren writes every response -- Siren entity, plain JSON, or error --
 	// in the CGI wire format. See SirenRenderer.
 	siren SirenRenderer
 	node  string
-
-	// rackConfirm re-probes what is running in the rack, with the consecutive
-	// -silence evidence the fan guard demands before anything cuts cooling.
-	// Nil means the engine's own probe; only tests substitute anything else.
-	// See Server.confirmRack.
-	rackConfirm func(context.Context) power.RackActivity
 
 	// probeHosts probes every host worth reporting, feeding State.Hosts. Nil
 	// means the engine's own probe (Engine.ProbeAll, ~3s of concurrent
@@ -69,26 +68,6 @@ type Server struct {
 	// HTTP call bounded by a 5s timeout); same reasoning as probeHosts. See
 	// Server.fansStatusFn.
 	fansStatus func(context.Context) (power.FansState, error)
-}
-
-// request is the parsed CGI request.
-type request struct {
-	Method string
-	Path   string
-	Query  url.Values
-	Form   url.Values
-	APIKey string
-}
-
-// boolField reads a checkbox field from the query string or the form body.
-func (r request) boolField(name string) bool {
-	for _, v := range []string{r.Form.Get(name), r.Query.Get(name)} {
-		switch strings.ToLower(v) {
-		case "true", "1", "on", "yes":
-			return true
-		}
-	}
-	return false
 }
 
 // ServeCGI answers a single CGI request read from the process environment and
@@ -120,43 +99,62 @@ func newServer(cfg config.Config) (*Server, error) {
 		return nil, err
 	}
 	node, _ := os.Hostname()
-	router := NewRouter(strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/"), cfg.Inventory)
-	return &Server{
-		cfg:     cfg,
-		engine:  eng,
-		jobs:    coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)),
-		peers:   coordination.NewPeerSet(cfg.PeerNodes, resolvePeerJobPath(cfg, router)),
-		auth:    NewAuthenticator(cfg.APIKeyFile),
-		router:  router,
-		openapi: NewOpenAPIBuilder(router),
-		siren:   NewSirenRenderer(),
-		node:    node,
-	}, nil
+
+	base := strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/")
+	href := contract.Hrefs(base)
+	jobs := coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg))
+	peers := coordination.NewPeerSet(cfg.PeerNodes, resolvePeerJobPath(cfg, base))
+
+	// The two domain surfaces, each bound to exactly the collaborators its
+	// handlers need. Both share this node's href builder and, once the Router
+	// exists below, the same action rendering -- the single Siren source.
+	pw := powerapi.New(node, href, cfg.Inventory, eng, jobs, peers)
+	gg := gogiosapi.New(node, href, cfg, eng)
+
+	srv := &Server{
+		cfg:    cfg,
+		engine: eng,
+		jobs:   jobs,
+		peers:  peers,
+		auth:   NewAuthenticator(cfg.APIKeyFile),
+		siren:  NewSirenRenderer(),
+		node:   node,
+	}
+	return srv.assemble(cfg.Inventory, pw, gg, base), nil
 }
 
-// defaultCGIMount is this project's own documented CGI mount convention (see
-// README.md's example config, and config.Default() before uy0). It is the
-// last-resort fallback resolvePeerJobPath uses when this node's own router
-// has no base to derive anything from -- see that function's doc comment for
-// why an empty base cannot be trusted as "mounted at the root".
-const defaultCGIMount = "/cgi-bin/f3sctl"
+// assemble builds this Server's route table, hangs a Router (and the OpenAPI
+// builder over it) off the Server, and injects the router's action rendering
+// into both surfaces -- the wiring that makes the Server servable. It is its
+// own step so tests can construct a Server literal, wire the surfaces they
+// want, and go through exactly the same route-table and injection path
+// production takes.
+func (s *Server) assemble(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) *Server {
+	router := NewRouter(base, s.buildRoutes(inv, pw, gg))
+	s.router = router
+	s.openapi = NewOpenAPIBuilder(router)
+
+	pw.Actions, pw.ActionsFor = router.actions, router.actionsFor
+	gg.ActionsFor = router.actionsFor
+	return s
+}
 
 // resolvePeerJobPath returns the URL path this node asks a peer for its
 // current job.
 //
 // An explicit cfg.PeerJobPath always wins, for the rare case where the two
 // peers are not mounted the same way. Otherwise (the default) it is derived
-// from this node's own mount via router.Href -- the identical mechanism
-// every link and action handed back to a client already goes through -- on
-// the assumption that pi0 and pi1 are symmetric peers sharing one CGI mount.
-// That keeps a SCRIPT_NAME remount a one-place change instead of two: without
-// this, an operator who moves the mount point but forgets the separate
-// peer_job_path config value gets a peer check that silently reads back as
-// idle forever, which is the dangerous failure mode -- two jobs can start.
+// from this node's own mount -- the identical mechanism every link and action
+// handed back to a client already goes through -- on the assumption that pi0
+// and pi1 are symmetric peers sharing one CGI mount. That keeps a SCRIPT_NAME
+// remount a one-place change instead of two: without this, an operator who
+// moves the mount point but forgets the separate peer_job_path config value
+// gets a peer check that silently reads back as idle forever, which is the
+// dangerous failure mode -- two jobs can start.
 //
-// The one case that derivation must NOT be trusted for: router.base itself
-// being empty. That happens whenever this node's own SCRIPT_NAME was empty or
-// missing when the Router was built (bozohttpd not setting it, a proxy that
+// The one case that derivation must NOT be trusted for: base itself being
+// empty. That happens whenever this node's own SCRIPT_NAME was empty or
+// missing when the base was read (bozohttpd not setting it, a proxy that
 // strips the header, ServeCGI invoked outside its normal CGI harness) -- and
 // an empty SCRIPT_NAME is far more likely to be a broken environment than a
 // deliberate "the API is mounted at the filesystem root". Deriving anyway
@@ -169,17 +167,24 @@ const defaultCGIMount = "/cgi-bin/f3sctl"
 // hardcoded here before this derivation existed) is a safer bet than trusting
 // an empty base at face value, and matches what every real deployment of this
 // project actually uses.
-func resolvePeerJobPath(cfg config.Config, router *Router) string {
+func resolvePeerJobPath(cfg config.Config, base string) string {
 	if cfg.PeerJobPath != "" {
 		return cfg.PeerJobPath
 	}
-	if router.base == "" {
-		return defaultCGIMount + jobPath
+	if base == "" {
+		return defaultCGIMount + powerapi.JobPath
 	}
-	return router.Href(jobPath)
+	return contract.Href(base, powerapi.JobPath)
 }
 
-func (s *Server) serve(out io.Writer, req request) error {
+// defaultCGIMount is this project's own documented CGI mount convention (see
+// README.md's example config, and config.Default() before uy0). It is the
+// last-resort fallback resolvePeerJobPath uses when this node's own router
+// has no base to derive anything from -- see that function's doc comment for
+// why an empty base cannot be trusted as "mounted at the root".
+const defaultCGIMount = "/cgi-bin/f3sctl"
+
+func (s *Server) serve(out io.Writer, req contract.Request) error {
 	if err := s.auth.Check(req.APIKey); err != nil {
 		// Deliberately identical for a missing and a wrong key: telling an
 		// attacker which of the two they got is free information.
@@ -196,12 +201,12 @@ func (s *Server) serve(out io.Writer, req request) error {
 	}
 
 	// Bound the request itself. The detached power job is spawned by the
-	// request but deliberately outlives it (handleAction passes no context to
-	// jobs.Start), so this never cancels a running job -- it bounds only what
-	// this request does synchronously: the fleet probe, the Shelly read, the
-	// peer job round trip and the fan-guard re-confirm a `fans off` runs. A
-	// request wedged on a slow or dead backend aborts here cleanly rather
-	// than holding the CGI process open indefinitely.
+	// request but deliberately outlives it (the power surface's action handler
+	// passes no context to jobs.Start), so this never cancels a running job --
+	// it bounds only what this request does synchronously: the fleet probe,
+	// the Shelly read, the peer job round trip and the fan-guard re-confirm a
+	// `fans off` runs. A request wedged on a slow or dead backend aborts here
+	// cleanly rather than holding the CGI process open indefinitely.
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.CGITimeout.D())
 	defer cancel()
 	state := s.enrichState(ctx, s.snapshot(ctx, req), req)
@@ -210,12 +215,12 @@ func (s *Server) serve(out io.Writer, req request) error {
 	// handler runs. A well-written client never reaches this: it was not
 	// offered the action in the first place. This is the backstop for a
 	// client racing another, or one that ignored the contract.
-	if r.Action && !r.available(state) {
+	if r.Action && !r.IsAvailable(state) {
 		return s.siren.WriteError(out, http.StatusConflict,
 			fmt.Sprintf("%q is not available right now; re-fetch the resource and read its actions", r.Name))
 	}
 
-	entity, status, err := r.Handle(s, ctx, state, req)
+	entity, status, err := r.Handle(ctx, state, req)
 	if err != nil {
 		return s.siren.WriteError(out, status, err.Error())
 	}
@@ -235,16 +240,14 @@ func (s *Server) serve(out io.Writer, req request) error {
 // concurrent ping+TCP probes bounded by ProbeTimeout+1s each (~3s total);
 // Fans costs Engine.FansStatus, an HTTP round trip to the Shelly plug bounded
 // by a 5s timeout. Every Available predicate and every handler that reads
-// either lives in routes whose Path does NOT satisfy skipsProbe -- see that
-// function's doc for the routes excluded and why each one's handler and
-// predicates provably never look at state.Hosts or state.Fans. Paying for
-// both on every request used to mean /job, polled every 10s through a
-// multi-minute shutdown, waited out a full fleet probe and a plug read for
-// data it discards.
-func (s *Server) snapshot(ctx context.Context, req request) State {
-	st := State{Job: s.jobs.Read()}
+// either lives in routes whose SkipsProbe flag is false -- see that field's
+// doc comment in contract. Paying for both on every request used to mean
+// /job, polled every 10s through a multi-minute shutdown, waited out a full
+// fleet probe and a plug read for data it discards.
+func (s *Server) snapshot(ctx context.Context, req contract.Request) contract.State {
+	st := contract.State{Job: s.jobs.Read()}
 
-	if !skipsProbe(s.router.inv, req.Path) {
+	if !skipsProbe(s.router.routes, req.Path) {
 		st.Hosts = s.probeHostsFn()(ctx)
 		st.Fans, st.FansErr = s.fansStatusFn()(ctx)
 	}
@@ -256,19 +259,10 @@ func (s *Server) snapshot(ctx context.Context, req request) State {
 // predicate the router evaluates while rendering it -- so snapshot() can
 // skip the fleet probe and the Shelly read for it entirely.
 //
-// The route table is read from inv (s.router.inv in snapshot), so the
-// exemption set is the same inventory the engine acts on -- not the
-// compiled-in inventory.Default(); see routes' doc comment in registry.go.
-//
-// This used to be a hardcoded set of path prefixes (/job, /openapi.json,
-// /monitoring), correct only because it was checked by hand against every
-// handler at the time it was written -- nothing stopped a route added later
-// under one of those prefixes from silently inheriting the exemption without
-// anyone checking whether its own Available or Handle actually read
-// Hosts/Fans (see rz0). It now reads route.SkipsProbe instead: the same
-// per-route declaration registry.go's authors already have to get right,
-// kept next to the route it describes rather than duplicated as a second,
-// driftable list here.
+// The route table is read from the router's table, built once from the two
+// domain surfaces plus the composition root's own resources -- so the
+// exemption set is the same inventory the engine acts on, not the
+// compiled-in inventory.Default(); see buildRoutes' doc comment in registry.go.
 //
 // Looked up by path alone, ignoring method, the same as Router.PathExists:
 // every route in the registry has a unique Path (TestRoutesAreUnique), so
@@ -278,19 +272,18 @@ func (s *Server) snapshot(ctx context.Context, req request) State {
 // Router.Lookup has already found a route for this exact path.
 //
 // A resource route's own SkipsProbe therefore has to account for every
-// action its handler renders, not just its own Handle: handleMonitoring
-// renders monitoring-mute/monitoring-unmute via Router.ActionsFor, so
-// "/monitoring" being SkipsProbe:true is only correct because those two
-// action routes are SkipsProbe:true as well -- a fact
+// action its handler renders, not just its own Handle: the /monitoring
+// route being SkipsProbe:true is only correct because its mute/unmute
+// actions are SkipsProbe:true as well -- a fact
 // TestSkipsProbeRoutesDontDependOnHostsOrFans checks directly, since which
 // actions a resource's handler chooses to render is still a human's call to
 // get right when wiring up that handler, not something this function can
-// derive. Router.Actions/ActionsFor, called from handleRoot/handleStatus,
-// by contrast, evaluate every action route's Available predicate including
-// ones that do read Hosts/Fans -- but "/" and "/status" are not SkipsProbe
-// routes, so that is never an issue for them.
-func skipsProbe(inv inventory.Inventory, path string) bool {
-	for _, r := range routes(inv) {
+// derive. Router.Actions/ActionsFor, called from the status and root
+// resources, by contrast, evaluate every action route's Available predicate
+// including ones that do read Hosts/Fans -- but neither of those resources is
+// SkipsProbe, so that is never an issue for them.
+func skipsProbe(rs []contract.Route, path string) bool {
+	for _, r := range rs {
 		if r.Path == path {
 			return r.SkipsProbe
 		}
@@ -299,7 +292,7 @@ func skipsProbe(inv inventory.Inventory, path string) bool {
 }
 
 // probeHostsFn returns the fleet probe, falling back to the engine's real
-// one. Same nil-safety pattern as Server.confirmRack.
+// one. Same nil-safety pattern as the power surface's confirmRack.
 func (s *Server) probeHostsFn() func(context.Context) []power.HostStatus {
 	if s.probeHosts != nil {
 		return s.probeHosts
@@ -308,7 +301,7 @@ func (s *Server) probeHostsFn() func(context.Context) []power.HostStatus {
 }
 
 // fansStatusFn returns the Shelly plug read, falling back to the engine's
-// real one. Same nil-safety pattern as Server.confirmRack.
+// real one. Same nil-safety pattern as the power surface's confirmRack.
 func (s *Server) fansStatusFn() func(context.Context) (power.FansState, error) {
 	if s.fansStatus != nil {
 		return s.fansStatus
@@ -318,9 +311,9 @@ func (s *Server) fansStatusFn() func(context.Context) (power.FansState, error) {
 
 // enrichState adds the request-scoped facts that cost more than the local
 // probes in snapshot() to gather -- the peer node's job state, and, only for
-// /monitoring routes, the Gogios mute -- so serve() pays for them only when a
-// route actually needs them.
-func (s *Server) enrichState(ctx context.Context, state State, req request) State {
+// the routes that render it, the Gogios mute and the alert report -- so
+// serve() pays for them only when a route actually needs them.
+func (s *Server) enrichState(ctx context.Context, state contract.State, req contract.Request) contract.State {
 	// Ask the other node whether it is mid-job, so actions this node advertises
 	// account for a job running over there.
 	//
@@ -333,9 +326,9 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// /job renders no actions, so it has no use for the answer anyway.
 	// openapi.json describes the surface rather than the moment.
 	//
-	// /job does still make its own, separate peer round trip -- handleJob's
-	// currentJob, so a client sees the same "current or last job" regardless
-	// of which of pi0/pi1 it asked -- but that one is bounded the other way:
+	// /job does still make its own, separate peer round trip -- the power
+	// surface's handleJob currentJob, so a client sees the same "current or
+	// last job" regardless of which of pi0/pi1 it asked -- but that one is bounded the other way:
 	// PeerQueryParam on the outgoing request tells the node answering it to
 	// skip its own currentJob merge, so the bounce this comment describes
 	// cannot happen there either. See coordination.PeerQueryParam.
@@ -345,12 +338,13 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// paying for a second, separate one here would double /status's
 	// worst-case latency against a peer that is genuinely down or timing out
 	// (2x3s instead of 3s) for no benefit -- handleStatus derives its own
-	// PeerBusy from the one peer fetch it already makes. See handleStatus.
+	// PeerBusy from the one peer fetch it already makes. See powerapi's
+	// handleStatus.
 	//
 	// An unreachable peer counts as idle, for the same reason PeerSet.Busy
 	// gives: if one node is down the other must still be able to power the
 	// cluster on.
-	if req.Path != openAPIPath && req.Path != jobPath && req.Path != statusPath {
+	if req.Path != openAPIPath && req.Path != powerapi.JobPath && req.Path != powerapi.StatusPath {
 		state.PeerBusy, _ = s.peers.Busy(ctx, s.node, req.APIKey)
 	}
 
@@ -359,18 +353,18 @@ func (s *Server) enrichState(ctx context.Context, state State, req request) Stat
 	// render or change it. Every other response would pay ~2s for a value it
 	// never shows. This runs before the availability check in serve() because
 	// monitoring-mute/unmute are judged against exactly this state.
-	if strings.HasPrefix(req.Path, "/monitoring") {
+	if gogiosapi.IsMonitorPath(req.Path) {
 		state.Monitoring = s.engine.MonitoringStatus(ctx)
 	}
 
 	// The Gogios alert report is cached on disk (internal/gogios) but still
 	// costs a stat, and on a cold or expired cache an HTTP round trip to the
 	// federated endpoint, so it is fetched only for the routes that render it.
-	// handleGogiosClearCache re-fetches after clearing the cache, so this
-	// fetch's result is discarded there rather than reused -- the same
-	// "populate for availability, then recompute in the handler" shape
-	// setMute already uses for state.Monitoring.
-	if strings.HasPrefix(req.Path, "/gogios") {
+	// The Gogios surface's clear-cache handler re-fetches after clearing the
+	// cache, so this fetch's result is discarded there rather than reused --
+	// the same "populate for availability, then recompute in the handler"
+	// shape the mute handlers already use for state.Monitoring.
+	if gogiosapi.IsReportPath(req.Path) {
 		state.Gogios, state.GogiosErr = gogios.Fetch(ctx, s.cfg)
 	}
 

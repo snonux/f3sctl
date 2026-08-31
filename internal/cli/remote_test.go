@@ -233,8 +233,9 @@ func TestIsGogiosAgreesWithParseGogiosArgs(t *testing.T) {
 
 // fakeRemoteAPI is a minimal Siren-over-HTTP fixture for driving runRemote
 // end to end: GET / (root, linking to "fans" and "status"), GET /fans
-// (advertising fans-off with its required force checkbox, exactly as
-// internal/httpapi/registry.go does), POST /fans/off, and GET /status (so
+// (advertising fans-off with its required force checkbox, declared by the
+// server's power surface and advertised the way the composition root's Router
+// renders it), POST /fans/off, and GET /status (so
 // runAction's post-action showStatus has somewhere to land). It exists
 // because internal/client's own fake (internal/client/remote_test.go) is
 // unexported and this test wants to pin the *cli-side* wiring -- runRemote
@@ -297,7 +298,7 @@ func (f *fakeRemoteAPI) handleRoot(w http.ResponseWriter) {
 }
 
 // handleFans answers GET /fans, advertising fans-off with a required force
-// checkbox -- the same shape internal/httpapi/registry.go's real advertising
+// checkbox -- the same shape the power surface declares and the Router advertises
 // takes, which is what makes Client.Perform decide whether to fill the field.
 func (f *fakeRemoteAPI) handleFans(w http.ResponseWriter) {
 	writeRemoteEntity(w, client.Entity{

@@ -80,7 +80,7 @@ type HostProgress struct {
 }
 
 // NewestJob picks which of two jobs -- typically this node's own and its
-// peer's, see httpapi.currentJob and PeerSet.FetchJob -- is the one to
+// peer's, see powerapi's currentJob and PeerSet.FetchJob -- is the one to
 // report for "current or last power job". Either argument may be nil,
 // meaning that side has none.
 //

@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+
 	"bytes"
 	"encoding/json"
 	"net/http"
@@ -31,7 +33,7 @@ func splitCGIResponse(t *testing.T, raw string) (headers map[string]string, body
 // Siren media type, and the entity marshalled as its own JSON body.
 func TestSirenRendererWriteEntityShape(t *testing.T) {
 	var buf bytes.Buffer
-	e := Entity{Class: []string{"status"}, Properties: map[string]any{"node": "pi0"}}
+	e := contract.Entity{Class: []string{"status"}, Properties: map[string]any{"node": "pi0"}}
 
 	if err := (SirenRenderer{}).WriteEntity(&buf, http.StatusOK, e); err != nil {
 		t.Fatalf("WriteEntity: %v", err)
@@ -48,7 +50,7 @@ func TestSirenRendererWriteEntityShape(t *testing.T) {
 		t.Errorf("Cache-Control = %q, want %q", headers["Cache-Control"], "no-store")
 	}
 
-	var got Entity
+	var got contract.Entity
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatalf("body is not valid JSON: %v\nbody: %s", err, body)
 	}

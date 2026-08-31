@@ -17,13 +17,14 @@ import (
 // fakeAPI is a minimal stand-in for the httpapi server, wired just well enough
 // to drive the client's --remote path end to end over real HTTP: GET /
 // (root, with links to "fans" and "status"), GET /fans (advertising the
-// fans-off action with its force checkbox, exactly as
-// internal/httpapi/registry.go does), POST /fans/off (the action itself), and
+// fans-off action with its force checkbox, declared by the server's power
+// surface and advertised the way the composition root's Router renders it),
+// POST /fans/off (the action itself), and
 // GET /status (so runAction's post-action showStatus has somewhere to land).
 //
 // This is deliberately not a copy of httpapi's own Siren rendering -- it only
 // has to satisfy the wire contract client.Entity decodes, the same contract
-// docs/CLIENT.md documents and internal/httpapi/handlers_test.go exercises
+// docs/CLIENT.md documents and internal/httpapi/powerapi/handlers_test.go exercises
 // from the server side. Keeping the two independent is the point: a test
 // built by importing httpapi's renderer could pass by construction even if
 // the two packages had quietly drifted apart on the wire format.
@@ -33,9 +34,9 @@ type fakeAPI struct {
 
 	// coldSnapshot, when true, reproduces the gz0 disagreement: handleFans
 	// omits the "force" checkbox from the fans-off advertisement, as
-	// registry.go's cheap single-probe rackBusy() does when it reads the rack
+	// powerapi.RackBusy (the cheap single-probe snapshot) does when it reads the rack
 	// as idle, while handleFansOff still 409s without force=true, as
-	// handlers.go's stricter multi-probe rackStillBusy() does when it
+	// powerapi's stricter, re-probing rackStillBusy() does when it
 	// disagrees and finds a host up within the same request. When false (the
 	// zero value, used by every test predating gz0), the field is always
 	// advertised and never enforced without being offered first.
@@ -93,7 +94,7 @@ func (f *fakeAPI) handleRoot(w http.ResponseWriter) {
 }
 
 // handleFans answers GET /fans, advertising fans-off with a required force
-// checkbox -- the same shape internal/httpapi/registry.go's real advertising
+// checkbox -- the same shape the power surface declares and the Router advertises
 // takes, which is what makes Client.Perform decide whether to fill the
 // field -- unless coldSnapshot is set, in which case the field is omitted
 // entirely, mirroring a cheap snapshot that read the rack as idle.
@@ -118,7 +119,7 @@ func (f *fakeAPI) handleFans(w http.ResponseWriter) {
 // runs as a background job on the real server either.
 //
 // In coldSnapshot mode it also enforces the stricter half of the real gate:
-// a request without force=true is 409ed, standing in for handlers.go's
+// a request without force=true is 409ed, standing in for powerapi's
 // rackStillBusy finding a host up even though the (omitted) advertisement
 // above was built from a snapshot that read the rack as cold.
 func (f *fakeAPI) handleFansOff(w http.ResponseWriter, r *http.Request) {

@@ -9,9 +9,9 @@ import (
 )
 
 // gogiosStatuses is the fixed set of Gogios drill-down categories, mirroring
-// internal/httpapi/registry.go's own gogiosStatuses var and
+// internal/httpapi/gogiosapi/routes.go's Statuses var and
 // internal/cli.gogiosStatuses. Kept as a separate copy rather than exported
-// and shared across packages, the same duplication registry.go already
+// and shared across packages, the same deliberate duplication the route table
 // tolerates internally for these six literals.
 var gogiosStatuses = []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
 
@@ -78,7 +78,7 @@ func (c *Client) showGogiosStatus(ctx context.Context, status string) error {
 //
 // There is no hypermedia link directly to an arbitrary check by name:
 // internal/httpapi's gogios-check route deliberately carries no root-level
-// or overview-level link (see registry.go's NoRootLink), since a check's own
+// or overview-level link (see contract.Route's NoRootLink), since a check's own
 // self link is how a client that has already listed it is meant to reach
 // it -- and building that href by hand here would be the one literal API
 // path in this whole package (see the package doc comment above). "detail
@@ -114,7 +114,7 @@ func (c *Client) showGogiosCheck(ctx context.Context, name string) error {
 
 // printGogiosOverview renders the gogios entity fetched by showGogios.
 //
-// An "error" property (see internal/httpapi/handlers.go's handleGogios)
+// An "error" property (see internal/httpapi/gogiosapi/handlers.go's handleOverview)
 // means the report itself is currently unreachable -- shown as such rather
 // than as an empty report, the same "unknown, not off" rule showMonitoring
 // applies to a gateway it cannot reach.
@@ -150,7 +150,7 @@ func printGogiosChecks(out io.Writer, status string, list Entity) {
 }
 
 // printGogiosCheck renders one check entity's full detail, matching the
-// field list internal/httpapi/handlers.go's gogiosCheckEntity sends: the
+// field list internal/httpapi/gogiosapi/handlers.go's checkEntity sends: the
 // conditional fields are shown only when the server actually included them
 // (a zero-value JSON property, e.g. an empty string, is never sent -- see
 // that function's doc comment -- so their absence here is the server's own

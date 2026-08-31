@@ -5,25 +5,29 @@ import (
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/client"
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
-// This file is sy0's single-source-of-truth guard: it walks the real
-// routes() table and checks that jobArgs (the server's job-run argv) and the
-// remote client's action resolution both stay consistent with whatever a
-// route declares, so a future route addition is checked automatically rather
+// This file is sy0's single-source-of-truth guard: it walks the real route
+// table (registry.go's buildRoutes) and checks that powerapi's jobArgs (the
+// server's job-run argv) and the remote client's action resolution both stay
+// consistent with whatever a route declares, so a future route addition is
+// checked automatically rather so a future route addition is checked automatically rather
 // than relying on someone remembering to update three places by hand -- see
-// registry.go's route.CLIVerb doc comment for the drift this replaced.
+// contract.Route's CLIVerb doc comment for the drift this replaced.
 
-// TestJobArgsDerivedFromEveryRoutesCLIVerb pins that jobArgs, for every
+// TestJobArgsDerivedFromEveryRoutesCLIVerb pins that powerapi's jobArgs, for
+// every
 // action route in the real table, reproduces exactly "job-run" followed by
 // the route's own CLIVerb split on whitespace. This is true by construction
-// (jobArgsFrom does nothing but that split), but pinning it here means a
+// (JobArgsFrom does nothing but that split), but pinning it here means a
 // route whose CLIVerb does not actually match its job's real argv -- e.g. a
 // typo, or a CLIVerb with extra whitespace -- fails a test instead of
 // shipping a job-run invocation nobody asked for.
 func TestJobArgsDerivedFromEveryRoutesCLIVerb(t *testing.T) {
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.Action {
 			continue
 		}
@@ -33,10 +37,10 @@ func TestJobArgsDerivedFromEveryRoutesCLIVerb(t *testing.T) {
 		}
 
 		want := append([]string{"job-run"}, strings.Fields(r.CLIVerb)...)
-		got := jobArgsFrom(routes(inventory.Default()), r.jobAction())
+		got := powerapi.JobArgsFrom(testRoutes(inventory.Default()), r.JobAction())
 		if !equalArgs(got, want) {
-			t.Errorf("jobArgs(%q) = %v, want %v (derived from CLIVerb %q)",
-				r.jobAction(), got, want, r.CLIVerb)
+			t.Errorf("powerapi.JobArgsFrom(%q) = %v, want %v (derived from CLIVerb %q)",
+				r.JobAction(), got, want, r.CLIVerb)
 		}
 	}
 }
@@ -46,7 +50,7 @@ func TestJobArgsDerivedFromEveryRoutesCLIVerb(t *testing.T) {
 // happened to be advertised first.
 func TestEveryActionsCLIVerbIsUnique(t *testing.T) {
 	seen := map[string]string{}
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.Action || r.CLIVerb == "" {
 			continue
 		}
@@ -71,7 +75,7 @@ func TestEveryActionsCLIVerbIsUnique(t *testing.T) {
 // Action.CLIVerb (router.go's Router.action) ever broke.
 func TestClientResolvesEveryRoutesCLIVerbToItsName(t *testing.T) {
 	var actions []client.Action
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.Action || r.CLIVerb == "" {
 			continue
 		}
@@ -79,7 +83,7 @@ func TestClientResolvesEveryRoutesCLIVerbToItsName(t *testing.T) {
 	}
 	holder := client.Entity{Actions: actions}
 
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.Action || r.CLIVerb == "" {
 			continue
 		}
@@ -98,14 +102,14 @@ func TestClientResolvesEveryRoutesCLIVerbToItsName(t *testing.T) {
 // TestJobArgsDerivedFromEveryRoutesCLIVerb: a route that is an action but
 // declares no CLIVerb (a mistake nothing in the real table currently makes --
 // see TestJobArgsDerivedFromEveryRoutesCLIVerb, which would catch it there
-// too) must not make jobArgsFrom invent an argv. It has to say "I don't know
+// too) must not make JobArgsFrom invent an argv. It has to say "I don't know
 // how to run this" -- nil -- rather than guess.
 func TestJobArgsFromRouteWithoutCLIVerb(t *testing.T) {
-	synthetic := []route{
+	synthetic := []contract.Route{
 		{Name: "mystery", Action: true}, // no CLIVerb
 	}
-	if got := jobArgsFrom(synthetic, "mystery"); got != nil {
-		t.Errorf("jobArgsFrom(route with no CLIVerb) = %v, want nil", got)
+	if got := powerapi.JobArgsFrom(synthetic, "mystery"); got != nil {
+		t.Errorf("powerapi.JobArgsFrom(route with no CLIVerb) = %v, want nil", got)
 	}
 }
 
@@ -114,8 +118,8 @@ func TestJobArgsFromRouteWithoutCLIVerb(t *testing.T) {
 // the registry) must not silently return an empty-but-non-nil slice or
 // someone else's argv.
 func TestJobArgsUnrecognizedAction(t *testing.T) {
-	if got := jobArgsFrom(routes(inventory.Default()), "totally-not-a-real-action"); got != nil {
-		t.Errorf("jobArgs(unrecognized) = %v, want nil", got)
+	if got := powerapi.JobArgsFrom(testRoutes(inventory.Default()), "totally-not-a-real-action"); got != nil {
+		t.Errorf("powerapi.JobArgsFrom(unrecognized) = %v, want nil", got)
 	}
 }
 

@@ -264,7 +264,7 @@ func TestPeerFetchFailureKindDistinguishesHTTPStatusFromConnectionFailure(t *tes
 
 // TestPeerSetFetchJobReturnsThePeersJob is FetchJob's core positive case: a
 // reachable peer with a job to report is what a client asking either node
-// about /job must see, per httpapi.currentJob.
+// about /job must see, per powerapi's currentJob.
 func TestPeerSetFetchJobReturnsThePeersJob(t *testing.T) {
 	fetch, calls := fakeFetcher(map[string]struct {
 		job *Job
@@ -286,7 +286,7 @@ func TestPeerSetFetchJobReturnsThePeersJob(t *testing.T) {
 // TestPeerSetFetchJobReturnsNilWhenUnreachable pins the same tolerance as
 // Busy: an unreachable peer must not turn /job into an error, only into this
 // node's own job standing alone -- see coordination.NewestJob and
-// httpapi.currentJob.
+// powerapi's currentJob.
 func TestPeerSetFetchJobReturnsNilWhenUnreachable(t *testing.T) {
 	fetch, _ := fakeFetcher(map[string]struct {
 		job *Job
@@ -323,7 +323,7 @@ func TestPeerSetFetchJobSkipsAPeerWithNoJobInFavourOfOneWithOne(t *testing.T) {
 
 // TestFetchPeerJobMarksTheRequestAsAPeerQuery exercises the real fetchPeerJob
 // against an httptest server, pinning PeerQueryParam's presence on the wire:
-// httpapi.handleJob relies on seeing it to answer with its own unmerged job
+// powerapi's handleJob relies on seeing it to answer with its own unmerged job
 // rather than recursing back into the peer that just asked it -- see
 // PeerQueryParam's doc comment.
 func TestFetchPeerJobMarksTheRequestAsAPeerQuery(t *testing.T) {
@@ -348,7 +348,7 @@ func TestFetchPeerJobMarksTheRequestAsAPeerQuery(t *testing.T) {
 
 // TestFetchPeerJobReportsNoJobAsNilNotError pins the distinction fetchPeerJob
 // documents: a peer that answers with the "no job has ever run" shape
-// (properties.state "none", httpapi.handleJob's own no-job response) is a
+// (properties.state "none", the power surface's handleJob's own no-job response) is a
 // successful fetch with nothing to report, not a failure -- FetchJob must be
 // able to tell that apart from a peer it could not reach at all.
 func TestFetchPeerJobReportsNoJobAsNilNotError(t *testing.T) {

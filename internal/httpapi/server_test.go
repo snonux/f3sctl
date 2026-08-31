@@ -12,6 +12,8 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -43,16 +45,13 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 	}
 
 	pc := &probeCounter{}
-	router := NewRouter("", inventory.Default())
-	srv := &Server{
-		cfg:     config.Default(),
-		jobs:    coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
-		peers:   coordination.NewPeerSet(nil, ""),
-		auth:    NewAuthenticator(keyFile),
-		router:  router,
-		openapi: NewOpenAPIBuilder(router),
-		siren:   NewSirenRenderer(),
-		node:    "test",
+	srv := (&Server{
+		cfg:   config.Default(),
+		jobs:  coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
+		peers: coordination.NewPeerSet(nil, ""),
+		auth:  NewAuthenticator(keyFile),
+		siren: NewSirenRenderer(),
+		node:  "test",
 		probeHosts: func(context.Context) []power.HostStatus {
 			pc.probes++
 			return nil
@@ -61,14 +60,14 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 			pc.fanReads++
 			return power.FansState{}, nil
 		},
-	}
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 	return srv, pc
 }
 
 // getRequest builds a GET request against path, authenticated the way
 // countingServer's Authenticator expects.
-func getRequest(path string) request {
-	return request{
+func getRequest(path string) contract.Request {
+	return contract.Request{
 		Method: http.MethodGet,
 		Path:   path,
 		APIKey: "sekrit",
@@ -83,12 +82,12 @@ func getRequest(path string) request {
 // rather than a hardcoded literal, so remounting the CGI script needs one
 // change, not a config edit on top of it.
 func TestResolvePeerJobPathDerivesFromSCRIPTNAME(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl", inventory.Default())
+	base := "/cgi-bin/f3sctl" // SCRIPT_NAME minus the trailing slash
 	cfg := config.Default()
 	cfg.PeerJobPath = ""
 
-	want := "/cgi-bin/f3sctl" + jobPath
-	if got := resolvePeerJobPath(cfg, router); got != want {
+	want := base + powerapi.JobPath
+	if got := resolvePeerJobPath(cfg, base); got != want {
 		t.Errorf("resolvePeerJobPath(empty override) = %q, want %q", got, want)
 	}
 }
@@ -98,11 +97,11 @@ func TestResolvePeerJobPathDerivesFromSCRIPTNAME(t *testing.T) {
 // other node's real path, so an explicit config value must win over the
 // SCRIPT_NAME-derived default.
 func TestResolvePeerJobPathHonoursExplicitOverride(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl", inventory.Default())
+	base := "/cgi-bin/f3sctl"
 	cfg := config.Default()
 	cfg.PeerJobPath = "/somewhere/else/job"
 
-	if got := resolvePeerJobPath(cfg, router); got != cfg.PeerJobPath {
+	if got := resolvePeerJobPath(cfg, base); got != cfg.PeerJobPath {
 		t.Errorf("resolvePeerJobPath(explicit override) = %q, want %q", got, cfg.PeerJobPath)
 	}
 }
@@ -118,14 +117,14 @@ func TestResolvePeerJobPathHonoursExplicitOverride(t *testing.T) {
 // prevent. With an empty router base and no explicit override,
 // resolvePeerJobPath must fall back to defaultCGIMount instead.
 func TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty(t *testing.T) {
-	router := NewRouter("", inventory.Default()) // SCRIPT_NAME empty or unset
+	base := "" // SCRIPT_NAME empty or unset
 	cfg := config.Default()
 	cfg.PeerJobPath = ""
 
-	want := defaultCGIMount + jobPath
-	if got := resolvePeerJobPath(cfg, router); got != want {
+	want := defaultCGIMount + powerapi.JobPath
+	if got := resolvePeerJobPath(cfg, base); got != want {
 		t.Errorf("resolvePeerJobPath(empty base) = %q, want %q (the safe fallback, not a bare %q)",
-			got, want, jobPath)
+			got, want, powerapi.JobPath)
 	}
 }
 
@@ -134,11 +133,11 @@ func TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty(t *testing.
 // Engine.ProbeAll (7 concurrent ping+TCP probes, ~3s) and Engine.FansStatus
 // (a Shelly HTTP call, up to 5s) on every request -- including /job, polled
 // every 10s through a multi-minute shutdown, and /openapi.json, a static
-// document. Neither handler renders state.Hosts or state.Fans (see
-// handleJob and handleOpenAPI), so both reads were pure waste on these two
-// routes. This pins that they are no longer made at all.
+// document. Neither handler renders state.Hosts or state.Fans (see powerapi's
+// handleJob and the root's handleOpenAPI), so both reads were pure waste on
+// these two routes. This pins that they are no longer made at all.
 func TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt(t *testing.T) {
-	for _, path := range []string{jobPath, openAPIPath} {
+	for _, path := range []string{powerapi.JobPath, openAPIPath} {
 		t.Run(path, func(t *testing.T) {
 			srv, pc := countingServer(t)
 			var out bytes.Buffer
@@ -176,24 +175,25 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 // TestSkipsProbeCoversTheMonitoringFamily pins that skipsProbe treats every
 // /monitoring path -- the resource itself and its mute/unmute actions -- the
 // same way, matching the "/monitoring" prefix check enrichState already uses
-// to decide whether to fetch the Gogios mute. handleMonitoring, handleMute
-// and handleUnmute all render only state.Monitoring; see handlers.go.
+// to decide whether to fetch the Gogios mute. Every handler in the mute
+// family -- Gogios surface's handleMonitoring, handleMute, handleUnmute --
+// renders only state.Monitoring; see gogiosapi/handlers.go.
 func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
 	for _, path := range []string{"/monitoring", "/monitoring/mute", "/monitoring/unmute"} {
-		if !skipsProbe(inventory.Default(), path) {
+		if !skipsProbe(testRoutes(inventory.Default()), path) {
 			t.Errorf("skipsProbe(%q) = false, want true: no monitoring handler reads state.Hosts or state.Fans", path)
 		}
 	}
 	for _, path := range []string{"/", "/status", "/fans", "/fans/on", "/fans/off", "/power/off"} {
-		if skipsProbe(inventory.Default(), path) {
+		if skipsProbe(testRoutes(inventory.Default()), path) {
 			t.Errorf("skipsProbe(%q) = true, want false: this route's handler or Available predicates do read the probe", path)
 		}
 	}
 }
 
 // cgiEnvForJob sets the CGI environment variables ServeCGI reads (see
-// parseCGIRequest) for a GET request against jobPath, authenticated with
-// apiKey. jobPath is used by both tests below because it is the one route
+// parseCGIRequest) for a GET request against the job path, authenticated with
+// apiKey. powerapi.JobPath is used by both tests below because it is the one route
 // that needs no live probe, no peer network call and no Gogios SSH round
 // trip (see skipsProbe and enrichState) -- so the only things standing
 // between "bad key" and "200 with the job entity" are the pieces qz0 is
@@ -201,14 +201,63 @@ func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
 func cgiEnvForJob(t *testing.T, apiKey string) {
 	t.Helper()
 	t.Setenv("REQUEST_METHOD", http.MethodGet)
-	t.Setenv("PATH_INFO", jobPath)
+	t.Setenv("PATH_INFO", powerapi.JobPath)
 	t.Setenv("QUERY_STRING", "")
 	t.Setenv("HTTP_X_API_KEY", apiKey)
 	// Empty SCRIPT_NAME gives the Router an empty base, so hrefs below are
-	// predictable (Href(jobPath) == jobPath) without depending on whatever
-	// the test process's own environment happens to have set.
+	// predictable (the job path's own href is the bare path) without
+	// depending on whatever the test process's own environment happens to
+	// have set.
 	t.Setenv("SCRIPT_NAME", "")
 	t.Setenv("CONTENT_LENGTH", "")
+}
+
+// TestAssembleInjectsRouterActionRenderingIntoThePowerSurface pins the wiring
+// assemble exists for: a power-surface handler that renders a resource-scoped
+// actions list (powerapi's handleFans) gets it from the composition root's
+// Router, not
+// from anything local to the surface. Without this injection the fans
+// resource would render zero actions -- every client would then see a plug it
+// may read but never switch -- and no availability test would catch it, since
+// predicates live on the routes this wiring advertises.
+func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "apikey")
+	if err := os.WriteFile(keyFile, []byte("sekrit\n"), 0o600); err != nil {
+		t.Fatalf("writing the API key file: %v", err)
+	}
+
+	srv := (&Server{
+		cfg:   config.Default(),
+		jobs:  coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
+		peers: coordination.NewPeerSet(nil, ""),
+		auth:  NewAuthenticator(keyFile),
+		siren: NewSirenRenderer(),
+		node:  "test",
+		probeHosts: func(context.Context) []power.HostStatus {
+			// No fleet probe in this test; the fans snapshot is what the fan
+			// actions' availability reads.
+			return nil
+		},
+		fansStatus: func(context.Context) (power.FansState, error) {
+			return power.FansState{On: true}, nil
+		},
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+
+	var out bytes.Buffer
+	if err := srv.serve(&out, getRequest("/fans")); err != nil {
+		t.Fatalf("serve(/fans): %v", err)
+	}
+	_, body := splitCGIResponse(t, out.String())
+	var got contract.Entity
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("body is not valid JSON: %v\nbody: %s", err, body)
+	}
+	if len(got.Actions) != 1 || got.Actions[0].Name != "fans-off" {
+		t.Fatalf("/fans actions = %+v, want exactly [fans-off] (the plug is on)", got.Actions)
+	}
+	if got.Actions[0].CLIVerb != "fans off" {
+		t.Errorf("fans-off cliVerb = %q, want \"fans off\" (rendered by the Router, from the route declaration)", got.Actions[0].CLIVerb)
+	}
 }
 
 // serverTestConfig returns a config.Default() pointed at throwaway,
@@ -277,13 +326,15 @@ func TestServeCGIEndToEndRejectsBadAPIKeyBeforeTouchingTheHandler(t *testing.T) 
 }
 
 // TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline is qz0's
-// positive case, and the true differentiator from calling handleJob
-// directly: handleJob builds its "self"/"up" links with s.router.Href, so a
-// Server whose Router field was left nil -- exactly the gap in this
-// package's existing Server literals -- would panic here, not merely return
-// a wrong value. It also proves the response actually went through
-// SirenRenderer (the CGI header block, the Siren media type) rather than
-// just checking the Entity handleJob returns.
+// positive case, and the true differentiator from calling the power surface's
+// handleJob directly: the job entity's "self"/"up" links come out of the
+// injected href builder, and a Server assembled with a half-wired surface
+// (exactly the gap in hand-built Server literals -- nil jobs or peers would
+// have panicked here long before the body ever rendered) produces a real,
+// fully-linked response only when the whole production wiring ran. It also
+// proves the response actually went through SirenRenderer (the CGI header
+// block, the Siren media type) rather than just checking the Entity the
+// power surface's handleJob returns.
 func TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline(t *testing.T) {
 	cfg := serverTestConfig(t, "correct-key")
 	cgiEnvForJob(t, "correct-key")
@@ -301,7 +352,7 @@ func TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline(t *testing.T)
 		t.Errorf("Content-Type = %q, want the Siren media type %q", headers["Content-Type"], sirenMediaType)
 	}
 
-	var got Entity
+	var got contract.Entity
 	if err := json.Unmarshal([]byte(body), &got); err != nil {
 		t.Fatalf("body is not valid JSON: %v\nbody: %s", err, body)
 	}
@@ -320,8 +371,8 @@ func TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline(t *testing.T)
 			}
 		}
 	}
-	if self != jobPath {
+	if self != powerapi.JobPath {
 		t.Errorf("self link = %q, want %q (router.Href(%q) with an empty SCRIPT_NAME base): "+
-			"a nil Router would have panicked before this response was ever produced", self, jobPath, jobPath)
+			"a nil Router would have panicked before this response was ever produced", self, powerapi.JobPath, powerapi.JobPath)
 	}
 }

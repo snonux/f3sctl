@@ -118,10 +118,11 @@ func (ps *PeerSet) Busy(ctx context.Context, self, apiKey string) (bool, string)
 }
 
 // FetchJob asks each node in the set for its current or last job in turn,
-// returning the first one that answers -- so that GET /job (httpapi's
-// currentJob) can report the same job regardless of which of pi0/pi1 relayd
-// routed the request to. self and apiKey are as in Busy; ctx is as in Busy
-// too (bounds the peer fetch against the request that asked for it).
+// returning the first one that answers -- so that GET /job (the power
+// surface's currentJob) can report the same job regardless of which of
+// pi0/pi1 relayd routed the request to. self and apiKey are as in Busy; ctx
+// is as in Busy too (bounds the peer fetch against the request that asked for
+// it).
 //
 // Consulting more than one node only matters once the set holds more than
 // the pair this project actually runs; with exactly one peer it is just
@@ -222,7 +223,7 @@ func (e *peerHTTPStatusError) Error() string {
 // PeerQueryParam marks a GET /job request as one node asking another for its
 // own job, as opposed to an ordinary client request.
 //
-// httpapi.handleJob normally answers with currentJob's merge of its own job
+// the power surface's handleJob normally answers with currentJob's merge of its own job
 // and its peer's (see that function), so that /job reads the same regardless
 // of which of pi0/pi1 a request landed on. Left unchecked, that merge would
 // recurse forever: fetchPeerJob asking pi1 for its job would have pi1's own
@@ -242,7 +243,7 @@ const PeerQueryParam = "peer"
 // The response decodes straight into Job: the wire property names already
 // match Job's own json tags, since it is the identical document jobEntity
 // renders locally. A peer that has never run a job answers with
-// properties.state "none" (httpapi.handleJob's no-job case) rather than a
+// properties.state "none" (the power surface's handleJob's no-job case) rather than a
 // real job at all; that is reported here as (nil, nil) -- reached the peer,
 // nothing to show -- which is a different outcome from (nil, err) and must
 // stay one: the latter is what Busy and FetchJob warn about and skip past as

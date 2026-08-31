@@ -147,7 +147,7 @@ type Config struct {
 
 	// CGITimeout bounds a single CGI request served by the HTTP API. The
 	// detached power job is spawned by the request but deliberately outlives
-	// it (see handleAction), so this bounds only the request itself: the
+	// it (see powerapi's action handler), so this bounds only the request itself: the
 	// fleet probe, the Shelly plug read, the peer job round trip and the
 	// fan-guard re-confirm a `fans off` runs -- all of which finish in tens of
 	// seconds on a healthy rack. It is a backstop so a request wedged on a

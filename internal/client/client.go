@@ -121,7 +121,7 @@ type Action struct {
 	Href   string `json:"href"`
 	// CLIVerb is the exact f3sctl command that invokes this action, e.g.
 	// "power f1 on", declared once by the server's route registry
-	// (internal/httpapi/registry.go's route.CLIVerb) and carried here
+	// (contract.Route's CLIVerb) and carried here
 	// unchanged. Entity.ActionForVerb matches against it, which is what lets
 	// this client recognise a command without its own verb->name table --
 	// see that method's doc comment and sy0's annotation.
@@ -167,7 +167,7 @@ func (e Entity) Action(name string) (Action, bool) {
 //
 // Primary path: matches against Action.CLIVerb, the server's single source
 // for the verb-to-action-name mapping (route.CLIVerb in
-// internal/httpapi/registry.go). Matching against what the server just
+// the route registry). Matching against what the server just
 // advertised replaces a client-local table that had to be kept in step by
 // hand -- see sy0.
 //
@@ -203,7 +203,7 @@ func (e Entity) ActionForVerb(verb string) (Action, bool) {
 // advertised it under. It exists only as ActionForVerb's compatibility
 // fallback: a server that declares CLIVerb makes this table redundant for
 // that route, so a newly added route needs a CLIVerb on it
-// (internal/httpapi/registry.go), not a new entry here.
+// (the route registry), not a new entry here.
 var legacyActionFor = map[string]string{
 	"power on":          "power-on",
 	"power off":         "power-off",
@@ -375,7 +375,11 @@ func (c *Client) Root(ctx context.Context) (Entity, error) {
 }
 
 // SupportedAPIVersion is the one apiVersion this client is written against.
-const SupportedAPIVersion = 1
+// v2 accompanies the server's reorganisation into per-domain surface packages
+// (no wire shape changed, but the server bumped the version so both halves
+// upgrade together -- a v1 client refuses rather than run against a
+// restructured server with no signal).
+const SupportedAPIVersion = 2
 
 // Follow fetches a linked resource by relation.
 func (c *Client) Follow(ctx context.Context, from Entity, rel string) (Entity, error) {
@@ -407,9 +411,9 @@ func (c *Client) Perform(ctx context.Context, a Action, confirm bool) (Entity, e
 	}
 
 	// gz0: fans-off's "force" checkbox is gated by the server's cheap,
-	// single-probe snapshot (registry.go's rackBusy), while the plug switch
+	// single-probe snapshot (powerapi.RackBusy), while the plug switch
 	// itself is guarded by a stricter multi-probe confirmation inside the
-	// engine (handlers.go's rackStillBusy). When the snapshot reads the rack
+	// engine (powerapi's rackStillBusy). When the snapshot reads the rack
 	// as cold, the advertisement omits the field entirely -- so the loop
 	// above never runs for it -- even though the confirming probe can still
 	// find a host up and 409. A caller who explicitly passed --force meant it

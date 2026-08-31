@@ -20,19 +20,22 @@ import (
 	"github.com/snonux/f3sctl/internal/client"
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
-	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
 // This file drives the Gogios alert-browse surface (v51's internal/gogios,
 // w51's internal/httpapi routes, x51's internal/cli/internal/client) as one
 // genuine full stack: a fake Gogios JSON upstream over real HTTP, the real
-// *Server this package's own routes()/handlers dispatch through, exposed
+// *Server this package's buildRoutes() and the gogiosapi/powerapi handlers
+// dispatch through, exposed
 // over a real net/http.Server, driven by the real internal/client.Client --
 // the same client `f3sctl --remote` uses.
 //
 // This complements, rather than replaces, the rest of this package's tests
-// (which call handlers directly with a hand-built State) and
+// (which call handlers directly with a hand-built contract.State) and
 // internal/client's own fakeAPI-based tests (which deliberately do NOT use
 // this package's real Siren rendering -- see that file's doc comment, on
 // keeping client and server tests independent so a wire-format drift between
@@ -115,30 +118,34 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
 	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
 
-	router := NewRouter("", inventory.Default())
-	srv := &Server{
-		cfg:     cfg,
-		jobs:    coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
-		peers:   coordination.NewPeerSet(nil, ""),
-		auth:    NewAuthenticator(keyFile),
-		router:  router,
-		openapi: NewOpenAPIBuilder(router),
-		siren:   NewSirenRenderer(),
-		node:    "e2e",
-		// Root ("/") is not SkipsProbe, so snapshot() calls these; a nil
-		// engine (there is none here -- see this function's doc comment)
-		// would otherwise panic the moment client.Root fetches it. Neither
-		// stub is ever exercised by a /gogios* route itself.
+	// The Gogios surface carries the real cfg (GogiosURL points at the fake
+	// upstream, the cache is in the temp StateDir), because the clear-cache
+	// action and the report reads run for real against it; the power surface's
+	// collaborators stay nil, since every route this suite serves is either a
+	// /gogios* route or never dereferences the engine.
+	href := contract.Hrefs("")
+	pw := powerapi.New("e2e", href, cfg.Inventory, nil, nil, nil)
+	gg := gogiosapi.New("e2e", href, cfg, nil)
+	srv := (&Server{
+		cfg:   cfg,
+		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
+		peers: coordination.NewPeerSet(nil, ""),
+		auth:  NewAuthenticator(keyFile),
+		siren: NewSirenRenderer(),
+		node:  "e2e",
+		// Root ("/") and /status are not SkipsProbe, so snapshot() calls
+		// these; a nil engine (there is none here -- see above) would
+		// otherwise panic the moment client.Root fetches the root.
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
-	}
+	}).assemble(cfg.Inventory, pw, gg, "")
 
 	e2e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		req := request{
+		req := contract.Request{
 			Method: r.Method,
 			Path:   normalisePath(r.URL.Path),
 			Query:  r.URL.Query(),
@@ -337,7 +344,7 @@ func TestGogiosE2ECheckDetailNotFound(t *testing.T) {
 
 // TestGogiosE2ECheckDetailUpstreamUnreachable pins the one place scope item
 // 7's "unreachable upstream" case takes a materially different wire shape:
-// handleGogiosCheck (unlike handleGogios/handleGogiosStatus) returns a hard
+// handleCheck (unlike the overview and drill-down handles) returns a hard
 // 502 rather than a 200 with an "error" property, because a single-entity
 // lookup cannot answer "does this check exist" at all without the report.
 // This is already pinned at the handler-unit level (handlers_test.go); this

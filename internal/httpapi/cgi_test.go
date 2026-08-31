@@ -28,7 +28,7 @@ func TestParseCGIRequestReadsTheVerifiedVariables(t *testing.T) {
 	if req.APIKey != "sekrit" {
 		t.Errorf("api key = %q; bozohttpd exports X-API-Key as HTTP_X_API_KEY", req.APIKey)
 	}
-	if !req.boolField("force") {
+	if !req.BoolField("force") {
 		t.Error("force field not read from the body")
 	}
 }
@@ -45,7 +45,7 @@ func TestBoolFieldAcceptsCommonSpellings(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !req.boolField("force") {
+		if !req.BoolField("force") {
 			t.Errorf("force=%s was not read as true", spelling)
 		}
 	}
@@ -53,7 +53,7 @@ func TestBoolFieldAcceptsCommonSpellings(t *testing.T) {
 	for _, spelling := range []string{"false", "0", "off", "no", ""} {
 		t.Setenv("QUERY_STRING", "force="+spelling)
 		req, _ := parseCGIRequest(strings.NewReader(""))
-		if req.boolField("force") {
+		if req.BoolField("force") {
 			t.Errorf("force=%q was read as true", spelling)
 		}
 	}

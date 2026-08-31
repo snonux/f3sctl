@@ -479,9 +479,9 @@ func printMonitoring(out io.Writer, states []power.GatewayMute) {
 
 // gogiosStatuses is the fixed set of Gogios drill-down categories.
 //
-// Mirrors internal/httpapi/registry.go's own gogiosStatuses var. Kept as a
+// Mirrors internal/httpapi/gogiosapi/routes.go's Statuses var. Kept as a
 // separate copy rather than exported and shared across packages, the same
-// duplication registry.go already tolerates internally for these six
+// duplication the route table already tolerates internally for these six
 // literals -- see that var's doc comment for the severity-vs-lifecycle split
 // this list spans.
 var gogiosStatuses = []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
@@ -574,7 +574,7 @@ func runGogios(cfg config.Config, args []string, stdout, stderr io.Writer) error
 
 // gogiosChecksForStatus selects the checks for one gogiosStatuses category.
 //
-// Mirrors internal/httpapi/handlers.go's gogiosChecksForStatus exactly:
+// Mirrors internal/httpapi/gogiosapi/handlers.go's checksForStatus exactly:
 // "critical"/"warning"/"unknown"/"ok" are severities (Report.ByStatus unions
 // every lifecycle section by each check's own Status); "stale"/"suppressed"
 // are lifecycle groupings instead, read from Sections directly, since a

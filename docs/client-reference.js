@@ -24,7 +24,9 @@ const KEY = process.env.F3SCTL_KEY;
 
 // The one apiVersion this client understands. Per CLIENT.md section 2, a
 // client must stop rather than guess when the server speaks a newer one.
-const SUPPORTED_API_VERSION = 1;
+// v2 accompanies the server's reorganisation into per-domain surface
+// packages; the server bumped the version so both halves upgrade together.
+const SUPPORTED_API_VERSION = 2;
 
 // resolve turns an href from a response into an absolute URL.
 //

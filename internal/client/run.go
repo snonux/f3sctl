@@ -87,7 +87,7 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 //
 // cmd is matched against Action.CLIVerb rather than resolved to an action
 // name first: the server is the single source for that mapping (it is
-// declared once, on the route -- see internal/httpapi/registry.go's
+// declared once, on the route -- see contract.Route's
 // route.CLIVerb), and this client already fetches the actions it advertises,
 // so reading the mapping off them replaces a local actionFor table that had
 // to be updated by hand every time a route's CLI spelling changed -- and
@@ -148,7 +148,7 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 
 	if action.Name == "gogios-cache-clear" {
 		// The action's own response already carries the fresh overview
-		// (handleGogiosClearCache re-renders it server-side), but showGogios
+		// (the Gogios surface's handleClearCache re-renders it server-side), but showGogios
 		// re-fetches rather than rendering result directly, the same
 		// "mutate, then re-follow" shape the monitoring-* branch below uses
 		// for consistency across every action in this function.
@@ -417,7 +417,7 @@ func parseHost(e Entity) (power.HostStatus, bool) {
 
 // parseFans turns a "fans" entity into a power.FansState, or an error when
 // the server reported the plug as unreachable rather than a state -- see
-// httpapi.fansEntity and presenter.Status.
+// powerapi's fansEntity and presenter.Status.
 func parseFans(e Entity) (power.FansState, error) {
 	if msg, _ := e.Properties["error"].(string); msg != "" {
 		// Unreachable is not the same as off, and saying "off" here would

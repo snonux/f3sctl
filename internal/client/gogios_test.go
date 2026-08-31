@@ -72,8 +72,8 @@ func TestPrintGogiosChecksListsEachCheck(t *testing.T) {
 
 // TestPrintGogiosCheckShowsOnlyThePresentOptionalFields pins that
 // prevStatus/federatedFrom/lastCheckedAgeSeconds are shown only when the
-// server actually sent them -- matching gogiosCheckEntity's own conditional
-// encoding (internal/httpapi/handlers.go) rather than printing an empty
+// server actually sent them -- matching checkEntity's own conditional
+// encoding (internal/httpapi/gogiosapi/handlers.go) rather than printing an empty
 // "prev:" line for every check.
 func TestPrintGogiosCheckShowsOnlyThePresentOptionalFields(t *testing.T) {
 	var buf bytes.Buffer
@@ -106,8 +106,8 @@ type fakeGogiosAPI struct {
 
 	// broken, when true, makes GET /gogios answer with an "error" property
 	// instead of a real report -- the unreachable-backend case
-	// handleGogios/handleGogiosStatus render as a 200 with "error" rather
-	// than a non-2xx status (see internal/httpapi/handlers.go).
+	// the overview and drill-down handlers render as a 200 with "error" rather
+	// than a non-2xx status (see internal/httpapi/gogiosapi/handlers.go).
 	broken bool
 
 	mu          sync.Mutex
@@ -289,7 +289,7 @@ func TestRunGogiosCacheClearInvokesTheActionAndReFetches(t *testing.T) {
 }
 
 // TestRunGogiosShowsAnUnreachableReportEndToEnd pins the "error" property
-// convention (internal/httpapi/handlers.go's handleGogios) through the whole
+// convention (internal/httpapi/gogiosapi/handlers.go's handleOverview) through the whole
 // dispatch path, not just printGogiosOverview in isolation: runGogios ->
 // showGogios -> Follow -> printGogiosOverview must render "unknown" and the
 // server's message rather than an error return or an empty successful render.

@@ -63,27 +63,43 @@ flowchart TD
     MAIN["cmd/f3sctl<br/>mode selection"]
 
     MAIN --> CLI["internal/cli<br/>flags, routing, output"]
-    MAIN --> API["internal/httpapi<br/>Siren, registry, router, auth"]
+    MAIN --> API["internal/httpapi<br/>composition root"]
     MAIN --> AGENT["internal/agent<br/>verb allowlist, doas re-entry"]
+
+    subgraph SURFACES["REST surfaces — the API, split by domain"]
+        CONTRACT["internal/httpapi/contract<br/>Route · State · Request · Siren types"]
+        GOGIOSAPI["internal/httpapi/gogiosapi<br/>/monitoring mute · /gogios report browse"]
+        POWERAPI["internal/httpapi/powerapi<br/>status · job · fans · power on/off"]
+    end
+
+    API -->|"routes table, serve()"| CONTRACT
+    GOGIOSAPI --> CONTRACT
+    POWERAPI --> CONTRACT
+    API -->|"assembles"| GOGIOSAPI
+    API -->|"assembles"| POWERAPI
 
     CLI --> CLIENT["internal/client<br/>hypermedia client"]
     CLIENT -->|HTTPS| API
     API --> COORD["internal/coordination<br/>job lock, peer check, spawn"]
     COORD --> POWER
     CLI --> POWER["internal/power<br/><b>the engine</b>"]
-
+    POWERAPI -->|"Engine · Jobs · Peers<br/>(slices of the real ones)"| POWER
+    GOGIOSAPI -->|"Monitor slice"| POWER
     POWER --> INV["internal/inventory<br/>hosts, groups, order"]
     POWER --> CFG["internal/config"]
     POWER --> BACK["backends.go<br/>PowerBackend · ProbeBackend<br/>FansBackend · NFSChecker · ZusbChecker"]
     BACK --> SSH["ssh(1) → agent verbs"]
     BACK --> PING["ping(8)"]
     BACK --> HTTP["Shelly HTTP RPC"]
+    GOGIOSAPI --> REPORT["internal/gogios<br/>alert report fetch + cache"]
 
     CLI --> PRES["internal/presenter<br/>shared status table"]
     CLIENT --> PRES
 
     style POWER fill:#fce8e6,stroke:#ea4335,stroke-width:2px
     style BACK fill:#fef7e0,stroke:#fbbc04
+    style SURFACES fill:#e6f4ea,stroke:#34a853
+    style MAIN fill:#e8f0fe,stroke:#4285f4
 ```
 
 Two shapes are worth noticing.
@@ -94,6 +110,20 @@ literally runs `f3sctl power all off` as a detached child.
 
 **`internal/presenter` is shared by the local and remote paths** so the status
 table cannot drift between `--local` and `--remote`.
+
+**The REST surface is split the same way the API's concerns are.**
+`internal/httpapi` is only the composition root: CGI parsing, auth, Siren
+rendering, the route table assembly and the two root resources. Everything a
+client actually talks about lives in a per-domain surface package next to it,
+each declaring its routes next to the handlers that serve them:
+`internal/httpapi/powerapi` (status, job, fans, power on/off) and
+`internal/httpapi/gogiosapi` (the mute concern and the alert-report browse).
+The shared vocabulary both speak — `contract.Route`, `State`, `Request`, the
+Siren entity types — lives in `internal/httpapi/contract`, which depends on
+neither side. The surfaces reach the engine only through narrow interfaces
+(`Engine`, `Jobs`, `Peers`, `Monitor`), so a surface can be declared, tested
+and served without a real engine behind it — the same seam discipline
+`backends.go` gives the engine itself.
 
 Everything the engine does to the outside world goes through the interfaces in
 `backends.go`. That is what lets the whole shutdown sequence — ordering,

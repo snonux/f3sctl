@@ -8,6 +8,8 @@ import (
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/gogios"
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -25,10 +27,10 @@ func TestDefaultPeerJobPathIsDerived(t *testing.T) {
 
 // TestOpenAPICoversEveryRoute is the guard that keeps the two halves of
 // "self-describing" honest: the Siren actions a client sees at runtime and the
-// OpenAPI document a generator reads must both come from routes(inventory.Default()), with
+// OpenAPI document a generator reads must both come from testRoutes(inventory.Default()), with
 // neither inventing nor omitting an endpoint.
 func TestOpenAPICoversEveryRoute(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl", inventory.Default())
+	router := NewRouter("/cgi-bin/f3sctl", testRoutes(inventory.Default()))
 	doc := NewOpenAPIBuilder(router).Build()
 
 	paths, ok := doc["paths"].(map[string]any)
@@ -36,7 +38,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 		t.Fatal("openapi document has no paths object")
 	}
 
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if r.Path == openAPIPath {
 			continue
 		}
@@ -53,7 +55,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 	// And nothing in the document that is not a real route.
 	for path := range paths {
 		found := false
-		for _, r := range routes(inventory.Default()) {
+		for _, r := range testRoutes(inventory.Default()) {
 			if router.Href(r.Path) == path {
 				found = true
 				break
@@ -69,7 +71,7 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 // which would make dispatch depend on declaration order.
 func TestRoutesAreUnique(t *testing.T) {
 	seen := map[string]string{}
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		key := r.Method + " " + r.Path
 		if prev, dup := seen[key]; dup {
 			t.Errorf("%s is served by both %q and %q", key, prev, r.Name)
@@ -92,19 +94,19 @@ func TestActionAvailability(t *testing.T) {
 		return power.HostStatus{Name: name, Role: "f", Ping: true, PingKnown: true, SSH: false}
 	}
 
-	allUp := State{
+	allUp := contract.State{
 		Hosts: []power.HostStatus{fHost("f0", true), fHost("f1", true), fHost("f2", true), fHost("f3", true)},
 		Fans:  power.FansState{On: true},
 	}
-	allDown := State{
+	allDown := contract.State{
 		Hosts: []power.HostStatus{fHost("f0", false), fHost("f1", false), fHost("f2", false), fHost("f3", false)},
 		Fans:  power.FansState{On: false},
 	}
-	partial := State{
+	partial := contract.State{
 		Hosts: []power.HostStatus{fHost("f0", true), fHost("f1", false), fHost("f2", true), fHost("f3", false)},
 		Fans:  power.FansState{On: true},
 	}
-	busy := State{
+	busy := contract.State{
 		Hosts: allUp.Hosts,
 		Fans:  power.FansState{On: true},
 		Job:   &coordination.Job{State: coordination.JobRunning, Action: "off"},
@@ -112,7 +114,7 @@ func TestActionAvailability(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		state  State
+		state  contract.State
 		action string
 		want   bool
 		why    string
@@ -147,21 +149,21 @@ func TestActionAvailability(t *testing.T) {
 	// operation runs over SSH, so the job could only fail. This was a real
 	// failure on 2026-08-08, when f3 was offered f3-off 48 seconds after
 	// waking and the zusb pre-flight got "connection refused".
-	midBoot := State{
+	midBoot := contract.State{
 		Hosts: []power.HostStatus{booting("f0"), booting("f1"), booting("f2"), booting("f3")},
 		Fans:  power.FansState{On: true},
 	}
 	cases = append(cases,
 		struct {
 			name   string
-			state  State
+			state  contract.State
 			action string
 			want   bool
 			why    string
 		}{"mid-boot", midBoot, "power-off", false, "no sshd yet, so a shutdown could only fail"},
 		struct {
 			name   string
-			state  State
+			state  contract.State
 			action string
 			want   bool
 			why    string
@@ -173,7 +175,7 @@ func TestActionAvailability(t *testing.T) {
 		if !ok {
 			t.Fatalf("no route named %q", tc.action)
 		}
-		if got := r.available(tc.state); got != tc.want {
+		if got := r.IsAvailable(tc.state); got != tc.want {
 			t.Errorf("%s: %s available = %v, want %v (%s)", tc.name, tc.action, got, tc.want, tc.why)
 		}
 	}
@@ -187,16 +189,16 @@ func TestFansOffForceField(t *testing.T) {
 		t.Fatal("no fans-off route")
 	}
 
-	hot := State{
+	hot := contract.State{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true}},
 		Fans:  power.FansState{On: true},
 	}
-	cold := State{
+	cold := contract.State{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: false, PingKnown: true}},
 		Fans:  power.FansState{On: true},
 	}
 
-	fields := r.fields(hot)
+	fields := r.FieldsFor(hot)
 	if len(fields) != 1 || fields[0].Name != "force" {
 		t.Fatalf("expected a single 'force' field while a host is up, got %+v", fields)
 	}
@@ -210,7 +212,7 @@ func TestFansOffForceField(t *testing.T) {
 		t.Errorf("title = %q, want it to name the host keeping the fans on", fields[0].Title)
 	}
 
-	if got := r.fields(cold); len(got) != 0 {
+	if got := r.FieldsFor(cold); len(got) != 0 {
 		t.Errorf("expected no fields when the rack is cold, got %+v", got)
 	}
 }
@@ -233,12 +235,12 @@ func TestFansOffForceFieldWhenTheRackCouldNotBeProbed(t *testing.T) {
 	}
 
 	// Ping false, PingKnown false: the probe never reached a conclusion.
-	unprobed := State{
+	unprobed := contract.State{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f"}, {Name: "f3", Role: "f"}},
 		Fans:  power.FansState{On: true},
 	}
 
-	fields := r.fields(unprobed)
+	fields := r.FieldsFor(unprobed)
 	if len(fields) != 1 || fields[0].Name != "force" {
 		t.Fatalf("expected a 'force' field when the rack could not be probed, got %+v", fields)
 	}
@@ -257,7 +259,7 @@ func TestFansOffIgnoresNonFHosts(t *testing.T) {
 		t.Fatal("no fans-off route")
 	}
 
-	s := State{
+	s := contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: false, PingKnown: true},
 			{Name: "r0", Role: "cluster", Ping: true, PingKnown: true},
@@ -265,7 +267,7 @@ func TestFansOffIgnoresNonFHosts(t *testing.T) {
 		},
 		Fans: power.FansState{On: true},
 	}
-	if got := r.fields(s); len(got) != 0 {
+	if got := r.FieldsFor(s); len(got) != 0 {
 		t.Errorf("fields = %+v, want none: only f-hosts are in the rack", got)
 	}
 }
@@ -274,10 +276,10 @@ func TestFansOffIgnoresNonFHosts(t *testing.T) {
 // both fan actions. Offering a switch whose result cannot be read back would
 // mean reporting success without evidence.
 func TestFansUnavailableWhenPlugUnreadable(t *testing.T) {
-	broken := State{FansErr: errFake{}}
+	broken := contract.State{FansErr: errFake{}}
 	for _, name := range []string{"fans-on", "fans-off"} {
 		r, _ := routeByName(name)
-		if r.available(broken) {
+		if r.IsAvailable(broken) {
 			t.Errorf("%s should not be offered when the plug cannot be read", name)
 		}
 	}
@@ -286,7 +288,7 @@ func TestFansUnavailableWhenPlugUnreadable(t *testing.T) {
 // TestGETRoutesAreLinksNotActions ensures read-only routes never appear as
 // actions, which clients treat as state changes.
 func TestGETRoutesAreLinksNotActions(t *testing.T) {
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if r.Method == http.MethodGet && r.Action {
 			t.Errorf("route %q is a GET but marked as an action", r.Name)
 		}
@@ -300,7 +302,7 @@ func TestGETRoutesAreLinksNotActions(t *testing.T) {
 // without a matching CLI invocation, which would accept a request and then do
 // nothing at all.
 func TestEveryActionHasJobArgs(t *testing.T) {
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
 			continue
 		}
@@ -313,7 +315,7 @@ func TestEveryActionHasJobArgs(t *testing.T) {
 		case "power-off":
 			action = "off"
 		}
-		if args := jobArgsFrom(routes(inventory.Default()), action); len(args) == 0 {
+		if args := powerapi.JobArgsFrom(testRoutes(inventory.Default()), action); len(args) == 0 {
 			t.Errorf("action %q maps to no CLI invocation", r.Name)
 		}
 	}
@@ -328,7 +330,7 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 			if _, ok := routeByName(name); !ok {
 				t.Errorf("no %q action; %s cannot be powered individually", name, h.Name)
 			}
-			if _, ok := NewRouter("", inventory.Default()).Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
+			if _, ok := NewRouter("", testRoutes(inventory.Default())).Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
 				t.Errorf("no route serving POST /power/%s/%s", h.Name, verb)
 			}
 		}
@@ -344,7 +346,7 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 // offered no way to clear it, and Gogios stayed blind until somebody SSHed to
 // both gateways by hand.
 func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
-	allUp := State{
+	allUp := contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: true},
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
@@ -359,7 +361,7 @@ func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
 	if _, ok := routeByName("power-on"); !ok {
 		t.Fatal("power-on route missing")
 	}
-	if r, _ := routeByName("power-on"); r.available(allUp) {
+	if r, _ := routeByName("power-on"); r.IsAvailable(allUp) {
 		t.Fatal("precondition failed: power-on should be withheld with the fleet up")
 	}
 
@@ -367,7 +369,7 @@ func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
 	if !ok {
 		t.Fatal("no monitoring-unmute action")
 	}
-	if !r.available(allUp) {
+	if !r.IsAvailable(allUp) {
 		t.Error("monitoring-unmute withheld while the fleet is up and muted; " +
 			"a stranded mute would be unclearable through the API")
 	}
@@ -385,13 +387,13 @@ func TestMonitoringActionsAreMutuallyExclusive(t *testing.T) {
 		{"alerting", false, "monitoring-mute"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := State{Monitoring: []power.GatewayMute{{Name: "blowfish", Muted: tc.muted}}}
+			s := contract.State{Monitoring: []power.GatewayMute{{Name: "blowfish", Muted: tc.muted}}}
 			for _, name := range []string{"monitoring-mute", "monitoring-unmute"} {
 				r, ok := routeByName(name)
 				if !ok {
 					t.Fatalf("no %q action", name)
 				}
-				if got := r.available(s); got != (name == tc.want) {
+				if got := r.IsAvailable(s); got != (name == tc.want) {
 					t.Errorf("%s available=%v, want %v", name, got, name == tc.want)
 				}
 			}
@@ -406,13 +408,13 @@ func TestMonitoringActionsAreMutuallyExclusive(t *testing.T) {
 // gateway. Offering "mute" off the back of a zero value would mean offering it
 // on every response that skipped the lookup.
 func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
-	var unknown State // Monitoring is nil
+	var unknown contract.State // Monitoring is nil
 	for _, name := range []string{"monitoring-mute", "monitoring-unmute"} {
 		r, ok := routeByName(name)
 		if !ok {
 			t.Fatalf("no %q action", name)
 		}
-		if r.available(unknown) {
+		if r.IsAvailable(unknown) {
 			t.Errorf("%s offered without having read the gateways", name)
 		}
 	}
@@ -430,7 +432,7 @@ func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
 // A client is entitled to trust what it was handed; that is the entire premise
 // of a self-describing API.
 func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
-	busy := State{
+	busy := contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: true},
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
@@ -441,17 +443,17 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 		// Job is nil: this node itself is idle, which is the whole point.
 	}
 
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
 			continue
 		}
-		if r.available(busy) {
+		if r.IsAvailable(busy) {
 			t.Errorf("%q offered while the peer node is running a job", r.Name)
 		}
 	}
 
 	// The fan plug is not part of a power job, so it stays usable.
-	if r, ok := routeByName("fans-off"); ok && !r.available(busy) {
+	if r, ok := routeByName("fans-off"); ok && !r.IsAvailable(busy) {
 		t.Error("fans-off withheld because the peer is busy; the plug is independent of power jobs")
 	}
 }
@@ -463,7 +465,7 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 // cluster is already up -- but "all-on" must still be offered, or the group
 // that exists specifically to include f3 would ignore it.
 func TestAllActionsAccountForF3(t *testing.T) {
-	onlyF3Down := State{
+	onlyF3Down := contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: true},
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
@@ -472,12 +474,12 @@ func TestAllActionsAccountForF3(t *testing.T) {
 		},
 	}
 
-	if r, ok := routeByName("power-on"); ok && r.available(onlyF3Down) {
+	if r, ok := routeByName("power-on"); ok && r.IsAvailable(onlyF3Down) {
 		t.Error("power-on offered with the whole cluster up; it ignores f3 by design")
 	}
 	if r, ok := routeByName("all-on"); !ok {
 		t.Fatal("no all-on action")
-	} else if !r.available(onlyF3Down) {
+	} else if !r.IsAvailable(onlyF3Down) {
 		t.Error("all-on withheld while f3 is down; the group exists to include f3")
 	}
 }
@@ -485,7 +487,7 @@ func TestAllActionsAccountForF3(t *testing.T) {
 // TestAllOffNeedsSSHNotPing mirrors power-off: the shutdown runs over SSH, so a
 // rack that only answers ICMP cannot be shut down and must not be offered.
 func TestAllOffNeedsSSHNotPing(t *testing.T) {
-	midBoot := State{
+	midBoot := contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: false},
 			{Name: "f1", Role: "f", Ping: true, SSH: false},
@@ -497,7 +499,7 @@ func TestAllOffNeedsSSHNotPing(t *testing.T) {
 	if !ok {
 		t.Fatal("no all-off action")
 	}
-	if r.available(midBoot) {
+	if r.IsAvailable(midBoot) {
 		t.Error("all-off offered while no host answers SSH; the job could only fail")
 	}
 }
@@ -521,13 +523,13 @@ func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
 	// other field (Job, Monitoring, PeerBusy) stays at its zero value in
 	// both, so a mismatch below can only come from the probe fields
 	// SkipsProbe claims the route does not look at.
-	probed := State{
+	probed := contract.State{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true}},
 		Fans:  power.FansState{On: true},
 	}
-	unprobed := State{}
+	unprobed := contract.State{}
 
-	for _, r := range routes(inventory.Default()) {
+	for _, r := range testRoutes(inventory.Default()) {
 		if !r.SkipsProbe {
 			continue
 		}
@@ -552,8 +554,8 @@ func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
 // generic TestRoutesAreUnique/TestOpenAPICoversEveryRoute already give it,
 // matching the "Gogios alerting" section of docs/CLIENT.md. Every one of them
 // reads only the cached/fetched report (or, for the drill-down routes,
-// State.Gogios via the closures in gogiosRoutes), so all are
-// SkipsProbe:true -- see gogiosRoutes' doc comment.
+// contract.State.Gogios via the Gogios surface's route closures), so all
+// are SkipsProbe:true -- see gogiosapi's route declarations.
 func TestGogiosRoutesExist(t *testing.T) {
 	want := []struct {
 		name, method, path string
@@ -596,32 +598,9 @@ func TestGogiosCacheClearIsAlwaysAvailable(t *testing.T) {
 	if !ok {
 		t.Fatal("no gogios-cache-clear action")
 	}
-	for _, s := range []State{{}, {GogiosErr: errFake{}}, {Gogios: &gogios.Report{}}} {
-		if !r.available(s) {
+	for _, s := range []contract.State{{}, {GogiosErr: errFake{}}, {Gogios: &gogios.Report{}}} {
+		if !r.IsAvailable(s) {
 			t.Errorf("gogios-cache-clear unavailable for state %+v, want always available", s)
 		}
 	}
 }
-
-func routeByName(name string) (route, bool) {
-	for _, r := range routes(inventory.Default()) {
-		if r.Name == name {
-			return r, true
-		}
-	}
-	return route{}, false
-}
-
-func lower(s string) string {
-	out := []rune(s)
-	for i, r := range out {
-		if r >= 'A' && r <= 'Z' {
-			out[i] = r + 32
-		}
-	}
-	return string(out)
-}
-
-type errFake struct{}
-
-func (errFake) Error() string { return "plug unreachable" }

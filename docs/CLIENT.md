@@ -544,7 +544,7 @@ X-API-Key: ...
 ```
 ```json
 { "class": ["f3sctl"],
-  "properties": { "apiVersion": 1, "version": "v0.1.0", "node": "pi0" },
+  "properties": { "apiVersion": 2, "version": "v0.7.0", "node": "pi0" },
   "links": [ { "rel": ["status"], "href": "/cgi-bin/f3sctl/status" }, ... ],
   "actions": [
     { "name": "power-off", "method": "POST", "href": "/cgi-bin/f3sctl/power/off" },
@@ -576,6 +576,14 @@ When it finishes, the root offers `power-on` and `fans-on`, and nothing else.
 ## 11. Versioning
 
 `properties.apiVersion` is an integer. It changes only on a breaking change.
+The current version is **2** — the bump accompanied the server's
+reorganisation into per-domain surface packages (power, Gogios). No response
+or action shape changed, but the version was raised deliberately so the two
+deployment halves (server and clients) upgrade as one: a client MUST treat an
+`apiVersion` it does not recognise as a stop signal (§2), which here means a
+v1-era client must be upgraded to a matching f3sctl build before it talks to a
+v2 server. If you pin client and server versions together — the deployment
+model this project assumes — you will never see the refusal.
 
 **Stable — a client may rely on these:**
 

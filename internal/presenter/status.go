@@ -26,7 +26,7 @@ type Options struct {
 	//
 	// The local CLI always sets this: power.Engine.ProbeAll populates Role for
 	// every host it probes, straight out of the inventory. The remote client
-	// leaves it off. It could, in principle, dig it out: httpapi.hostEntity
+	// leaves it off. It could, in principle, dig it out: powerapi's hostEntity
 	// puts the role in a host entity's "class" array (["host", role]) --
 	// but docs/CLIENT.md section 11 lists the stable, depend-on-able host
 	// properties as name/ip/ping/pingKnown/ssh/ms only, and explicitly calls

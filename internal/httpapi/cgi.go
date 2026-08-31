@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/util"
 )
 
@@ -20,8 +21,8 @@ const maxBodyBytes = 64 << 10
 // 11.0: PATH_INFO carries the sub-path below SCRIPT_NAME, arbitrary request
 // headers arrive as HTTP_<UPPER_SNAKE>, and CONTENT_LENGTH bounds the body on
 // stdin. See the f3s-raspberry-pi skill, references/bootstrap-netbsd-pi.md.
-func parseCGIRequest(stdin io.Reader) (request, error) {
-	req := request{
+func parseCGIRequest(stdin io.Reader) (contract.Request, error) {
+	req := contract.Request{
 		Method: strings.ToUpper(util.OrDefault(os.Getenv("REQUEST_METHOD"), "GET")),
 		Path:   normalisePath(os.Getenv("PATH_INFO")),
 		// bozohttpd exports X-API-Key as HTTP_X_API_KEY.
