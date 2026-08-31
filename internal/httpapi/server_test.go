@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
@@ -137,7 +138,7 @@ func TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty(t *testing.
 // handleJob and the root's handleOpenAPI), so both reads were pure waste on
 // these two routes. This pins that they are no longer made at all.
 func TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt(t *testing.T) {
-	for _, path := range []string{powerapi.JobPath, openAPIPath} {
+	for _, path := range []string{powerapi.JobPath, openAPIPath, "/"} {
 		t.Run(path, func(t *testing.T) {
 			srv, pc := countingServer(t)
 			var out bytes.Buffer
@@ -178,13 +179,19 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 // to decide whether to fetch the Gogios mute. Every handler in the mute
 // family -- Gogios surface's handleMonitoring, handleMute, handleUnmute --
 // renders only state.Monitoring; see gogiosapi/handlers.go.
+//
+// The root belongs on the SkipsProbe side since the section folders took
+// over its actions list: handleRoot renders properties and links only, no
+// state-derived data, so pointing a browser's menu at the entry point costs
+// no probe at all. Everything that still renders state-derived actions
+// (/status, the fans pair, /power's folder list) must keep probing.
 func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
-	for _, path := range []string{"/monitoring", "/monitoring/mute", "/monitoring/unmute"} {
+	for _, path := range []string{"/", "/monitoring", "/monitoring/mute", "/monitoring/unmute"} {
 		if !skipsProbe(testRoutes(inventory.Default()), path) {
-			t.Errorf("skipsProbe(%q) = false, want true: no monitoring handler reads state.Hosts or state.Fans", path)
+			t.Errorf("skipsProbe(%q) = false, want true: this handler renders no probe-derived state", path)
 		}
 	}
-	for _, path := range []string{"/", "/status", "/fans", "/fans/on", "/fans/off", "/power/off"} {
+	for _, path := range []string{"/power", "/status", "/fans", "/fans/on", "/fans/off", "/power/off"} {
 		if skipsProbe(testRoutes(inventory.Default()), path) {
 			t.Errorf("skipsProbe(%q) = true, want false: this route's handler or Available predicates do read the probe", path)
 		}
@@ -374,5 +381,189 @@ func TestServeCGIEndToEndRendersTheJobEntityThroughTheRealPipeline(t *testing.T)
 	if self != powerapi.JobPath {
 		t.Errorf("self link = %q, want %q (router.Href(%q) with an empty SCRIPT_NAME base): "+
 			"a nil Router would have panicked before this response was ever produced", self, powerapi.JobPath, powerapi.JobPath)
+	}
+}
+
+// decodedEntity is a served Siren entity, decoded loosely: tests below
+// assert on the JSON's own shape (which keys exist at all), which contract.Entity
+// would hide with its omitempty zero values.
+type servedEntity struct {
+	Class      []string          `json:"class"`
+	Title      string            `json:"title"`
+	Links      []contract.Link   `json:"links"`
+	Actions    []contract.Action `json:"actions"`
+	Properties map[string]any    `json:"properties"`
+}
+
+// getEntity serves one authenticated GET request through the real pipeline
+// and decodes the Siren body (serve writes CGI headers first -- split them).
+func getEntity(t *testing.T, srv *Server, path string) servedEntity {
+	t.Helper()
+	var out bytes.Buffer
+	if err := srv.serve(&out, getRequest(path)); err != nil {
+		t.Fatalf("serve(%s): %v", path, err)
+	}
+	headers, body, ok := bytes.Cut(out.Bytes(), []byte("\r\n\r\n"))
+	if !ok {
+		t.Fatalf("serve(%s) wrote no CGI header block:\n%s", path, out.String())
+	}
+	var e servedEntity
+	if err := json.Unmarshal(body, &e); err != nil {
+		t.Fatalf("body of %s is not valid JSON: %v\nheaders: %s\nbody: %s", path, err, headers, body)
+	}
+	return e
+}
+
+// hasRel returns whether links carries rel (first rel element only, the way
+// every link in this API is declared).
+func hasServedRel(links []contract.Link, rel string) bool {
+	for _, l := range links {
+		if len(l.Rel) > 0 && l.Rel[0] == rel {
+			return true
+		}
+	}
+	return false
+}
+
+// actionNames lists a served entity's action names.
+func actionNames(e servedEntity) []string {
+	var out []string
+	for _, a := range e.Actions {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+// hasAction returns whether the entity offers an action by name.
+func hasAction(e servedEntity, name string) bool {
+	for _, n := range actionNames(e) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRootIsAFolderIndex pins the folder-shaped overview: the root carries no
+// actions of its own -- every operation lives in its section folder -- and
+// its links are the two section folders plus the read-only resources. The
+// drill-downs and the mute resource must NOT be linked from the root: they
+// are what the folders are for. See handleRoot's folder comment and
+// enrichState's folder routes.
+func TestRootIsAFolderIndex(t *testing.T) {
+	srv, pc := countingServer(t)
+	e := getEntity(t, srv, "/")
+
+	if len(e.Actions) != 0 {
+		t.Errorf("root actions = %v, want none: the operations live in the section folders", actionNames(e))
+	}
+	for _, rel := range []string{"self", "describedby", "power", "status", "job", "fans", "gogios"} {
+		if !hasServedRel(e.Links, rel) {
+			t.Errorf("root links = %+v, missing rel %q", e.Links, rel)
+		}
+	}
+	for _, rel := range []string{"monitoring", "gogios-critical"} {
+		if hasServedRel(e.Links, rel) {
+			t.Errorf("root links = %+v carry rel %q: that belongs in its section folder", e.Links, rel)
+		}
+	}
+	if pc.probes != 0 || pc.fanReads != 0 {
+		t.Errorf("root fetch paid %d probes and %d fan reads, want neither: the overview is a folder index now (SkipsProbe)", pc.probes, pc.fanReads)
+	}
+}
+
+// folderServer is countingServer with a chosen fleet: the named hosts are all
+// ping+SSH-up, the fan plug reads as on, and the gateway mute read returns
+// the given state. It exists so the folder tests can judge availability.
+func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.Context) []power.GatewayMute) *Server {
+	t.Helper()
+
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "apikey")
+	if err := os.WriteFile(keyFile, []byte("sekrit\n"), 0o600); err != nil {
+		t.Fatalf("writing the API key file: %v", err)
+	}
+	cfg := config.Default()
+	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
+	cfg.GogiosFetchTimeout = config.Duration(time.Second)
+	cfg.GogiosCacheTTL = config.Duration(time.Minute)
+	return (&Server{
+		cfg:   cfg,
+		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
+		peers: coordination.NewPeerSet(nil, ""),
+		auth:  NewAuthenticator(keyFile),
+		siren: NewSirenRenderer(),
+		node:  "test",
+		probeHosts: func(context.Context) []power.HostStatus {
+			return hosts
+		},
+		fansStatus: func(context.Context) (power.FansState, error) {
+			return power.FansState{On: true}, nil
+		},
+		monitorStatus: monitor,
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+}
+
+// TestPowerFolderOffersThePowerActions pins that /power is the one overview
+// of the domain: with a fleet up and cooling, the folder advertises the
+// shutdowns it can actually perform and the fans-off confirmation, withholds
+// what cannot work (waking an up host), and links its own resources. This is
+// the list the ROOT used to carry -- see handlePowerFolder and handleRoot.
+func TestPowerFolderOffersThePowerActions(t *testing.T) {
+	hosts := []power.HostStatus{
+		{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
+		{Name: "f1", Role: "f", Ping: true, PingKnown: true, SSH: true},
+		{Name: "f2", Role: "f", Ping: true, PingKnown: true, SSH: true},
+	}
+	srv := folderServer(t, hosts, nil)
+	e := getEntity(t, srv, "/power")
+
+	if e.Title != "Power control" {
+		t.Errorf("title = %q, want %q", e.Title, "Power control")
+	}
+	for _, name := range []string{"power-off", "all-off", "f0-off", "fans-off"} {
+		if !hasAction(e, name) {
+			t.Errorf("power folder actions = %v, want %s offered (the fleet is up and the plug is on)", actionNames(e), name)
+		}
+	}
+	for _, name := range []string{"power-on", "all-on", "f0-on", "fans-on"} {
+		if hasAction(e, name) {
+			t.Errorf("power folder actions = %v, want %s withheld: only possible actions are ever advertised", actionNames(e), name)
+		}
+	}
+	for _, rel := range []string{"self", "up", "status", "job", "fans"} {
+		if !hasServedRel(e.Links, rel) {
+			t.Errorf("power folder links = %+v, missing rel %q", e.Links, rel)
+		}
+	}
+}
+
+// TestGogiosFolderCarriesTheMutePair pins that the /gogios folder offers the
+// whole family's controls, not just the report browser's: the cache clear
+// always, and exactly one of mute/unmute judged on the same gateway mute
+// state /monitoring renders. This is what makes /gogios a folder rather than
+// only a report -- see handleOverview and enrichState's IsFolderPath fetch.
+func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
+	tests := []struct {
+		name string
+		mute []power.GatewayMute
+		want string // the mute action that must be offered
+	}{
+		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}}, "monitoring-unmute"},
+		{"alerting", []power.GatewayMute{{Name: "blowfish", Muted: false}}, "monitoring-mute"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := folderServer(t, nil, func(context.Context) []power.GatewayMute { return tt.mute })
+			e := getEntity(t, srv, "/gogios")
+
+			if !hasAction(e, tt.want) {
+				t.Errorf("gogios folder actions = %v, want %s offered while %s", actionNames(e), tt.want, tt.name)
+			}
+			if !hasAction(e, "gogios-cache-clear") {
+				t.Errorf("gogios folder actions = %v, want gogios-cache-clear offered (always available)", actionNames(e))
+			}
+		})
 	}
 }

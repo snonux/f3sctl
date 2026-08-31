@@ -51,6 +51,12 @@ func (sf *Surface) section(rs []contract.Route) []contract.Route {
 // the only route to the marker. Gogios then stayed blind until somebody
 // SSHed to both gateways by hand. A monitoring gap has to be closeable on
 // its own terms.
+//
+// NoRootLink: monitoring is reached through the Gogios folder (/gogios),
+// which links it and carries the mute pair's actions alongside the report
+// browse -- it is a Gogios concern, not an overview-level control, and
+// keeping it off the root is what lets the root's menu be two folders and
+// the read-only resources (see contract.Route.NoRootLink).
 func (sf *Surface) monitoringRoutes() []contract.Route {
 	return []contract.Route{
 		{
@@ -59,6 +65,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			// handleMonitoring, and the monitoring-mute/monitoring-unmute
 			// actions it renders via ActionsFor, all read only
 			// state.Monitoring, populated separately by enrichState.
+			NoRootLink: true,
 			SkipsProbe: true,
 			Handle:     sf.handleMonitoring,
 		},
@@ -93,8 +100,14 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 // unmutes Gogios alerting on the two gateways (a write, via the Monitor),
 // while this reads the alert report itself (internal/gogios, never touching
 // the engine). handleOverview cross-links to /monitoring so a client can
-// reach the mute controls from the report, but the two surfaces stay
-// independent.
+// reach the mute controls from the report, and also advertises the mute pair
+// itself (see there) so the folder holds the whole Gogios concern -- the two
+// surfaces stay independent underneath.
+//
+// Every drill-down is NoRootLink: they are reachable through the /gogios
+// folder (the overview links each by rel), which is what keeps the root's
+// overview menu two folders and the read-only resources instead of six
+// drill-down entries (see contract.Route.NoRootLink).
 func (sf *Surface) reportRoutes() []contract.Route {
 	out := []contract.Route{
 		{
@@ -112,6 +125,9 @@ func (sf *Surface) reportRoutes() []contract.Route {
 		out = append(out, contract.Route{
 			Name: "gogios-" + status, Title: "Gogios " + strings.ToUpper(status) + " checks",
 			Method: http.MethodGet, Path: "/gogios/" + status,
+			// NoRootLink: reached through the /gogios folder, which links
+			// each category by rel -- see reportRoutes' doc comment.
+			NoRootLink: true,
 			SkipsProbe: true,
 			Handle:     sf.statusHandle(status),
 		})

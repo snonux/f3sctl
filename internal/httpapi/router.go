@@ -106,6 +106,24 @@ func (rt *Router) actionsFor(state contract.State, names ...string) []contract.A
 	return out
 }
 
+// SectionActions renders every action of one section that is possible right
+// now. It is what a section folder offers: the same state-dependent judgement
+// every other rendering makes (only possible actions are advertised, actions
+// that are not are omitted entirely), narrowed to the folder's own domain by
+// the Route.Section stamps -- so the power folder carries exactly the power
+// operations, never the Gogios ones, with no separate list to keep in step.
+// See contract.Route.Section and powerapi's /power folder.
+func (rt *Router) SectionActions(state contract.State, section string) []contract.Action {
+	var out []contract.Action
+	for _, r := range rt.routes {
+		if !r.Action || r.Section != section || !r.IsAvailable(state) {
+			continue
+		}
+		out = append(out, rt.action(r, state))
+	}
+	return out
+}
+
 // actions and actionsFor are injected into both domain surfaces (see
 // powerapi.Surface and gogiosapi.Surface), so resources rendered inside a
 // surface handler advertise exactly the actions the route table says are

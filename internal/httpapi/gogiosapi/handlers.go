@@ -97,9 +97,14 @@ func (sf *Surface) setMute(ctx context.Context, state contract.State, _ contract
 	return sf.handleMonitoring(ctx, state, contract.Request{})
 }
 
-// handleOverview renders the Gogios alert report overview: the subject
-// headline, the six summary counts, when it was last updated, and links to
-// each drill-down category plus /monitoring (the separate mute concern).
+// handleOverview renders the Gogios folder: the alert report overview -- the
+// subject headline, the six summary counts, when it was last updated -- plus
+// the links to each drill-down category and to /monitoring (the separate
+// mute resource), and the whole family's controls: the cache-clear action
+// and the mute/unmute pair. It is one of the two section folders (the other
+// is powerapi's /power), and it is what the root's "gogios" rel resolves to --
+// a browser's Gogios menu opens here rather than across six root-level
+// drill-down entries and a mute resource it would have to find separately.
 //
 // A fetch failure is reported as an "error" property with 200 OK, not a
 // non-2xx status -- the same convention handleMonitoring uses for a backend
@@ -133,11 +138,14 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 	}
 
 	return contract.Entity{
-		Class:      []string{"gogios"},
-		Title:      "Gogios alert report",
+		Class:      []string{"gogios", "section"},
+		Title:      "Gogios status and alerting",
 		Properties: props,
 		Links:      links,
-		Actions:    sf.actionsFor(state, "gogios-cache-clear"),
+		// The folder advertises the whole family's controls: the report cache
+		// clear, and the gateway mute pair -- which is why the route's render
+		// needs state.Monitoring too (see enrichState's IsFolderPath fetch).
+		Actions: sf.actionsFor(state, "gogios-cache-clear", "monitoring-mute", "monitoring-unmute"),
 	}, http.StatusOK, nil
 }
 

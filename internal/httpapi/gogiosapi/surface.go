@@ -101,6 +101,13 @@ func Muted(s contract.State) bool { return power.AnyMuted(s.Monitoring) }
 // the SSH round trips that read the gateways -- see enrichState.
 func IsMonitorPath(path string) bool { return strings.HasPrefix(path, monitorPathPrefix) }
 
+// IsFolderPath reports whether path IS the Gogios folder (/gogios itself, as
+// opposed to the rest of the report family beneath it). The folder advertises
+// the mute pair alongside the report (see handleOverview), so enrichState
+// must also fetch the gateway mute for it -- the same SSH round trips
+// IsMonitorPath exists to gate.
+func IsFolderPath(path string) bool { return path == reportPathPrefix }
+
 // IsReportPath reports whether path belongs to the alert-browse family
 // (/gogios and its drill-downs). The composition root uses it to decide
 // whether to fetch the report -- see enrichState.

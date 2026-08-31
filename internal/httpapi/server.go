@@ -68,6 +68,14 @@ type Server struct {
 	// HTTP call bounded by a 5s timeout); same reasoning as probeHosts. See
 	// Server.fansStatusFn.
 	fansStatus func(context.Context) (power.FansState, error)
+
+	// monitorStatus reads the Gogios mute marker from both gateways, feeding
+	// State.Monitoring. Nil means the engine's own read
+	// (Engine.MonitoringStatus, an SSH round trip to each gateway, several
+	// seconds); same reasoning as probeHosts. Fetched for the routes that
+	// render it -- the /monitoring family and the /gogios folder, which
+	// advertises the mute pair (see enrichState). See Server.monitorStatusFn.
+	monitorStatus func(context.Context) []power.GatewayMute
 }
 
 // ServeCGI answers a single CGI request read from the process environment and
@@ -134,7 +142,7 @@ func (s *Server) assemble(inv inventory.Inventory, pw *powerapi.Surface, gg *gog
 	s.router = router
 	s.openapi = NewOpenAPIBuilder(router)
 
-	pw.Actions, pw.ActionsFor = router.actions, router.actionsFor
+	pw.Actions, pw.ActionsFor, pw.SectionActions = router.actions, router.actionsFor, router.SectionActions
 	gg.ActionsFor = router.actionsFor
 	return s
 }
@@ -309,6 +317,16 @@ func (s *Server) fansStatusFn() func(context.Context) (power.FansState, error) {
 	return s.engine.FansStatus
 }
 
+// monitorStatusFn returns the gateway mute read, falling back to the
+// engine's real one. Same nil-safety pattern as the power surface's
+// confirmRack.
+func (s *Server) monitorStatusFn() func(context.Context) []power.GatewayMute {
+	if s.monitorStatus != nil {
+		return s.monitorStatus
+	}
+	return s.engine.MonitoringStatus
+}
+
 // enrichState adds the request-scoped facts that cost more than the local
 // probes in snapshot() to gather -- the peer node's job state, and, only for
 // the routes that render it, the Gogios mute and the alert report -- so
@@ -350,11 +368,13 @@ func (s *Server) enrichState(ctx context.Context, state contract.State, req cont
 
 	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
 	// trip each to read, so it is fetched only for the routes that actually
-	// render or change it. Every other response would pay ~2s for a value it
-	// never shows. This runs before the availability check in serve() because
-	// monitoring-mute/unmute are judged against exactly this state.
-	if gogiosapi.IsMonitorPath(req.Path) {
-		state.Monitoring = s.engine.MonitoringStatus(ctx)
+	// render or change it: the /monitoring family, and the /gogios folder,
+	// which advertises the mute pair alongside the report browse. Every other
+	// response would pay ~2s for a value it never shows. This runs before the
+	// availability check in serve() because monitoring-mute/unmute are judged
+	// against exactly this state.
+	if gogiosapi.IsMonitorPath(req.Path) || gogiosapi.IsFolderPath(req.Path) {
+		state.Monitoring = s.monitorStatusFn()(ctx)
 	}
 
 	// The Gogios alert report is cached on disk (internal/gogios) but still

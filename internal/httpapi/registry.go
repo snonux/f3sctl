@@ -64,7 +64,13 @@ func (s *Server) resourceRoutes() []contract.Route {
 			// OpenAPI document's API section, separate from the Power and
 			// Gogios surfaces the other routes are stamped with in Routes().
 			Section: contract.SectionAPI,
-			Handle:  s.handleRoot,
+			// SkipsProbe because handleRoot renders no state-derived data: the
+			// actions list (the only probe-dependent part of the root) moved
+			// to the per-section folders, so pointing a browser's menu at the
+			// root costs no probe at all. The signature keeps State to stay
+			// Handle-typed.
+			SkipsProbe: true,
+			Handle:     s.handleRoot,
 		},
 		{
 			Name: "describedby", Title: "OpenAPI description",
@@ -80,7 +86,7 @@ func (s *Server) resourceRoutes() []contract.Route {
 }
 
 // handleRoot renders the entry point: the only URL a client is allowed to know.
-func (s *Server) handleRoot(_ context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
+func (s *Server) handleRoot(_ context.Context, _ contract.State, _ contract.Request) (contract.Entity, int, error) {
 	return contract.Entity{
 		Class: []string{"f3sctl"},
 		Title: "f3s homelab control",
@@ -98,7 +104,17 @@ func (s *Server) handleRoot(_ context.Context, state contract.State, _ contract.
 			"version":    internal.Version,
 			"node":       s.node,
 		},
-		Links:   s.router.Links(),
-		Actions: s.router.actions(state),
+		// The root is a foldER index, deliberately carrying no actions of
+		// its own: every operation lives in its section folder instead --
+		// power operations on the /power folder, the Gogios mute pair and
+		// the report cache clear on the /gogios one -- so a browser pointing
+		// at the overview sees two folders and the read-only resources, not
+		// a dozen operations (see docs/CLIENT.md §3). Only possible actions
+		// are ever advertised, and none of these are, because the root
+		// renders none at all -- which is also why this route is
+		// SkipsProbe: nothing here depends on fleet state, so fetching
+		// the entry point stops paying the ~3s probe every menu render
+		// used to cost (see rz0 for the flag's discipline).
+		Links: s.router.Links(),
 	}, http.StatusOK, nil
 }

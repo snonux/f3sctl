@@ -93,27 +93,25 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 // to be updated by hand every time a route's CLI spelling changed -- and
 // could (and did) drift from the server's if it wasn't. See sy0.
 //
-// Not every action is advertised on the root. Reading the Gogios mute costs the
-// server an SSH round trip to each gateway, so the root carries only a
-// "monitoring" link and the mute/unmute pair lives on that resource. Looking
-// only at the root made `f3sctl monitoring mute` report "not available right
-// now" while `f3sctl monitoring status` was simultaneously advertising it --
-// the client contradicting itself about the same server state.
-//
-// The rel is derived from the CLI noun and checked against the root's links, so
-// this stays discovery-driven: no action name or path is hard-coded, and a
-// noun with no matching link (like "power") simply falls back to the root.
+// Not every noun's actions live on the root, and since the section folders
+// (see docs/CLIENT.md §3) not even the power actions live there: the root is
+// a folder index, and holderRel is walked through the folders first --
+// "power" resolves to its own /power folder, "monitoring" through the Gogios
+// folder (a Gogios concern, reachable from it), "fans" and "gogios" each to
+// the resource the root's own rel offers. Reading the link chain from the
+// documents rather than building a path keeps this discovery-driven: no
+// action name or path is hard-coded, and a noun whose rel the root does not
+// offer simply falls back to the root -- behaviour a server predating the
+// folders (or a fixture without them) still navigates.
 func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force bool) error {
 	root, err := c.Root(ctx)
 	if err != nil {
 		return err
 	}
 
-	holder := root
-	if _, ok := root.Link(holderRel); ok {
-		if e, err := c.Follow(ctx, root, holderRel); err == nil {
-			holder = e
-		}
+	holder, err := c.resolveHolder(ctx, root, holderRel)
+	if err != nil {
+		return err
 	}
 
 	action, ok := holder.ActionForVerb(cmd)
@@ -162,17 +160,54 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 	return c.showStatus(ctx)
 }
 
+// nounHolderPath is the rel chain from the root to the entity whose actions
+// serve each CLI noun, through the section folders (see docs/CLIENT.md §3 --
+// the root is a folder index and a noun's controls live in its folder). It
+// carries no paths and no action names, only the order of links to follow;
+// every hop is read from the document the previous hop handed back, so a
+// server that rearranges its folders needs no change here, and a document
+// that does not offer a link (the pre-folder shape, or a test fixture)
+// degrades gracefully: whatever the last successful hop reached is the
+// holder, the root if none followed.
+var nounHolderPath = map[string][]string{
+	"power":      {"power"},
+	"fans":       {"fans"},
+	"monitoring": {"gogios", "monitoring"},
+	"gogios":     {"gogios"},
+}
+
+// resolveHolder walks a noun's rel chain from the root and returns the
+// entity to look the noun's actions up on. Silence about a broken chain is
+// deliberate -- the caller's ActionForVerb miss renders the state it was
+// judged against -- the same tolerated-degradation the single-hop version
+// this replaced had. See runAction.
+func (c *Client) resolveHolder(ctx context.Context, root Entity, noun string) (Entity, error) {
+	entity := root
+	for _, rel := range nounHolderPath[noun] {
+		if _, ok := entity.Link(rel); !ok {
+			break
+		}
+		e, err := c.Follow(ctx, entity, rel)
+		if err != nil {
+			break
+		}
+		entity = e
+	}
+	return entity, nil
+}
+
 // showMonitoring renders the Gogios mute for each gateway.
 //
-// Followed from the root's "monitoring" link rather than fetched from a known
-// path: the state is only read when asked for, because it costs the server an
-// SSH round trip to each gateway.
+// Resolved through the section folders (the gogios folder links /monitoring;
+// the root links the folder) rather than fetched from a known path: the
+// state is only read when asked for, because it costs the server an SSH
+// round trip to each gateway.
 func (c *Client) showMonitoring(ctx context.Context) error {
 	root, err := c.Root(ctx)
 	if err != nil {
 		return err
 	}
-	mon, err := c.Follow(ctx, root, "monitoring")
+	mon, err := c.resolveHolder(ctx, root, "monitoring")
 	if err != nil {
 		return err
 	}

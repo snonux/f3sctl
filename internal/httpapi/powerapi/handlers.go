@@ -69,6 +69,42 @@ func (sf *Surface) actionsFor(state contract.State, names ...string) []contract.
 	return sf.ActionsFor(state, names...)
 }
 
+func (sf *Surface) sectionActions(state contract.State, section string) []contract.Action {
+	if sf.SectionActions == nil {
+		return nil
+	}
+	return sf.SectionActions(state, section)
+}
+
+// handlePowerFolder renders the power section folder: a compact index of the
+// domain. Its links are the power resources (status, job, the fan plug); its
+// actions are every power operation the route table offers right now -- the
+// cluster-wide, all-hosts and per-host pairs plus the fan switch pair -- the
+// same state-dependent offer the ROOT used to carry in one flat list, moved
+// here so a browser's overview menu is folders rather than a dozen controls.
+//
+// It looks up nothing by hand: SectionActions narrows the route table's own
+// offer by contract.Route.Section, so a power action added to the surface is
+// in this folder (and in the OpenAPI document's Power section) with no second
+// edit. The entity is judged on the SAME fleet snapshot the status route
+// uses, which is why the route is not SkipsProbe despite rendering links
+// alone.
+func (sf *Surface) handlePowerFolder(_ context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
+	return contract.Entity{
+		Class:      []string{"power", "section"},
+		Title:      "Power control",
+		Properties: map[string]any{"node": sf.Node},
+		Links: []contract.Link{
+			{Rel: []string{"self"}, Href: sf.Href("/power")},
+			{Rel: []string{"up"}, Href: sf.Href("/")},
+			{Rel: []string{"status"}, Href: sf.Href(StatusPath)},
+			{Rel: []string{"job"}, Href: sf.Href(JobPath)},
+			{Rel: []string{"fans"}, Href: sf.Href("/fans")},
+		},
+		Actions: sf.sectionActions(state, contract.SectionPower),
+	}, http.StatusOK, nil
+}
+
 // hostEntity renders one probed host.
 //
 // Both signals are reported rather than a single "up", because their

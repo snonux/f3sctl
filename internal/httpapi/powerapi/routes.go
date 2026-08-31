@@ -63,13 +63,24 @@ func (sf *Surface) hostsRoutes() []contract.Route {
 	return out
 }
 
-// resourceRoutes is the read-only power resources: the status overview, the
-// current-or-last job, and the rack-fan plug. Navigable resources rendered in
-// "links", never in "actions" (see TestGETRoutesAreLinksNotActions). None of
-// these takes a CLIVerb -- they are followed by relation, not invoked by a
-// CLI verb.
+// resourceRoutes is the read-only power resources: the power section folder,
+// the status overview, the current-or-last job, and the rack-fan plug.
+// Navigable resources rendered in "links", never in "actions" (see
+// TestGETRoutesAreLinksNotActions). None of these takes a CLIVerb -- they are
+// followed by relation, not invoked by a CLI verb.
+//
+// The /power folder is section navigation and the root's "power" rel: a GET
+// resource whose actions list is every power operation possible right now
+// (see handlePowerFolder), replacing the flat actions list the ROOT used to
+// carry. It is NOT SkipsProbe -- its actions are judged on fleet state -- so
+// unlike the root itself a folder render still pays the probe.
 func (sf *Surface) resourceRoutes() []contract.Route {
 	return []contract.Route{
+		{
+			Name: "power", Title: "Power control",
+			Method: http.MethodGet, Path: "/power",
+			Handle: sf.handlePowerFolder,
+		},
 		{
 			Name: "status", Title: "Host and rack status",
 			Method: http.MethodGet, Path: StatusPath,

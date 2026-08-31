@@ -133,11 +133,16 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 		auth:  NewAuthenticator(keyFile),
 		siren: NewSirenRenderer(),
 		node:  "e2e",
-		// Root ("/") and /status are not SkipsProbe, so snapshot() calls
-		// these; a nil engine (there is none here -- see above) would
-		// otherwise panic the moment client.Root fetches the root.
+		// /status is not SkipsProbe, so snapshot() calls these; a nil engine
+		// (there is none here -- see above) would otherwise panic the moment
+		// the stubs are reached. The root is SkipsProbe since the section
+		// folders took over its actions list, and /gogios reads the mute
+		// through the monitorStatus seam, so both stay engine-free too.
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
+		monitorStatus: func(context.Context) []power.GatewayMute {
+			return nil
+		},
 	}).assemble(cfg.Inventory, pw, gg, "")
 
 	e2e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

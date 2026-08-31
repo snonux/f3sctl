@@ -92,14 +92,19 @@ type Surface struct {
 	RackConfirm func(context.Context) power.RackActivity
 	// Actions renders the actions list of a resource that advertises the
 	// whole surface (the status route). ActionsFor renders the actions list of
-	// a resource that advertises only its own controls. In production the
-	// composition root injects its Router bound methods here, so the Siren
-	// action shape (name, title, method, href, cliVerb, fields) has exactly
-	// one source; a surface never renders its own actions. Nil here only
-	// means the table is being declared rather than served (tests of
-	// declarations alone), where no actions list is ever rendered.
-	Actions    func(state contract.State) []contract.Action
-	ActionsFor func(state contract.State, names ...string) []contract.Action
+	// a resource that advertises only its own controls. SectionActions
+	// renders every action of one whole API section (contract.Route.Section)
+	// -- what the /power folder offers: every power operation the route
+	// table declares, judged state by state, without the folder naming any
+	// action by hand. In production the composition root injects its Router
+	// bound methods here, so the Siren action shape (name, title, method,
+	// href, cliVerb, fields) has exactly one source; a surface never renders
+	// its own actions. Nil here only means the table is being declared
+	// rather than served (tests of declarations alone), where no actions
+	// list is ever rendered.
+	Actions        func(state contract.State) []contract.Action
+	ActionsFor     func(state contract.State, names ...string) []contract.Action
+	SectionActions func(state contract.State, section string) []contract.Action
 }
 
 // Engine is the slice of the power engine the REST surface drives directly:

@@ -116,14 +116,19 @@ table cannot drift between `--local` and `--remote`.
 rendering, the route table assembly and the two root resources. Everything a
 client actually talks about lives in a per-domain surface package next to it,
 each declaring its routes next to the handlers that serve them:
-`internal/httpapi/powerapi` (status, job, fans, power on/off) and
-`internal/httpapi/gogiosapi` (the mute concern and the alert-report browse).
-The shared vocabulary both speak — `contract.Route`, `State`, `Request`, the
-Siren entity types — lives in `internal/httpapi/contract`, which depends on
-neither side. The surfaces reach the engine only through narrow interfaces
-(`Engine`, `Jobs`, `Peers`, `Monitor`), so a surface can be declared, tested
-and served without a real engine behind it — the same seam discipline
-`backends.go` gives the engine itself.
+`internal/httpapi/powerapi` (status, job, fans, power on/off and the `/power`
+section folder) and `internal/httpapi/gogiosapi` (the mute concern and the
+alert-report browse, gathered behind the `/gogios` section folder). The
+folders are the wire half of that split: the root is a folder index carrying
+no actions, each surface offers its operations in one browsable place, and
+both are rendered from the same section-stamped route table that tags the
+OpenAPI document. The shared vocabulary both speak — `contract.Route`,
+`State`, `Request`, the Siren entity types — lives in
+`internal/httpapi/contract`, which depends on neither side. The surfaces
+reach the engine only through narrow interfaces (`Engine`, `Jobs`, `Peers`,
+`Monitor`), so a surface can be declared, tested and served without a real
+engine behind it — the same seam discipline `backends.go` gives the engine
+itself.
 
 Everything the engine does to the outside world goes through the interfaces in
 `backends.go`. That is what lets the whole shutdown sequence — ordering,

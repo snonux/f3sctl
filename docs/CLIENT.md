@@ -544,7 +544,20 @@ X-API-Key: ...
 ```
 ```json
 { "class": ["f3sctl"],
-  "properties": { "apiVersion": 1, "version": "v0.7.0", "node": "pi0" },
+  "properties": { "apiVersion": 1, "version": "v0.9.0", "node": "pi0" },
+  "links": [
+    { "rel": ["power"],  "href": "/cgi-bin/f3sctl/power",  "title": "Power control" },
+    { "rel": ["gogios"], "href": "/cgi-bin/f3sctl/gogios", "title": "Gogios status and alerting" },
+    { "rel": ["status"], "href": "/cgi-bin/f3sctl/status" }, ... ] }
+```
+
+The root is a **folder index**: it never carries actions. Its two section
+folders — power and Gogios — are where the operations live, each following its
+own domain:
+
+```json
+{ "class": ["power", "section"],
+  "title": "Power control",
   "links": [ { "rel": ["status"], "href": "/cgi-bin/f3sctl/status" }, ... ],
   "actions": [
     { "name": "power-off", "method": "POST", "href": "/cgi-bin/f3sctl/power/off" },
@@ -555,6 +568,12 @@ X-API-Key: ...
 Note what is **not** there: no `power-on` (everything is already up), no
 `fans-on` (already on). The client renders three buttons because it was given
 three actions.
+
+The Gogios folder (`rel: gogios`, class `gogios, section`) is the same idea for
+the alerting domain: its links lead to each report drill-down and to
+`/monitoring` (the mute resource), and it carries the whole family's controls
+— the mute/unmute pair and the cache clear. A client's Gogios menu opens
+there, not across six root-level drill-down entries.
 
 Shut down:
 
@@ -567,9 +586,10 @@ X-API-Key: ...
   "properties": { "action": "off", "state": "running", "node": "pi0", "rc": null } }
 ```
 → `202`. Poll `/status`; the f-hosts lose `ssh`, then `ping`. Meanwhile the
-root offers **no** power actions at all, because a job is running.
+power folder offers **no** power actions at all, because a job is running.
 
-When it finishes, the root offers `power-on` and `fans-on`, and nothing else.
+When it finishes, the power folder offers `power-on` and `fans-on`, and
+nothing else.
 
 ---
 
@@ -589,9 +609,15 @@ project assumes — you will never see the refusal anyway.
 
 **Stable — a client may rely on these:**
 
-- `rel` names: `self`, `status`, `fans`, `job`, `describedby`, `up`
+- `rel` names: `self`, `status`, `fans`, `job`, `describedby`, `up` — plus the
+  two section folders `power` and `gogios` on the root: every operation is
+  reachable from what those offer, and a client that renders only the root's
+  folders and the read-only resources is rendering the whole API
 - action `name`s: `power-on`, `power-off`, `f3-on`, `f3-off`, `fans-on`,
-  `fans-off`
+  `fans-off`, `monitoring-mute`, `monitoring-unmute`, `gogios-cache-clear` —
+  advertised where their section folder puts them (power operations on
+  `/power`'s actions; the mute pair on `/monitoring` and on the `/gogios`
+  folder), never on the root
 - `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,
   `node`, `error`)
