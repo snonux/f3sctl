@@ -58,7 +58,13 @@ func (s *Server) resourceRoutes() []contract.Route {
 		{
 			Name: "self", Title: "API root",
 			Method: http.MethodGet, Path: "/",
-			Handle: s.handleRoot,
+			// The composition root's two resources are stamped inline rather
+			// than through a surface-package stamp: they are two literals, not
+			// a section of their own package. SectionAPI puts them under the
+			// OpenAPI document's API section, separate from the Power and
+			// Gogios surfaces the other routes are stamped with in Routes().
+			Section: contract.SectionAPI,
+			Handle:  s.handleRoot,
 		},
 		{
 			Name: "describedby", Title: "OpenAPI description",
@@ -66,6 +72,7 @@ func (s *Server) resourceRoutes() []contract.Route {
 			// handleOpenAPI ignores State completely: OpenAPIBuilder renders
 			// every route's Fields against a synthetic widestState(), not
 			// the request's own state (see openapi.go).
+			Section:    contract.SectionAPI,
 			SkipsProbe: true,
 			Handle:     s.handleOpenAPI,
 		},

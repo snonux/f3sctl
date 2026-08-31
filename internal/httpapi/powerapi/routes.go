@@ -23,25 +23,43 @@ import (
 // argv from these same routes, so the CLI<->API<->job contract would miss the
 // host as well.
 func (sf *Surface) Routes() []contract.Route {
-	out := sf.resourceRoutes()
+	return sf.section(
+		sf.resourceRoutes(),
+		sf.clusterRoutes(),
+		sf.allHostsRoutes(),
+		sf.hostsRoutes(),
+		sf.fanRoutes(),
+	)
+}
 
-	// Cluster-wide power pair: f0/f1/f2 only, f3 excluded. The every-f-host
-	// pair lives in allHostsRoutes, and per-host actions in hostRoutes,
-	// generated from the inventory.
-	out = append(out, sf.clusterRoutes()...)
-	out = append(out, sf.allHostsRoutes()...)
+// section stamps every route this surface declares with this package's OpenAPI
+// tag (contract.SectionPower), in one place. The package split IS the section
+// split -- that is what "one domain per surface package" means on the wire --
+// so stamping here means a route added to any of this package's route methods
+// is sectioned correctly with no chance of being forgotten. See
+// contract.Route.Section and openapi.go's sections.
+func (sf *Surface) section(groups ...[]contract.Route) []contract.Route {
+	var out []contract.Route
+	for _, g := range groups {
+		for i := range g {
+			g[i].Section = contract.SectionPower
+		}
+		out = append(out, g...)
+	}
+	return out
+}
 
-	// Per-host actions for every f-host, so any one of f0-f3 can be powered
-	// independently of the cluster-wide pair above.
-	//
-	// Generated from the inventory rather than written out four times: adding
-	// a host to the inventory should not mean remembering to add two routes,
-	// two OpenAPI entries and two client mappings by hand.
+// hostsRoutes is the per-host on/off pair for every f-host, so any one of
+// f0-f3 can be powered independently of the cluster-wide pair above.
+//
+// Generated from the inventory rather than written out four times: adding
+// a host to the inventory should not mean remembering to add two routes,
+// two OpenAPI entries and two client mappings by hand.
+func (sf *Surface) hostsRoutes() []contract.Route {
+	var out []contract.Route
 	for _, h := range sf.Inv.ByRole(inventory.RoleF) {
 		out = append(out, sf.hostRoutes(h.Name)...)
 	}
-
-	out = append(out, sf.fanRoutes()...)
 	return out
 }
 

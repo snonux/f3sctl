@@ -24,7 +24,20 @@ var Statuses = []string{"critical", "warning", "unknown", "stale", "suppressed",
 // Routes is this surface's complete slice of the API: the /monitoring
 // resource and its mute pair, then the read-only alert-browse family.
 func (sf *Surface) Routes() []contract.Route {
-	return append(sf.monitoringRoutes(), sf.reportRoutes()...)
+	return sf.section(append(sf.monitoringRoutes(), sf.reportRoutes()...))
+}
+
+// section stamps every route this surface declares with this package's OpenAPI
+// tag (contract.SectionGogios), in one place. The package split IS the section
+// split -- that is what "one domain per surface package" now means on the wire
+// -- so stamping here rather than per literal means a route added to any of
+// this package's route methods is sectioned correctly with no chance of being
+// forgotten. See contract.Route.Section and openapi.go's sections.
+func (sf *Surface) section(rs []contract.Route) []contract.Route {
+	for i := range rs {
+		rs[i].Section = contract.SectionGogios
+	}
+	return rs
 }
 
 // monitoringRoutes is the Gogios mute/unmute pair plus the resource that

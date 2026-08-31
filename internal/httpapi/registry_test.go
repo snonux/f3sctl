@@ -47,9 +47,27 @@ func TestOpenAPICoversEveryRoute(t *testing.T) {
 			t.Errorf("route %q (%s %s) is missing from the OpenAPI document", r.Name, r.Method, r.Path)
 			continue
 		}
-		if _, ok := entry[lower(r.Method)]; !ok {
+		op, ok := entry[lower(r.Method)].(map[string]any)
+		if !ok {
 			t.Errorf("route %q is in the document but not under method %s", r.Name, r.Method)
+			continue
 		}
+		// And every operation sits in its route's own section, so the
+		// OpenAPI document really does split power and gogios operations
+		// into different sections rather than describe a flat surface.
+		tags, ok := op["tags"].([]any)
+		if !ok || len(tags) != 1 || tags[0] != r.Section {
+			t.Errorf("route %q's OpenAPI operation carries tags %v, want exactly [%q]", r.Name, op["tags"], r.Section)
+		}
+	}
+
+	// The top-level tags array -- what a reader renders as sections -- has
+	// one entry per section in the vocabulary (openapi.go's sections table).
+	// Build() always emits the whole table; if a section went unused the
+	// section test above (TestEveryRouteDeclaresAKnownSection) already
+	// failed, so here it is only the count that is pinned.
+	if got, want := len(doc["tags"].([]any)), len(sections); got != want {
+		t.Errorf("OpenAPI document declares %d tags, want %d (one per section in openapi.go's sections)", got, want)
 	}
 
 	// And nothing in the document that is not a real route.

@@ -4,6 +4,20 @@ import (
 	"context"
 )
 
+// Section is the part of the API surface a route belongs to: the value a
+// Route.Section carries. The names are the OpenAPI tag names too, so a
+// generated reader shows them verbatim as its section headings.
+const (
+	// SectionAPI is the entry point and its OpenAPI description -- the two
+	// URLs a client knows without following any other link first. Routes of
+	// the composition root's resourceRoutes declare it inline.
+	SectionAPI = "API"
+	// SectionPower is everything the rack concerns: powerapi.
+	SectionPower = "Power"
+	// SectionGogios is alerting: gogiosapi.
+	SectionGogios = "Gogios"
+)
+
 // Handle performs one route: it turns a request and the request's State
 // snapshot into the entity to render, the HTTP status to report it under, and
 // an error for the non-2xx cases.
@@ -38,6 +52,24 @@ type Route struct {
 	// Action marks a state change (rendered in "actions"). Routes without it
 	// are resources, rendered in "links".
 	Action bool
+	// Section names which part of the API surface this route belongs to: one
+	// of the contract.Section* constants below. It is the single declaration
+	// behind the OpenAPI document's tag grouping (openapi.go's sections), so
+	// a generated reader shows power operations and Gogios operations as
+	// separate sections instead of one flat list. It is purely additive on
+	// the wire -- Siren entities never carry it -- which is why it needed no
+	// apiVersion bump (see §11 in docs/CLIENT.md: the version moves only on a
+	// breaking change).
+	//
+	// A whole surface package stamps its section once in Routes() rather than
+	// on every literal: the package split (powerapi, gogiosapi) IS the
+	// section split, so one stamp per Routes cannot forget a route, while a
+	// per-literal field can. The composition root's own resources declare
+	// Section inline -- they are two literals, not a surface package.
+	// TestEveryRouteDeclaresAKnownSection keeps both halves honest: every
+	// route must carry a section from the tag vocabulary, and the vocabulary
+	// must not name a section no route uses.
+	Section string
 	// NoRootLink excludes a GET resource from the root entity's own link
 	// list. Every other GET route is safe to follow exactly as its bare href
 	// appears there (docs/CLIENT.md tells clients they may always do that) --

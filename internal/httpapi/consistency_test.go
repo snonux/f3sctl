@@ -123,6 +123,35 @@ func TestJobArgsUnrecognizedAction(t *testing.T) {
 	}
 }
 
+// TestEveryRouteDeclaresAKnownSection keeps the section/tag split honest
+// (see contract.Route.Section and openapi.go's sections): every route in the
+// real table must carry a section from the tag vocabulary -- a forgotten
+// stamp would drop the route into a tag-agnostic "default" group in every
+// OpenAPI reader, exactly the flat list the sections exist to replace --
+// and the vocabulary must not name a section no route uses, which would
+// advertise a group that is always empty.
+func TestEveryRouteDeclaresAKnownSection(t *testing.T) {
+	vocabulary := map[string]bool{}
+	for _, s := range sections {
+		vocabulary[s.Name] = true
+	}
+
+	declared := map[string]bool{}
+	for _, r := range testRoutes(inventory.Default()) {
+		if r.Section == "" || !vocabulary[r.Section] {
+			t.Errorf("route %q declares section %q, which is not in openapi.go's tag vocabulary", r.Name, r.Section)
+			continue
+		}
+		declared[r.Section] = true
+	}
+
+	for _, s := range sections {
+		if !declared[s.Name] {
+			t.Errorf("tag vocabulary names section %q, but no route declares it", s.Name)
+		}
+	}
+}
+
 func equalArgs(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

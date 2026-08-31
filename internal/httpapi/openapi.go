@@ -68,10 +68,23 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title":       "f3sctl",
-			"version":     internal.Version,
-			"description": "Power, status and rack-fan control for the f3s homelab. Hypermedia (Siren): fetch the root and follow what it offers rather than hard-coding these paths.",
+			"title":   "f3sctl",
+			"version": internal.Version,
+			"description": "Power, status and rack-fan control for the f3s homelab. " +
+				"Operations are grouped into two sections: Power (the rack -- status, " +
+				"jobs, power operations, the fan plug) and Gogios (alerting -- the mute " +
+				"pair and the alert-report browse), with API covering the entry point " +
+				"itself. Hypermedia (Siren): fetch the root and follow what it offers " +
+				"rather than hard-coding these paths.",
 		},
+		// The sections: one tag object per contract.Route.Section a route
+		// declares, in the fixed order of the sections table below. This is
+		// what makes a Swagger UI or generated reader show power operations
+		// and Gogios operations as separate groups rather than one flat list
+		// -- the machine-readable half of the surface split that
+		// powerapi/gogiosapi express in Go. TestOpenAPICoversEveryRoute pins
+		// that every operation carries exactly its route's section tag.
+		"tags": tagList(),
 		"components": map[string]any{
 			"securitySchemes": map[string]any{
 				"apiKey": map[string]any{"type": "apiKey", "in": "header", "name": "X-API-Key"},
@@ -82,11 +95,62 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 	}
 }
 
+// section is one entry of the OpenAPI tag vocabulary: a section of the API
+// surface rendered as its own group in every tag-aware reader.
+//
+// The order here is the order the sections appear in, and follows the route
+// table's own order (registry.go): the entry point first, then the two domain
+// surfaces. A section with no route would advertise a group that never
+// appears under any path -- TestEveryRouteDeclaresAKnownSection fails on
+// that (and on the converse, a route naming a section absent from here).
+type section struct {
+	Name        string
+	Description string
+}
+
+// sections is the tag vocabulary: power and gogios as separate sections,
+// plus the entry-point resources. Each description says what belongs there,
+// the same split the surface packages (powerapi, gogiosapi) draw in Go.
+var sections = []section{
+	{
+		Name: contract.SectionAPI,
+		Description: "The entry point and its OpenAPI description " +
+			"-- the two URLs a client knows without following a link first.",
+	},
+	{
+		Name: contract.SectionPower,
+		Description: "Rack control: the status and job resources, the rack-fan plug, " +
+			"the cluster-wide (f0/f1/f2), all-hosts (f0-f3) and per-host power pairs, " +
+			"and the fans on/off actions.",
+	},
+	{
+		Name: contract.SectionGogios,
+		Description: "Gogios alerting: the monitoring mute/unmute pair and the " +
+			"read-only alert-report browse (overview, per-status drill-downs, " +
+			"per-check detail, cache clear).",
+	},
+}
+
+// tagList renders the sections as the OpenAPI document's top-level tags
+// array.
+func tagList() []any {
+	out := make([]any, 0, len(sections))
+	for _, s := range sections {
+		out = append(out, map[string]any{"name": s.Name, "description": s.Description})
+	}
+	return out
+}
+
 // operationFor renders one route's OpenAPI Operation Object.
 func operationFor(r contract.Route) map[string]any {
 	op := map[string]any{
 		"operationId": r.Name,
 		"summary":     r.Title,
+		// r.Section names which section this operation groups under; a route
+		// without one renders untagged (Swagger UI's "default" group) rather
+		// than guessing -- and TestOpenAPICoversEveryRoute fails on it. See
+		// contract.Route.Section.
+		"tags": []any{r.Section},
 		"responses": map[string]any{
 			"200": map[string]any{"description": "Siren entity"},
 			"401": map[string]any{"description": "missing or bad X-API-Key"},

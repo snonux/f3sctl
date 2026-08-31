@@ -608,8 +608,12 @@ project assumes — you will never see the refusal anyway.
 
 A machine-readable description of the surface is at the `describedby` link
 (`/openapi.json`), generated from the same registry that serves requests. It
-describes what exists in general; the Siren responses describe what is possible
-now. When they seem to disagree, the Siren response is the one to act on.
+groups the operations into two sections by tag — **Power** (rack control:
+status, jobs, the power pairs, the fan plug) and **Gogios** (alerting: the
+mute pair and the alert-report browse), with **API** covering the entry point
+itself — so a generated reader shows the two domains separately. It describes
+what exists in general; the Siren responses describe what is possible now.
+When they seem to disagree, the Siren response is the one to act on.
 
 ---
 
