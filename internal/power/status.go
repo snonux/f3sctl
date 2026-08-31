@@ -23,8 +23,9 @@ func (e *Engine) ProbeAll(ctx context.Context) []HostStatus {
 	return e.Probe(ctx, hosts)
 }
 
-// LiveHosts returns the names of the f-hosts that may still be drawing power,
-// in inventory order.
+// LiveHosts returns the names of the power-group hosts (f0/f1/f2) that may
+// still be drawing power, in inventory order. f3 is never in this list: the
+// fan plug does not cool it. See RackActivity.
 //
 // "May still be" rather than "are": a host whose liveness could not be
 // determined is included, because this feeds a cooling guard and an
@@ -40,8 +41,16 @@ func (e *Engine) LiveHosts(ctx context.Context) []string {
 	return e.RackActivity(ctx).Hosts()
 }
 
-// RackActivity is what the fan guards decide on: which f-hosts may still be
-// drawing power, and why they might be.
+// RackActivity is what the fan guards decide on: which of the power-group
+// hosts (f0/f1/f2) may still be drawing power, and why they might be.
+//
+// f3 is deliberately not part of this: it is racked separately from f0-f2 and
+// the Shelly plug does not cool it, so f3's liveness has no bearing on whether
+// switching the plug off is safe. This is the same fact inventory.PowerGroup
+// already encodes for the wake/shutdown pair; RackActivity applies it to the
+// fan guard too. Before this, a bare `power off` (which never touches f3)
+// would leave the fans on for good whenever f3 happened to be running for its
+// own reasons -- correct if the plug cooled f3, which it does not.
 //
 // There are three guards, and this type is the single rule behind all of them:
 //
@@ -110,12 +119,13 @@ func (a *RackActivity) add(name string, l hostLiveness) {
 // gives, one probe per host; the rule applied to it is identical, including
 // that an unprobeable host counts as running.
 //
-// Non-f hosts are ignored: the plug cools the rack, and the k3s guests in a
-// ProbeAll are not in it.
+// Non-f hosts are ignored: the plug cools f0-f2, and neither the k3s guests
+// nor f3 are in that set. See RackActivity's doc comment for why f3 is
+// excluded even though it is Role f.
 func RackActivityFrom(statuses []HostStatus) RackActivity {
 	var a RackActivity
 	for _, st := range statuses {
-		if st.Role != string(inventory.RoleF) {
+		if st.Role != string(inventory.RoleF) || st.Name == "f3" {
 			continue
 		}
 		a.add(st.Name, st.liveness())
@@ -140,9 +150,13 @@ func (a RackActivity) Why() string {
 	return strings.Join(parts, "; ")
 }
 
-// RackActivity probes every f-host and reports which of them may still be
-// drawing power. This is the strict half of the guard: each host that stays
-// silent is probed confirmedDownProbes times before it counts as off.
+// RackActivity probes the power group (f0/f1/f2) and reports which of them
+// may still be drawing power. This is the strict half of the guard: each host
+// that stays silent is probed confirmedDownProbes times before it counts as
+// off.
+//
+// f3 is not probed here: the plug does not cool it, so its liveness cannot
+// change the answer. See RackActivity's doc comment.
 //
 // It pings directly instead of going through Probe because Probe also dials
 // port 22 on every host, and a host that is off makes that dial wait out the
@@ -152,7 +166,7 @@ func (a RackActivity) Why() string {
 // confirmLiveness) and the caller is usually a person waiting at a terminal or
 // a shutdown holding the rack in an undefined state.
 func (e *Engine) RackActivity(ctx context.Context) RackActivity {
-	hosts := e.cfg.Inventory.ByRole(inventory.RoleF)
+	hosts := e.cfg.Inventory.PowerGroup()
 
 	state := make([]hostLiveness, len(hosts))
 	var wg sync.WaitGroup

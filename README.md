@@ -10,9 +10,9 @@ It replaces the `wol-f3s` bash script.
 f3sctl power status          # probe f0-f3 and the k3s nodes
 f3sctl power on              # fans on, wake f0/f1/f2, un-mute Gogios
 f3sctl power off             # export zusb, mute Gogios, stop guests, power off
-                             # fans off too, but only once nothing answers in
-                             # the rack — f3 is not part of `power off`, and a
-                             # running host keeps its cooling
+                             # fans off too, but only once f0/f1/f2 are silent
+                             # — f3 is racked separately and isn't cooled by
+                             # this plug, so it plays no part in the guard
 f3sctl power f1 on|off       # any single host: f0, f1, f2 or f3
 f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
 ```
@@ -102,7 +102,8 @@ irreversible happens:
    as completing one. Any host still answering ICMP after two minutes is
    reported as a failure, because it is powered on, off the network, and
    Wake-on-LAN will not wake it.
-7. **Fans off** — only once every host is genuinely down.
+7. **Fans off** — only once f0/f1/f2 are genuinely down. The plug does not
+   cool f3, so a running f3 does not keep the fans on.
 
 Every run ends with a timing summary — each stage and each host, longest
 called out — so "why did that take so long" is a question the log answers.

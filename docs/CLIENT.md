@@ -143,21 +143,27 @@ independently.
 
 `all-on` / `all-off` act on **every f-host, f3 included**. Same sequence
 otherwise: same pre-flight, same Gogios mute, same storage-master-last
-ordering, same fans-off once every host is silent.
+ordering, same fans-off guard (which only ever looks at f0/f1/f2 — see below).
 
 #### The fans may be left running
 
-The fan plug cools the whole rack, so a shutdown only switches it off once
-**no f-host answers at all** — f3 included, and including hosts the run never
-touched or could not probe. So `power-off`, which leaves f3 up by design,
-normally finishes with the fans **still running**; `all-off` normally does not.
+The fan plug cools **f0, f1 and f2 only** — f3 is racked separately and is not
+on this circuit — so a shutdown switches it off once **no power-group host
+answers**, including hosts the run never touched or could not probe. f3's
+state is irrelevant to this: both `power-off` and `all-off` normally finish
+with the fans **off**, whether or not f3 is running.
 
-That is a success, not a failure: `rc` is `0` and `state` is `done`. The job's
-last `step` says which happened — it starts with `rack fans left ON` when the
-plug was deliberately not switched, and names the hosts responsible. A client
-that wants to show "rack is cold" must read that, not assume `power-off`
-implies it. The same phrase appears in a failed job's `error`, where hosts did
-not complete their shutdown and the fans were kept on for the same reason.
+The fans are left running when a power-group host does not actually go
+silent — a stuck shutdown, or a probe that could not be carried out at all —
+which is the case worth watching for, not the ordinary run.
+
+Either way it is a success, not a failure: `rc` is `0` and `state` is `done`.
+The job's last `step` says which happened — it starts with `rack fans left ON`
+when the plug was deliberately not switched, and names the hosts responsible.
+A client that wants to show "rack is cold" must read that, not assume
+`power-off` or `all-off` implies it. The same phrase appears in a failed job's
+`error`, where hosts did not complete their shutdown and the fans were kept on
+for the same reason.
 
 A client should not assume one implies the other. With f0–f2 up and only f3
 down, `power-on` is absent (the cluster is already up) while `all-on` is
@@ -419,16 +425,19 @@ Worked example. While a host is running, `fans-off` arrives as:
   "type": "application/x-www-form-urlencoded",
   "fields": [{ "name": "force", "type": "checkbox", "value": false,
                "required": true,
-               "title": "Hosts may still be running (f3 still running): the rack fans keep them cool, so switching the plug off now risks overheating. Confirm to proceed." }] }
+               "title": "Hosts may still be running (f1 still running): the rack fans keep them cool, so switching the plug off now risks overheating. Confirm to proceed." }] }
 ```
 
 A correct client shows a confirmation with that sentence as its text, and sends
 `force=true` only if the user agrees. When the rack is cold the same action
 arrives with no `fields` at all, and the client shows a plain button — with no
-code that knows the word "force".
+code that knows the word "force". Note that this guard only ever names f0, f1
+or f2: f3 is racked separately and the plug does not cool it, so f3's state
+never appears here, even while `power off` (which never touches f3) leaves it
+running.
 
-The parenthesis is the reason, and it varies. `f3 still running` is the rack
-working as intended. `f3 could not be probed, so assumed running` means the
+The parenthesis is the reason, and it varies. `f1 still running` is the rack
+working as intended. `f1 could not be probed, so assumed running` means the
 server could not establish anything about that host and is refusing to guess —
 in that state the `ping` flags in `/status` are not evidence of an idle rack
 either, so do not present it as one. This is why §6 says to render the title as

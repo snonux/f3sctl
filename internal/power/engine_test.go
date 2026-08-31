@@ -178,16 +178,15 @@ func hostIP(t *testing.T, e *Engine, name string) string {
 	return h.IP
 }
 
-// TestClusterOffLeavesTheRackFansOnWhileF3IsRunning is the regression test for
-// the thermal hazard: `f3sctl power off` cut the fan plug on the strength of
-// f0/f1/f2 alone.
+// TestClusterOffSwitchesTheFansOffWhileF3IsRunning is the regression test for
+// the reverse hazard: `f3sctl power off` used to leave the fan plug on for
+// good whenever f3 happened to be up for its own reasons, because the guard
+// used to key on every f-host including f3.
 //
-// f3 is not in PowerGroup, so a bare `power off` deliberately leaves it
-// running -- and then switched off the only cooling in the rack, which is the
-// very thing `fans off` refuses to do without --force. The fans must stay on,
-// and the run must still succeed: the hosts it was asked to power off did go
-// down.
-func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
+// f3 is racked separately from f0-f2 and the Shelly plug does not cool it (see
+// inventory.PowerGroup and RackActivity), so a bare `power off` must cut the
+// fans as soon as f0/f1/f2 are silent, whether or not f3 is running.
+func TestClusterOffSwitchesTheFansOffWhileF3IsRunning(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f3")
 
@@ -195,31 +194,19 @@ func TestClusterOffLeavesTheRackFansOnWhileF3IsRunning(t *testing.T) {
 	if err := eng.Off(context.Background(), &log); err != nil {
 		t.Fatalf("power off: %v", err)
 	}
-	if got := shelly.SetCalls(); len(got) != 0 {
-		t.Fatalf("Switch.Set calls = %v, want none: f3 is still running", got)
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false: "+
+			"f3 running does not keep the fans on", got)
 	}
-	if !strings.Contains(log.String(), fansLeftOn) {
-		t.Errorf("log = %q, want it to say %q", log.String(), fansLeftOn)
-	}
-	if !strings.Contains(log.String(), "f3") {
-		t.Errorf("log = %q, want it to name f3 as the reason", log.String())
-	}
-
-	// The closing line must carry it too: a client tailing the job log sees
-	// the end of a successful run, and "All hosts accepted shutdown." on its
-	// own reads as a rack that went fully cold.
-	tail := log.String()[strings.LastIndex(log.String(), "All hosts accepted shutdown"):]
-	if !strings.Contains(tail, fansLeftOn) {
-		t.Errorf("closing line = %q, want it to repeat %q", tail, fansLeftOn)
+	if strings.Contains(log.String(), fansLeftOn) {
+		t.Errorf("log = %q, want no claim that the fans were left on", log.String())
 	}
 }
 
-// TestClusterOffRecordsTheFansAsLeftOn pins the machine-readable half of the
-// same outcome. The run succeeds (rc=0 for the API job), so the progress step
-// is the only thing distinguishing "shut the cluster down and cut the cooling"
-// from "shut the cluster down and deliberately kept it running" -- and a client
-// polling job.json has nothing else to look at. See docs/CLIENT.md.
-func TestClusterOffRecordsTheFansAsLeftOn(t *testing.T) {
+// TestClusterOffRecordsTheFansAsOffWhileF3Runs pins the machine-readable half
+// of the same outcome: the progress step a client polls for must say the fans
+// went off, not that they were left on because f3 still answers.
+func TestClusterOffRecordsTheFansAsOffWhileF3Runs(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly, "f3")
 
@@ -232,18 +219,15 @@ func TestClusterOffRecordsTheFansAsLeftOn(t *testing.T) {
 	}
 
 	last := steps.lastStep()
-	if !strings.HasPrefix(last, fansLeftOn) {
-		t.Errorf("last step = %q, want it to start with %q", last, fansLeftOn)
-	}
-	if !strings.Contains(last, "f3") {
-		t.Errorf("last step = %q, want it to name f3", last)
+	if last != "switching the rack fans off" {
+		t.Errorf("last step = %q, want %q", last, "switching the rack fans off")
 	}
 }
 
-// TestRackOffStillSwitchesTheFansOffWhenNothingAnswers pins the other half:
-// `power all off` takes f3 down too, so once the rack is silent the plug must
-// still be cut. A guard that simply stopped cutting the fans would pass the
-// test above and leave them running for good.
+// TestRackOffStillSwitchesTheFansOffWhenNothingAnswers pins that `power all
+// off`, which does take f3 down along the way, still cuts the plug once the
+// power group is silent -- the same outcome as a bare `power off`, driven
+// through the whole-rack command instead.
 func TestRackOffStillSwitchesTheFansOffWhenNothingAnswers(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly) // every f-host already silent
@@ -257,10 +241,10 @@ func TestRackOffStillSwitchesTheFansOffWhenNothingAnswers(t *testing.T) {
 	}
 }
 
-// TestClusterOffSwitchesTheFansOffOnceF3IsAlsoDown checks the guard keys on
-// the rack being idle, not on f3 being special: run the cluster shutdown with
-// nothing answering at all and the fans go off, exactly as they always did.
-func TestClusterOffSwitchesTheFansOffOnceF3IsAlsoDown(t *testing.T) {
+// TestClusterOffSwitchesTheFansOffOnceTheRackIsIdle checks the guard through
+// the full `power off` pipeline, not just fansOffOnceTheRackIsIdle directly:
+// with nothing in the power group answering, the fans go off.
+func TestClusterOffSwitchesTheFansOffOnceTheRackIsIdle(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
 
@@ -276,17 +260,19 @@ func TestClusterOffSwitchesTheFansOffOnceF3IsAlsoDown(t *testing.T) {
 // TestFansOffOnceTheRackIsIdle covers the guard on its own, over every shape
 // of "something is still up" -- including a member of the power group that
 // failed to go silent, which is the case awaitPowerDown catches but which must
-// also not reach an unguarded plug.
+// also not reach an unguarded plug -- and pins that f3 never appears in
+// wantLeftOn: the plug does not cool it, so it plays no part in this guard.
 func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		up      []string
-		wantSet bool
+		name       string
+		up         []string
+		wantSet    bool
+		wantLeftOn []string
 	}{
 		{name: "idle rack", wantSet: true},
-		{name: "f3 alone", up: []string{"f3"}},
-		{name: "a power-group host", up: []string{"f1"}},
-		{name: "everything", up: []string{"f0", "f1", "f2", "f3"}},
+		{name: "f3 alone", up: []string{"f3"}, wantSet: true},
+		{name: "a power-group host", up: []string{"f1"}, wantLeftOn: []string{"f1"}},
+		{name: "everything", up: []string{"f0", "f1", "f2", "f3"}, wantLeftOn: []string{"f0", "f1", "f2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shelly := powertest.NewFakeShelly(t, true)
@@ -301,12 +287,12 @@ func TestFansOffOnceTheRackIsIdle(t *testing.T) {
 			got := shelly.SetCalls()
 			if !tc.wantSet {
 				if len(got) != 0 {
-					t.Fatalf("Switch.Set calls = %v, want none while %v is up", got, tc.up)
+					t.Fatalf("Switch.Set calls = %v, want none while %v is up", got, tc.wantLeftOn)
 				}
-				if len(leftOn) != len(tc.up) {
-					t.Errorf("hosts keeping the fans on = %v, want %v", leftOn, tc.up)
+				if !reflect.DeepEqual(leftOn, tc.wantLeftOn) {
+					t.Errorf("hosts keeping the fans on = %v, want %v", leftOn, tc.wantLeftOn)
 				}
-				for _, name := range tc.up {
+				for _, name := range tc.wantLeftOn {
 					if !strings.Contains(log.String(), name) {
 						t.Errorf("log = %q, want it to name %s", log.String(), name)
 					}
@@ -350,7 +336,7 @@ func TestFansStayOnWhenLivenessCannotBeProbed(t *testing.T) {
 	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: nothing is known about the rack", got)
 	}
-	if want := []string{"f0", "f1", "f2", "f3"}; !reflect.DeepEqual(leftOn, want) {
+	if want := []string{"f0", "f1", "f2"}; !reflect.DeepEqual(leftOn, want) {
 		t.Errorf("hosts keeping the fans on = %v, want %v: unknown counts as running", leftOn, want)
 	}
 	if !strings.Contains(log.String(), "could not be probed") {
@@ -380,8 +366,8 @@ func TestFansStayOnWhenPingIsMissing(t *testing.T) {
 	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: ping(8) could not be run", got)
 	}
-	if len(leftOn) != 4 {
-		t.Errorf("hosts keeping the fans on = %v, want all four f-hosts", leftOn)
+	if len(leftOn) != 3 {
+		t.Errorf("hosts keeping the fans on = %v, want all three power-group hosts", leftOn)
 	}
 }
 
@@ -415,8 +401,8 @@ func TestFansStayOnWhenEveryPingFailsHard(t *testing.T) {
 	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: ping(8) never sent a packet", got)
 	}
-	if len(leftOn) != 4 {
-		t.Errorf("hosts keeping the fans on = %v, want all four f-hosts", leftOn)
+	if len(leftOn) != 3 {
+		t.Errorf("hosts keeping the fans on = %v, want all three power-group hosts", leftOn)
 	}
 	if !strings.Contains(log.String(), "could not be probed") {
 		t.Errorf("log = %q, want it to say the hosts could not be probed", log.String())
@@ -532,7 +518,7 @@ func TestBothHalvesOfTheGuardAgree(t *testing.T) {
 func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, shelly)
-	flapping := hostIP(t, eng, "f3")
+	flapping := hostIP(t, eng, "f1")
 
 	var mu sync.Mutex
 	probes := map[string]int{}
@@ -540,7 +526,7 @@ func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		probes[ip]++
-		// f3 misses its first probe and answers the second; everything else is
+		// f1 misses its first probe and answers the second; everything else is
 		// genuinely off and never answers.
 		return ip == flapping && probes[ip] > 1, true
 	}
@@ -552,9 +538,9 @@ func TestFanGuardNeedsConsecutiveMissesBeforeCallingAHostDown(t *testing.T) {
 	}
 
 	if got := shelly.SetCalls(); len(got) != 0 {
-		t.Fatalf("Switch.Set calls = %v, want none: f3 answered its second probe", got)
+		t.Fatalf("Switch.Set calls = %v, want none: f1 answered its second probe", got)
 	}
-	if want := []string{"f3"}; !reflect.DeepEqual(leftOn, want) {
+	if want := []string{"f1"}; !reflect.DeepEqual(leftOn, want) {
 		t.Fatalf("hosts keeping the fans on = %v, want %v", leftOn, want)
 	}
 
@@ -925,21 +911,23 @@ func TestOffHostNeverTouchesTheFans(t *testing.T) {
 	}
 }
 
-// TestLiveHostsReportsEveryFHostInInventoryOrder pins what the fan guards read
-// from: the full f-host set, f3 included, in a stable order. Dropping f3 here
-// would silently restore the hazard, and an unstable order would make the
-// reason printed to the operator vary between runs.
+// TestLiveHostsReportsThePowerGroupInInventoryOrder pins what the fan guards
+// read from: the power-group hosts (f0/f1/f2), in a stable order, with f3 and
+// non-f roles left out. Including f3 here would silently restore the thermal
+// hazard the guard exists to prevent -- the plug does not cool it -- and an
+// unstable order would make the reason printed to the operator vary between
+// runs.
 //
 // The inventory is deliberately the unfiltered one. With the usual test
 // engine, whose inventory has already been reduced to the f-hosts, a LiveHosts
 // that iterated inv.Hosts wholesale would pass this and only misbehave in
 // production -- where the gateways and k3s nodes are in there too.
-func TestLiveHostsReportsEveryFHostInInventoryOrder(t *testing.T) {
+func TestLiveHostsReportsThePowerGroupInInventoryOrder(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
-	eng := testEngineFullInventory(t, shelly, "f3", "f0", "r1", "blowfish")
+	eng := testEngineFullInventory(t, shelly, "f3", "f2", "f0", "r1", "blowfish")
 
 	got := eng.LiveHosts(context.Background())
-	if len(got) != 2 || got[0] != "f0" || got[1] != "f3" {
-		t.Errorf("LiveHosts = %v, want [f0 f3]: only f-hosts, in inventory order", got)
+	if len(got) != 2 || got[0] != "f0" || got[1] != "f2" {
+		t.Errorf("LiveHosts = %v, want [f0 f2]: only power-group hosts, in inventory order, f3 excluded", got)
 	}
 }

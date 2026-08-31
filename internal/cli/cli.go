@@ -29,8 +29,8 @@ Usage:
   f3sctl power on              Fans on, wake f0/f1/f2, un-mute Gogios
   f3sctl power off             Export zusb, mute Gogios, stop guests, power off f0/f1/f2
                                (goes through the API: only pi0/pi1 may shut hosts down;
-                               the fans stay on unless nothing in the rack answers,
-                               so normally they keep running -- f3 does)
+                               the fans go off too, once f0/f1/f2 are silent -- f3
+                               running does not keep them on, the plug does not cool it)
   f3sctl power all on          Fans on, wake f0/f1/f2/f3, un-mute Gogios
   f3sctl power all off         As "power off", but f3 too: the whole rack dark, then
                                fans off once nothing answers

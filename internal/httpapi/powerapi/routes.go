@@ -187,10 +187,12 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			// confirmation toggle with the reason in its title, and when the
 			// rack is cold the field simply is not there.
 			//
-			// The reason is spelled out rather than fixed, because "f3 still
-			// running" and "f3 could not be probed, so assumed running" call for
+			// The reason is spelled out rather than fixed, because "f1 still
+			// running" and "f1 could not be probed, so assumed running" call for
 			// very different reactions from whoever is reading it, and clients
-			// are told to render this title verbatim (docs/CLIENT.md §6).
+			// are told to render this title verbatim (docs/CLIENT.md §6). Only
+			// f0/f1/f2 ever appear here -- f3 is racked separately and the plug
+			// does not cool it, so it plays no part in this guard.
 			Fields: func(s contract.State) []contract.Field {
 				busy := RackBusy(s)
 				if !busy.Busy() {

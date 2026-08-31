@@ -227,14 +227,14 @@ func TestFansOffRefusedWhileAHostAnswers(t *testing.T) {
 	})
 
 	hot := coldSnapshot()
-	hot.Hosts[3] = fState("f3", true, true)
+	hot.Hosts[1] = fState("f1", true, true)
 
 	_, status, err := sf.handleFansOff(context.Background(), hot, contract.Request{})
 	if status != http.StatusConflict {
-		t.Fatalf("status = %d, want %d while f3 answers", status, http.StatusConflict)
+		t.Fatalf("status = %d, want %d while f1 answers", status, http.StatusConflict)
 	}
-	if err == nil || !strings.Contains(err.Error(), "f3") {
-		t.Errorf("error = %v, want it to name f3", err)
+	if err == nil || !strings.Contains(err.Error(), "f1") {
+		t.Errorf("error = %v, want it to name f1", err)
 	}
 	if got := plug.setCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none", got)
@@ -257,8 +257,8 @@ func TestFansOffConfirmsASnapshotThatLooksCold(t *testing.T) {
 	confirmed := false
 	sf := testSurface(t, plug, func(context.Context) power.RackActivity {
 		confirmed = true
-		// The confirming probe hears f3 answer on a later round.
-		return power.RackActivityFrom([]power.HostStatus{fState("f3", true, true)})
+		// The confirming probe hears f1 answer on a later round.
+		return power.RackActivityFrom([]power.HostStatus{fState("f1", true, true)})
 	})
 
 	_, status, err := sf.handleFansOff(context.Background(), coldSnapshot(), contract.Request{})
@@ -266,10 +266,10 @@ func TestFansOffConfirmsASnapshotThatLooksCold(t *testing.T) {
 		t.Fatal("a snapshot showing a cold rack was accepted without confirmation")
 	}
 	if status != http.StatusConflict {
-		t.Fatalf("status = %d, want %d: the confirming probe heard f3", status, http.StatusConflict)
+		t.Fatalf("status = %d, want %d: the confirming probe heard f1", status, http.StatusConflict)
 	}
-	if err == nil || !strings.Contains(err.Error(), "f3") {
-		t.Errorf("error = %v, want it to name f3", err)
+	if err == nil || !strings.Contains(err.Error(), "f1") {
+		t.Errorf("error = %v, want it to name f1", err)
 	}
 	if got := plug.setCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none", got)
@@ -308,7 +308,7 @@ func TestFansOffWithForceSkipsTheGuardEntirely(t *testing.T) {
 	})
 
 	hot := coldSnapshot()
-	hot.Hosts[3] = fState("f3", true, true)
+	hot.Hosts[1] = fState("f1", true, true)
 
 	if _, status, err := sf.handleFansOff(context.Background(), hot, forced()); err != nil || status != http.StatusOK {
 		t.Fatalf("forced fans off: status = %d, err = %v", status, err)

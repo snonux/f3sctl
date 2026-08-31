@@ -334,7 +334,7 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 }
 
 // Off shuts down the k3s bhyve hosts f0/f1/f2, and switches the rack fans off
-// only if that leaves nothing running in the rack.
+// once f0/f1/f2 are silent.
 //
 // The sequence is ordered so that everything which can refuse does so before
 // anything irreversible happens:
@@ -343,11 +343,12 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 //  2. export zusb where held -- ditto; needs the host it lives on to be alive
 //  3. mute Gogios            -- only now, once the shutdown is going ahead
 //  4. stop guests, power off -- host by host, storage master LAST
-//  5. fans off               -- only if the whole rack is now silent
+//  5. fans off               -- only if f0/f1/f2 are now all silent
 //
-// Step 5 is not "every host this run touched": f3 is deliberately left running
-// by a bare `power off` (see inventory.PowerGroup), and the fan plug cools the
-// whole rack. See fansOffOnceTheRackIsIdle.
+// Step 5 does not wait on f3, whether or not this run touched it: f3 is
+// racked separately from f0-f2 and the fan plug does not cool it (see
+// inventory.PowerGroup), so f3's liveness has no bearing on whether cutting
+// the plug is safe. See fansOffOnceTheRackIsIdle.
 //
 // The host order is not incidental: taking the CARP storage master first fails
 // the VIP over onto a host that is itself about to be shut down, which is what
@@ -357,17 +358,14 @@ func (e *Engine) Off(ctx context.Context, log io.Writer) error {
 }
 
 // OffAll shuts down every f-host, f3 included, and switches the rack fans off
-// once the rack is confirmed silent.
+// once f0/f1/f2 are confirmed silent.
 //
 // Identical to Off apart from the host set: same NFS and zusb pre-flight, same
-// Gogios mute, same storage-master-last ordering, same fans-off only once every
-// host has actually gone silent. This is "the whole rack goes dark", which
-// previously meant running `power off` and `power f3 off` and remembering that
-// only the first of them touches the fans.
-//
-// Because this one does take f3 down, it is the variant that normally reaches
-// the end of fansOffOnceTheRackIsIdle with nothing left answering, and so the
-// variant that actually cuts the plug.
+// Gogios mute, same storage-master-last ordering, same fans-off guard. This is
+// "the whole rack goes dark", which previously meant running `power off` and
+// `power f3 off` separately. The fan guard itself does not distinguish the two
+// commands -- f3's state was never part of it -- so both cut the plug as soon
+// as f0/f1/f2 go quiet; OffAll additionally takes f3 down along the way.
 func (e *Engine) OffAll(ctx context.Context, log io.Writer) error {
 	return e.off(ctx, log, e.cfg.Inventory.ShutdownOrderAll(), true)
 }
@@ -745,26 +743,24 @@ func hostNames(hosts []inventory.Host) []string {
 // than prose that drifts between the two places that produce it.
 const fansLeftOn = "rack fans left ON"
 
-// fansOffOnceTheRackIsIdle switches the rack fans off, unless something in the
-// rack may still be running. It returns the hosts that kept the fans on, empty
-// when the plug was switched off.
+// fansOffOnceTheRackIsIdle switches the rack fans off, unless a power-group
+// host (f0/f1/f2) may still be running. It returns the hosts that kept the
+// fans on, empty when the plug was switched off.
 //
-// The plug cools the whole rack, not merely the hosts a given run shut down,
-// and the two are not the same set. A bare `power off` deliberately leaves f3
-// up -- f3 is standalone bhyve, not part of k3s, see inventory.PowerGroup --
-// so cutting the plug at the end of it left f3 running with no cooling. That
-// is precisely what `f3sctl fans off` refuses to do without --force (see
-// cli.fansOff), which made the everyday command silently do what the explicit
-// one guards against. `power all off` does take f3 down, so by the time it
-// reaches here nothing answers and the fans go off exactly as before.
+// The plug cools f0-f2, not the whole rack: f3 is racked separately and is not
+// on this circuit, so it is deliberately left out of the check (see
+// inventory.PowerGroup and RackActivity). A bare `power off` never touches f3
+// either way, so this step waits only on the hosts it actually shut down.
+// `power all off` (OffAll) additionally takes f3 down along the way, but that
+// does not change what this guard is judged on.
 //
 // Liveness is re-probed rather than inferred from the shutdown that just ran:
-// the hosts this run skipped as already off, and f3, are equally capable of
-// generating heat. ICMP does not settle that either -- a host wedged in the
-// last phase of a shutdown is powered on with no network, and answers nothing
-// (see awaitPowerDown) -- so silence is the weaker claim "nothing here can be
-// shown to be running", and the guard is only as good as that. What it does
-// buy is that a host which plainly IS running can no longer lose its cooling.
+// the hosts this run skipped as already off are equally capable of generating
+// heat. ICMP does not settle that either -- a host wedged in the last phase of
+// a shutdown is powered on with no network, and answers nothing (see
+// awaitPowerDown) -- so silence is the weaker claim "nothing here can be shown
+// to be running", and the guard is only as good as that. What it does buy is
+// that a host which plainly IS running can no longer lose its cooling.
 //
 // A rack that is still busy is not a failed shutdown -- the hosts this run was
 // asked to power off did go down -- so this says why the fans stay on and
