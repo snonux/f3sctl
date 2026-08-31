@@ -375,11 +375,11 @@ func (c *Client) Root(ctx context.Context) (Entity, error) {
 }
 
 // SupportedAPIVersion is the one apiVersion this client is written against.
-// v2 accompanies the server's reorganisation into per-domain surface packages
-// (no wire shape changed, but the server bumped the version so both halves
-// upgrade together -- a v1 client refuses rather than run against a
-// restructured server with no signal).
-const SupportedAPIVersion = 2
+// v1 has served since the API's first release: the reorganisation into
+// per-domain surface packages moved Go code around with no wire change, and
+// a brief v2 bump for that no-op restructure was reverted so older f3sctl
+// builds and third-party REST clients keep working against new servers.
+const SupportedAPIVersion = 1
 
 // Follow fetches a linked resource by relation.
 func (c *Client) Follow(ctx context.Context, from Entity, rel string) (Entity, error) {

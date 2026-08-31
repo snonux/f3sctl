@@ -79,14 +79,15 @@ func (s *Server) handleRoot(_ context.Context, state contract.State, _ contract.
 		Title: "f3s homelab control",
 		Properties: map[string]any{
 			// apiVersion changes only on a breaking change. A client that
-			// does not recognise it must stop rather than guess. v2 was
-			// raised for this API's restructure into per-domain surface
-			// packages (internal/httpapi/powerapi and
-			// internal/httpapi/gogiosapi): no response shape changed, but the
-			// bump forces the client and server halves to upgrade together,
-			// which is safer than letting a v1-era client run against a
-			// restructured server with no signal that anything moved.
-			"apiVersion": 2,
+			// does not recognise it must stop rather than guess. This API
+			// has never had a breaking change: the reorganisation into
+			// per-domain surface packages (internal/httpapi/powerapi and
+			// internal/httpapi/gogiosapi) moved Go code around, no wire
+			// shape, so the version stays at v1 throughout. A brief v2
+			// bump for that same no-op restructure was reverted for the
+			// same reason (sy0): old REST clients kept working against the
+			// restructured server because nothing they read ever moved.
+			"apiVersion": 1,
 			"version":    internal.Version,
 			"node":       s.node,
 		},

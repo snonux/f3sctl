@@ -544,7 +544,7 @@ X-API-Key: ...
 ```
 ```json
 { "class": ["f3sctl"],
-  "properties": { "apiVersion": 2, "version": "v0.7.0", "node": "pi0" },
+  "properties": { "apiVersion": 1, "version": "v0.7.0", "node": "pi0" },
   "links": [ { "rel": ["status"], "href": "/cgi-bin/f3sctl/status" }, ... ],
   "actions": [
     { "name": "power-off", "method": "POST", "href": "/cgi-bin/f3sctl/power/off" },
@@ -576,14 +576,16 @@ When it finishes, the root offers `power-on` and `fans-on`, and nothing else.
 ## 11. Versioning
 
 `properties.apiVersion` is an integer. It changes only on a breaking change.
-The current version is **2** — the bump accompanied the server's
-reorganisation into per-domain surface packages (power, Gogios). No response
-or action shape changed, but the version was raised deliberately so the two
-deployment halves (server and clients) upgrade as one: a client MUST treat an
-`apiVersion` it does not recognise as a stop signal (§2), which here means a
-v1-era client must be upgraded to a matching f3sctl build before it talks to a
-v2 server. If you pin client and server versions together — the deployment
-model this project assumes — you will never see the refusal.
+The current version is **1** and has been since the API's first release: the
+server's reorganisation into per-domain surface packages (power, Gogios)
+moved only Go code, no response or action shape, so the version never moved
+with it. A brief bump to 2 for that same no-op restructure was reverted —
+there was nothing on the wire for old clients to trip over. Third-party REST
+clients written against v1 keep working unchanged. A client MUST still treat
+an `apiVersion` it does not recognise as a stop signal (§2): the refusal is
+there for the day a shape actually changes, so please keep honouring it. If
+you pin client and server versions together — the deployment model this
+project assumes — you will never see the refusal anyway.
 
 **Stable — a client may rely on these:**
 
