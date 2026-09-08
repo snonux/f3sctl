@@ -27,5 +27,6 @@ func printStatus(ctx context.Context, eng powerEngine, out io.Writer) error {
 	// host table above is still useful and is the more important half --
 	// presenter.Status renders it as "unknown" rather than failing outright.
 	fans, fansErr := eng.FansStatus(ctx)
-	return presenter.Status(out, statuses, presenter.Options{ShowRole: true}, fans, fansErr)
+	ac, acErr := eng.ACStatus(ctx)
+	return presenter.Status(out, statuses, presenter.Options{ShowRole: true}, fans, fansErr, ac, acErr)
 }

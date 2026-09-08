@@ -39,6 +39,10 @@ Usage:
   f3sctl fans status           Rack-fan Shelly plug state
   f3sctl fans on               Switch the rack fans on
   f3sctl fans off [--force]    Switch the rack fans off
+  f3sctl ac status             F-host mains AC plug state (shelly2)
+  f3sctl ac on                 Restore mains AC to f0-f3 (and their JetKVMs)
+  f3sctl ac off [--force]      Cut mains AC to f0-f3 (independent of power off;
+                               refuses while any f-host may still be up)
   f3sctl monitoring status     Is Gogios alerting muted?
   f3sctl monitoring mute       Suppress Gogios alerting
   f3sctl monitoring unmute     Resume Gogios alerting (clears a stranded mute)
@@ -60,7 +64,7 @@ Global flags:
                  the key is pinned to those two hosts. Use for debugging or
                  when running on a Pi.
   --force, -f    Confirm an action the server guards, e.g. switching the rack
-                 fans off while hosts are still running.
+                 fans or f-host AC off while hosts are still running.
   --verbose, -v  Trace every API call to stderr: method, URL, status, which of
                  pi0/pi1 answered, and how long it took. Implies --remote,
                  since there is nothing to trace when acting locally.
@@ -76,11 +80,12 @@ way to power anything back on.
 // all, because this feeds a cooling guard and an unprobeable host is not a host
 // known to be off.
 //
-// The rack-fan guard in fansOff is its only consumer. It is a function rather
-// than a direct call to power.Engine.LiveHosts so the guard can be exercised
-// without real ICMP: LiveHosts shells out to ping(8), which would make the
-// guard's tests depend on the machine's network stack and on packets actually
-// leaving the box. Same reasoning as power.Engine.isUp.
+// The rack-fan guard in fansOff and the AC guard in acOff are its consumers.
+// It is a function rather than a direct call to power.Engine.LiveHosts /
+// ACActivity so the guards can be exercised without real ICMP: those methods
+// shell out to ping(8), which would make the guard's tests depend on the
+// machine's network stack and on packets actually leaving the box. Same
+// reasoning as power.Engine.isUp.
 type liveHostsFunc func(ctx context.Context) []string
 
 // Run executes one CLI invocation.
@@ -135,6 +140,8 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 		return runPower(cfg, args[1:], stdout, stderr, reporter)
 	case "fans":
 		return runFans(cfg, args[1:], flags.force, liveHosts, stdout, stderr)
+	case "ac":
+		return runAC(cfg, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "monitoring":
 		return runMonitoring(cfg, args[1:], stdout, stderr)
 	case "gogios":
@@ -201,6 +208,7 @@ type powerEngine interface {
 	OffHost(ctx context.Context, log io.Writer, name string) error
 	ProbeAll(ctx context.Context) []power.HostStatus
 	FansStatus(ctx context.Context) (power.FansState, error)
+	ACStatus(ctx context.Context) (power.ACState, error)
 }
 
 // powerAction is one resolved power operation, ready to run against a
@@ -380,6 +388,70 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 	default: // "off", the only spelling parseFansArgs has left standing
 		return fansOff(ctx, eng, force, liveHosts, stdout)
 	}
+}
+
+// runAC reads or switches the f-host mains AC plug (shelly2).
+//
+// Independent of power on/off: restoring or cutting AC is never an automatic
+// side-effect of a wake or shutdown. The off path refuses while any f-host
+// (f0–f3) may still be drawing power, because hard-cutting mains under a live
+// host risks ZFS / bhyve damage — use --force only after a graceful shutdown
+// (or when you mean a last-resort kill).
+func runAC(cfg config.Config, args []string, force bool, liveHosts liveHostsFunc,
+	stdout, stderr io.Writer) error {
+
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usage)
+		return errUsage
+	}
+
+	verb, ok := parseACArgs(args)
+	if !ok {
+		fmt.Fprint(stderr, usage)
+		return fmt.Errorf("unknown ac command %q", strings.Join(args, " "))
+	}
+
+	eng, err := power.New(cfg)
+	if err != nil {
+		return err
+	}
+	if liveHosts == nil {
+		liveHosts = func(ctx context.Context) []string { return eng.ACActivity(ctx).Hosts() }
+	}
+	ctx := context.Background()
+
+	switch verb {
+	case "status":
+		st, err := eng.ACStatus(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "f-host AC: %s (%s)\n", presenter.OnOff(st.On), st.IP)
+		return nil
+
+	case "on":
+		st, err := eng.ACSet(ctx, true)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "f-host AC: %s\n", presenter.OnOff(st.On))
+		return nil
+
+	default: // "off"
+		return acOff(ctx, eng, force, liveHosts, stdout)
+	}
+}
+
+// parseACArgs mirrors parseFansArgs for the `ac` noun.
+func parseACArgs(args []string) (verb string, ok bool) {
+	if len(args) != 1 {
+		return "", false
+	}
+	switch args[0] {
+	case "status", "on", "off":
+		return args[0], true
+	}
+	return "", false
 }
 
 // parseFansArgs parses a `fans` argument list -- args with the leading "fans"
@@ -655,6 +727,28 @@ func fansOff(ctx context.Context, eng *power.Engine, force bool,
 		return err
 	}
 	fmt.Fprintf(stdout, "rack fans: %s\n", presenter.OnOff(st.On))
+	return nil
+}
+
+// acOff refuses to cut f-host mains AC while any f-host may still be answering,
+// unless told explicitly to. Same force/liveHosts threading as fansOff; the
+// liveness set is every f-host (f0–f3), because shelly2 powers all of them.
+func acOff(ctx context.Context, eng *power.Engine, force bool,
+	liveHosts liveHostsFunc, stdout io.Writer) error {
+
+	if !force {
+		if up := liveHosts(ctx); len(up) > 0 {
+			return fmt.Errorf("%v may still be running; refusing to cut f-host AC. "+
+				"Shut the hosts down first (f3sctl power off / power all off), "+
+				"or use --force if you mean a hard cut", up)
+		}
+	}
+
+	st, err := eng.ACSet(ctx, false)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "f-host AC: %s\n", presenter.OnOff(st.On))
 	return nil
 }
 

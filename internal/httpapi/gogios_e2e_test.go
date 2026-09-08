@@ -140,6 +140,7 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 		// through the monitorStatus seam, so both stay engine-free too.
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
+		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
 		monitorStatus: func(context.Context) []power.GatewayMute {
 			return nil
 		},

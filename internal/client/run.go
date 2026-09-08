@@ -66,7 +66,7 @@ func (c *Client) jobWaitTimeout() time.Duration {
 func Run(ctx context.Context, c *Client, args []string, force bool) error {
 	cmd := strings.Join(args, " ")
 
-	if cmd == "power status" || cmd == "fans status" {
+	if cmd == "power status" || cmd == "fans status" || cmd == "ac status" {
 		return c.showStatus(ctx)
 	}
 	if cmd == "monitoring status" {
@@ -172,6 +172,7 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 var nounHolderPath = map[string][]string{
 	"power":      {"power"},
 	"fans":       {"fans"},
+	"ac":         {"ac"},
 	"monitoring": {"gogios", "monitoring"},
 	"gogios":     {"gogios"},
 }
@@ -378,8 +379,8 @@ func (c *Client) showStatus(ctx context.Context) error {
 		return err
 	}
 
-	statuses, fans, fansErr := parseStatus(statusEntity)
-	if err := presenter.Status(c.stdout, statuses, presenter.Options{ShowRole: false}, fans, fansErr); err != nil {
+	statuses, fans, fansErr, ac, acErr := parseStatus(statusEntity)
+	if err := presenter.Status(c.stdout, statuses, presenter.Options{ShowRole: false}, fans, fansErr, ac, acErr); err != nil {
 		return err
 	}
 
@@ -396,7 +397,8 @@ func (c *Client) showStatus(ctx context.Context) error {
 }
 
 // parseStatus turns a /status entity into the presenter's inputs: one
-// power.HostStatus per host entity (in response order), plus the fan state.
+// power.HostStatus per host entity (in response order), plus the fan and AC
+// plug states.
 //
 // This is where hz0 was fixed: the old code built its own table row here and
 // read only ping/ssh, never pingKnown, so an unmeasured host rendered as
@@ -404,17 +406,21 @@ func (c *Client) showStatus(ctx context.Context) error {
 // PingKnown -- and presenter.Describe -- which has always read it -- means
 // the remote client gets that check by construction rather than by
 // remembering to add it a second time.
-func parseStatus(status Entity) (statuses []power.HostStatus, fans power.FansState, fansErr error) {
+func parseStatus(status Entity) (statuses []power.HostStatus, fans power.FansState, fansErr error, ac power.ACState, acErr error) {
 	for _, e := range status.Entities {
 		if hasClass(e, "fans") {
 			fans, fansErr = parseFans(e)
+			continue
+		}
+		if hasClass(e, "ac") {
+			ac, acErr = parseAC(e)
 			continue
 		}
 		if st, ok := parseHost(e); ok {
 			statuses = append(statuses, st)
 		}
 	}
-	return statuses, fans, fansErr
+	return statuses, fans, fansErr, ac, acErr
 }
 
 // parseHost turns one host entity's properties into a power.HostStatus. ok is
@@ -463,6 +469,17 @@ func parseFans(e Entity) (power.FansState, error) {
 	on, _ := e.Properties["on"].(bool)
 	ip, _ := e.Properties["ip"].(string)
 	return power.FansState{On: on, IP: ip}, nil
+}
+
+// parseAC turns an "ac" entity into a power.ACState, same unknown-not-off
+// rule as parseFans.
+func parseAC(e Entity) (power.ACState, error) {
+	if msg, _ := e.Properties["error"].(string); msg != "" {
+		return power.ACState{}, errors.New(msg)
+	}
+	on, _ := e.Properties["on"].(bool)
+	ip, _ := e.Properties["ip"].(string)
+	return power.ACState{On: on, IP: ip}, nil
 }
 
 func hasClass(e Entity, want string) bool {

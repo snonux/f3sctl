@@ -79,6 +79,7 @@ func testSurface(t *testing.T, plug *fakePlug, confirm func(context.Context) pow
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
 	cfg.Inventory.ShellyIP = strings.TrimPrefix(plug.srv.URL, "http://")
+	cfg.Inventory.ShellyACIP = cfg.Inventory.ShellyIP
 
 	eng, err := power.New(cfg)
 	if err != nil {
@@ -86,6 +87,7 @@ func testSurface(t *testing.T, plug *fakePlug, confirm func(context.Context) pow
 	}
 	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, nil, nil)
 	sf.RackConfirm = confirm
+	sf.ACConfirm = confirm
 	return sf
 }
 
@@ -353,6 +355,53 @@ func TestSetFansRespectsTheRequestContext(t *testing.T) {
 	}
 	if got := plug.setCalls(); len(got) != 0 {
 		t.Fatalf("Switch.Set calls = %v, want none: the cancelled context should have stopped the request before it was sent", got)
+	}
+}
+
+// TestACOffRefusedWhileAF3Answers pins that the AC guard includes f3: shelly2
+// powers every f-host, unlike the fan plug which excludes f3.
+func TestACOffRefusedWhileAF3Answers(t *testing.T) {
+	plug := newFakePlug(t)
+	sf := testSurface(t, plug, func(context.Context) power.RackActivity {
+		t.Error("the confirming probe ran even though the snapshot already said a host was busy")
+		return power.RackActivity{}
+	})
+
+	hot := contract.State{
+		Hosts: []power.HostStatus{fState("f3", true, true)},
+		AC:    power.ACState{On: true},
+	}
+	_, status, err := sf.handleACOff(context.Background(), hot, contract.Request{})
+	if err == nil {
+		t.Fatal("ac-off succeeded while f3 answered")
+	}
+	if status != http.StatusConflict {
+		t.Errorf("status = %d, want %d", status, http.StatusConflict)
+	}
+	if got := plug.setCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none", got)
+	}
+}
+
+// TestACOffWithForceSkipsTheGuardEntirely pins the escape hatch for a
+// deliberate hard cut.
+func TestACOffWithForceSkipsTheGuardEntirely(t *testing.T) {
+	plug := newFakePlug(t)
+	sf := testSurface(t, plug, func(context.Context) power.RackActivity {
+		t.Error("confirm must not run when force=true")
+		return power.RackActivity{}
+	})
+
+	hot := contract.State{
+		Hosts: []power.HostStatus{fState("f0", true, true)},
+		AC:    power.ACState{On: true},
+	}
+	req := contract.Request{Form: url.Values{"force": {"true"}}}
+	if _, status, err := sf.handleACOff(context.Background(), hot, req); err != nil || status != http.StatusOK {
+		t.Fatalf("forced ac off: status = %d, err = %v", status, err)
+	}
+	if got := plug.setCalls(); len(got) != 1 || got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 }
 

@@ -1,8 +1,9 @@
 # f3sctl
 
 Control tool for the [f3s homelab](https://f3s.buetow.org): powers the FreeBSD
-bhyve hosts `f0`–`f3` on and off, reports their state, and switches the rack
-fans — from a shell, or over an API a watch app can drive.
+bhyve hosts `f0`–`f3` on and off, reports their state, switches the rack fans,
+and (separately) cuts or restores f-host mains AC — from a shell, or over an
+API a watch app can drive.
 
 It replaces the `wol-f3s` bash script.
 
@@ -15,12 +16,13 @@ f3sctl power off             # export zusb, mute Gogios, stop guests, power off
                              # this plug, so it plays no part in the guard
 f3sctl power f1 on|off       # any single host: f0, f1, f2 or f3
 f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
+f3sctl ac status|on|off      # f-host mains AC (shelly2); independent of power on/off
 ```
 
 **Shutdowns always go through the API**, from anywhere including a Pi. Only
 pi0/pi1 can actually perform one — the restricted SSH key is pinned to them —
 so routing through the API is what makes the same command work on a laptop.
-Waking, status and the fan plug stay local: a magic packet is an unprivileged
+Waking, status and the fan/AC plugs stay local: a magic packet is an unprivileged
 broadcast any LAN host may send, which also leaves a way to wake the rack when
 the API itself is unreachable. `--local` overrides the routing and `--remote`
 forces the API for everything.

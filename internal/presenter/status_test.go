@@ -43,7 +43,7 @@ func TestStatusRendersUnknownForUnmeasuredHost(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := Status(&buf, statuses, Options{ShowRole: false}, power.FansState{On: true, IP: "192.168.1.99"}, nil); err != nil {
+	if err := Status(&buf, statuses, Options{ShowRole: false}, power.FansState{On: true, IP: "192.168.1.99"}, nil, power.ACState{On: true, IP: "192.168.1.29"}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	out := buf.String()
@@ -67,7 +67,7 @@ func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
 	}
 
 	var withRole bytes.Buffer
-	if err := Status(&withRole, statuses, Options{ShowRole: true}, power.FansState{}, nil); err != nil {
+	if err := Status(&withRole, statuses, Options{ShowRole: true}, power.FansState{}, nil, power.ACState{}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if !strings.Contains(withRole.String(), "ROLE") {
@@ -78,7 +78,7 @@ func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
 	}
 
 	var withoutRole bytes.Buffer
-	if err := Status(&withoutRole, statuses, Options{ShowRole: false}, power.FansState{}, nil); err != nil {
+	if err := Status(&withoutRole, statuses, Options{ShowRole: false}, power.FansState{}, nil, power.ACState{}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if strings.Contains(withoutRole.String(), "ROLE") {
@@ -91,7 +91,7 @@ func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
 // evidence that it is switched off.
 func TestStatusReportsAnUnreachableFanPlugAsUnknown(t *testing.T) {
 	var buf bytes.Buffer
-	err := Status(&buf, nil, Options{}, power.FansState{}, errors.New("dial tcp: timeout"))
+	err := Status(&buf, nil, Options{}, power.FansState{}, errors.New("dial tcp: timeout"), power.ACState{}, nil)
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}

@@ -19,10 +19,10 @@ import (
 	"github.com/snonux/f3sctl/internal/power"
 )
 
-// probeCounter counts calls to the two reads jy0 made lazy: the fleet probe
-// (Engine.ProbeAll) and the Shelly plug read (Engine.FansStatus).
+// probeCounter counts calls to the reads jy0 made lazy: the fleet probe
+// (Engine.ProbeAll) and the Shelly plug reads (FansStatus / ACStatus).
 type probeCounter struct {
-	probes, fanReads int
+	probes, fanReads, acReads int
 }
 
 // countingServer returns a Server driven entirely through serve(), whose
@@ -60,6 +60,10 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 		fansStatus: func(context.Context) (power.FansState, error) {
 			pc.fanReads++
 			return power.FansState{}, nil
+		},
+		acStatus: func(context.Context) (power.ACState, error) {
+			pc.acReads++
+			return power.ACState{}, nil
 		},
 	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 	return srv, pc
@@ -151,14 +155,17 @@ func TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt(t *testing.T) {
 			if pc.fanReads != 0 {
 				t.Errorf("FansStatus called %d times serving %s, want 0", pc.fanReads, path)
 			}
+			if pc.acReads != 0 {
+				t.Errorf("ACStatus called %d times serving %s, want 0", pc.acReads, path)
+			}
 		})
 	}
 }
 
 // TestSnapshotStillProbesRoutesThatNeedIt is the control for the test above:
-// /status renders state.Hosts and state.Fans directly (handleStatus), so the
-// laziness in snapshot() must not have turned into "never probes anything" --
-// it has to still pay for exactly one probe and one fan read here.
+// /status renders state.Hosts, state.Fans and state.AC directly (handleStatus),
+// so the laziness in snapshot() must not have turned into "never probes
+// anything" -- it has to still pay for exactly one of each read here.
 func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 	srv, pc := countingServer(t)
 	var out bytes.Buffer
@@ -170,6 +177,9 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 	}
 	if pc.fanReads != 1 {
 		t.Errorf("FansStatus called %d times serving /status, want exactly 1", pc.fanReads)
+	}
+	if pc.acReads != 1 {
+		t.Errorf("ACStatus called %d times serving /status, want exactly 1", pc.acReads)
 	}
 }
 
@@ -247,6 +257,9 @@ func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
 		},
 		fansStatus: func(context.Context) (power.FansState, error) {
 			return power.FansState{On: true}, nil
+		},
+		acStatus: func(context.Context) (power.ACState, error) {
+			return power.ACState{On: true}, nil
 		},
 	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 
@@ -457,7 +470,7 @@ func TestRootIsAFolderIndex(t *testing.T) {
 	if len(e.Actions) != 0 {
 		t.Errorf("root actions = %v, want none: the operations live in the section folders", actionNames(e))
 	}
-	for _, rel := range []string{"self", "describedby", "power", "status", "job", "fans", "gogios"} {
+	for _, rel := range []string{"self", "describedby", "power", "status", "job", "fans", "ac", "gogios"} {
 		if !hasServedRel(e.Links, rel) {
 			t.Errorf("root links = %+v, missing rel %q", e.Links, rel)
 		}
@@ -467,8 +480,8 @@ func TestRootIsAFolderIndex(t *testing.T) {
 			t.Errorf("root links = %+v carry rel %q: that belongs in its section folder", e.Links, rel)
 		}
 	}
-	if pc.probes != 0 || pc.fanReads != 0 {
-		t.Errorf("root fetch paid %d probes and %d fan reads, want neither: the overview is a folder index now (SkipsProbe)", pc.probes, pc.fanReads)
+	if pc.probes != 0 || pc.fanReads != 0 || pc.acReads != 0 {
+		t.Errorf("root fetch paid %d probes, %d fan reads and %d ac reads, want none: the overview is a folder index now (SkipsProbe)", pc.probes, pc.fanReads, pc.acReads)
 	}
 }
 
@@ -500,6 +513,9 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		fansStatus: func(context.Context) (power.FansState, error) {
 			return power.FansState{On: true}, nil
 		},
+		acStatus: func(context.Context) (power.ACState, error) {
+			return power.ACState{On: true}, nil
+		},
 		monitorStatus: monitor,
 	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 }
@@ -521,17 +537,17 @@ func TestPowerFolderOffersThePowerActions(t *testing.T) {
 	if e.Title != "Power control" {
 		t.Errorf("title = %q, want %q", e.Title, "Power control")
 	}
-	for _, name := range []string{"power-off", "all-off", "f0-off", "fans-off"} {
+	for _, name := range []string{"power-off", "all-off", "f0-off", "fans-off", "ac-off"} {
 		if !hasAction(e, name) {
-			t.Errorf("power folder actions = %v, want %s offered (the fleet is up and the plug is on)", actionNames(e), name)
+			t.Errorf("power folder actions = %v, want %s offered (the fleet is up and the plugs are on)", actionNames(e), name)
 		}
 	}
-	for _, name := range []string{"power-on", "all-on", "f0-on", "fans-on"} {
+	for _, name := range []string{"power-on", "all-on", "f0-on", "fans-on", "ac-on"} {
 		if hasAction(e, name) {
 			t.Errorf("power folder actions = %v, want %s withheld: only possible actions are ever advertised", actionNames(e), name)
 		}
 	}
-	for _, rel := range []string{"self", "up", "status", "job", "fans"} {
+	for _, rel := range []string{"self", "up", "status", "job", "fans", "ac"} {
 		if !hasServedRel(e.Links, rel) {
 			t.Errorf("power folder links = %+v, missing rel %q", e.Links, rel)
 		}

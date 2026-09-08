@@ -209,6 +209,8 @@ var legacyActionFor = map[string]string{
 	"power off":         "power-off",
 	"fans on":           "fans-on",
 	"fans off":          "fans-off",
+	"ac on":             "ac-on",
+	"ac off":            "ac-off",
 	"monitoring mute":   "monitoring-mute",
 	"monitoring unmute": "monitoring-unmute",
 }

@@ -81,6 +81,15 @@ type FansBackend interface {
 	Set(ctx context.Context, on bool) (FansState, error)
 }
 
+// ACBackend switches and reads back the f-host mains AC Shelly plug (shelly2).
+// Same shape as FansBackend, kept apart so a fake standing in for the fan
+// plug cannot accidentally answer AC questions (and vice versa), and so the
+// engine can wire two different IPs without sharing one adapter instance.
+type ACBackend interface {
+	Status(ctx context.Context) (ACState, error)
+	Set(ctx context.Context, on bool) (ACState, error)
+}
+
 // NFSChecker lists and unmounts the NFS filesystems mounted locally, on the
 // machine f3sctl itself runs on -- not on the hosts being powered off. See
 // checkLocalNFS, in nfs.go, for why this runs before anything on the rack is

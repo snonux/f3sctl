@@ -10,6 +10,12 @@ type FansState struct {
 	IP string `json:"ip"`
 }
 
+// ACState is the f-host mains AC plug's reported state (shelly2).
+type ACState struct {
+	On bool   `json:"on"`
+	IP string `json:"ip"`
+}
+
 // FansStatus reads the rack-fan Shelly plug's current state.
 //
 // This is a thin delegate to the FansBackend seam (see backends.go): the
@@ -38,4 +44,19 @@ func (e *Engine) FansStatus(ctx context.Context) (FansState, error) {
 // turned a good switch-on into a failed job on 2026-08-09.
 func (e *Engine) FansSet(ctx context.Context, on bool) (FansState, error) {
 	return e.fansBackend().Set(ctx, on)
+}
+
+// ACStatus reads the f-host mains AC Shelly plug's current state.
+//
+// Same seam shape as FansStatus; a different adapter and IP so fan and AC
+// never share a client. Unlike the fans, AC is never flipped by power on/off
+// or boot -- only by an explicit `f3sctl ac` / POST /ac call.
+func (e *Engine) ACStatus(ctx context.Context) (ACState, error) {
+	return e.acBackend().Status(ctx)
+}
+
+// ACSet switches the f-host mains AC plug and returns its state read back
+// from the device. Same settle semantics as FansSet (see execAC.Set).
+func (e *Engine) ACSet(ctx context.Context, on bool) (ACState, error) {
+	return e.acBackend().Set(ctx, on)
 }

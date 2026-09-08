@@ -90,6 +90,7 @@ type Engine struct {
 	power PowerBackend
 	probe ProbeBackend
 	fans  FansBackend
+	ac    ACBackend
 	nfs   NFSChecker
 	zusb  ZusbChecker
 	// monitor is the Gogios monitoring concern: muting, un-muting and reading
@@ -110,13 +111,13 @@ type Engine struct {
 // f3sctl key at all.
 //
 // This is the one place in the package allowed to name a concrete adapter --
-// execPower, execProbe, execFans, execNFS, execZusb -- for the same reason a
+// execPower, execProbe, execFans, execAC, execNFS, execZusb -- for the same reason a
 // composition root always is: something has to choose the real mechanism
 // before the interfaces in backends.go can be used for anything. That is not
 // a gap in the OCP story backends.go describes, it is the other half of it:
 // off, on, shutdownEach, fansOffOnceTheRackIsIdle and the rest of Engine's
 // policy methods depend only on PowerBackend/ProbeBackend/FansBackend/
-// NFSChecker/ZusbChecker, never on the Shelly RPC client, magicPacket or
+// ACBackend/NFSChecker/ZusbChecker, never on the Shelly RPC client, magicPacket or
 // ssh(1) directly, so a second fan switch or wake mechanism (IPMI, say) is a
 // new type implementing the relevant interface plus a few lines here choosing
 // it -- never an edit to those policy methods. Exactly this seam is what
@@ -125,8 +126,9 @@ type Engine struct {
 // would work any differently.
 //
 // New deliberately takes no options to pick among adapters: this project has
-// exactly one fan switch (a Shelly plug) and one wake mechanism (WoL), and no
-// second implementation of either is asked for anywhere in this codebase.
+// exactly two Shelly plugs (fans on shelly1, f-host AC on shelly2) and one
+// wake mechanism (WoL), and no second implementation of either is asked for
+// anywhere in this codebase.
 // Adding a functional-options API (or a config-driven switch) here now would
 // be a seam built for a hypothetical that does not exist -- were a second
 // implementation ever actually needed, wiring it in is the few lines this
@@ -144,6 +146,7 @@ func New(cfg config.Config) (*Engine, error) {
 	e.power = execPower{e}
 	e.probe = execProbe{client: newProbeClient(cfg.ProbeTimeout.D())}
 	e.fans = execFans{shelly: newShellyClient(cfg.Inventory.ShellyIP, cfg.ResolveShellyPassword)}
+	e.ac = execAC{shelly: newShellyClient(cfg.Inventory.ShellyACIP, cfg.ResolveShellyPassword)}
 	e.nfs = execNFS{e}
 	e.zusb = execZusb{e}
 	e.monitor = NewMonitor(cfg, e.powerBackend(), e.Probe)
@@ -251,6 +254,16 @@ func (e *Engine) fansBackend() FansBackend {
 		return execFans{shelly: newShellyClient(e.cfg.Inventory.ShellyIP, e.cfg.ResolveShellyPassword)}
 	}
 	return e.fans
+}
+
+// acBackend returns the backend for the f-host mains AC Shelly plug, falling
+// back to the real HTTP RPC when the seam is unset. Same nil-safety
+// reasoning as fansBackend.
+func (e *Engine) acBackend() ACBackend {
+	if e.ac == nil {
+		return execAC{shelly: newShellyClient(e.cfg.Inventory.ShellyACIP, e.cfg.ResolveShellyPassword)}
+	}
+	return e.ac
 }
 
 // nfsBackend returns the backend for local NFS mounts, falling back to the

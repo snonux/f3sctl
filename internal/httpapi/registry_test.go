@@ -235,6 +235,38 @@ func TestFansOffForceField(t *testing.T) {
 	}
 }
 
+// TestACOffForceFieldIncludesF3 pins that the AC-off advertisement looks at
+// every f-host: only-f3-up must still require force, unlike fans-off.
+func TestACOffForceFieldIncludesF3(t *testing.T) {
+	r, ok := routeByName("ac-off")
+	if !ok {
+		t.Fatal("no ac-off route")
+	}
+
+	onlyF3 := contract.State{
+		Hosts: []power.HostStatus{{Name: "f3", Role: "f", Ping: true, PingKnown: true}},
+		AC:    power.ACState{On: true},
+	}
+	fields := r.FieldsFor(onlyF3)
+	if len(fields) != 1 || fields[0].Name != "force" {
+		t.Fatalf("expected a force field while only f3 is up, got %+v", fields)
+	}
+	if !strings.Contains(fields[0].Title, "f3") {
+		t.Errorf("title = %q, want it to name f3", fields[0].Title)
+	}
+
+	cold := contract.State{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", PingKnown: true},
+			{Name: "f3", Role: "f", PingKnown: true},
+		},
+		AC: power.ACState{On: true},
+	}
+	if got := r.FieldsFor(cold); len(got) != 0 {
+		t.Errorf("expected no fields when every f-host is silent, got %+v", got)
+	}
+}
+
 // TestFansOffForceFieldWhenTheRackCouldNotBeProbed is the advertisement half of
 // the third fan guard's failure.
 //
@@ -526,7 +558,7 @@ func TestAllOffNeedsSSHNotPing(t *testing.T) {
 // route.SkipsProbe (see server.go's skipsProbe and rz0): it does not trust
 // the flag on the declaring author's word alone, it asks each route marked
 // SkipsProbe whether its own Available/Fields answer actually changes when
-// only Hosts/Fans/FansErr change, and requires the answer to be no.
+// only Hosts/Fans/FansErr/AC/ACErr change, and requires the answer to be no.
 //
 // This is what would actually catch the failure rz0 was opened over: a
 // future route added under a SkipsProbe:true path (e.g. a new
@@ -535,15 +567,16 @@ func TestAllOffNeedsSSHNotPing(t *testing.T) {
 // fails the moment such a route is declared, rather than relying on someone
 // noticing the mismatch during review.
 func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
-	// probed and unprobed differ only in Hosts/Fans/FansErr -- probed is what
-	// a real fleet probe and Shelly read might produce, unprobed is exactly
-	// what snapshot() leaves those three fields as when it skips both. Every
-	// other field (Job, Monitoring, PeerBusy) stays at its zero value in
-	// both, so a mismatch below can only come from the probe fields
-	// SkipsProbe claims the route does not look at.
+	// probed and unprobed differ only in Hosts/Fans/FansErr/AC/ACErr --
+	// probed is what a real fleet probe and Shelly reads might produce,
+	// unprobed is exactly what snapshot() leaves those fields as when it
+	// skips them. Every other field (Job, Monitoring, PeerBusy) stays at
+	// its zero value in both, so a mismatch below can only come from the
+	// probe fields SkipsProbe claims the route does not look at.
 	probed := contract.State{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true}},
 		Fans:  power.FansState{On: true},
+		AC:    power.ACState{On: true},
 	}
 	unprobed := contract.State{}
 

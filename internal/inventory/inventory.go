@@ -50,8 +50,13 @@ type Inventory struct {
 	// broadcast address of the LAN the f-hosts are on, and f3sctl must be
 	// running on that LAN — a magic packet is not routed.
 	Broadcast string `json:"broadcast"`
-	// ShellyIP is the Shelly Plug M Gen 3 that powers the rack fans.
+	// ShellyIP is the Shelly Plug M Gen 3 that powers the rack fans
+	// (shelly1). Driven automatically by power on/off and by `f3sctl fans`.
 	ShellyIP string `json:"shelly_ip"`
+	// ShellyACIP is the Shelly Plug M Gen 3 that switches mains AC for the
+	// f-hosts (shelly2: f0–f3 plus their JetKVM switches). Exposed only via
+	// `f3sctl ac` / the /ac API — never flipped by power on/off or boot.
+	ShellyACIP string `json:"shelly_ac_ip"`
 	// GogiosMuteFile is the marker Gogios checks (OnlyIfNotExists) to stay
 	// quiet while the cluster is deliberately down. It lives on both
 	// gateways.
@@ -66,6 +71,7 @@ func Default() Inventory {
 	return Inventory{
 		Broadcast:      "192.168.1.255",
 		ShellyIP:       "192.168.1.28",
+		ShellyACIP:     "192.168.1.29",
 		GogiosMuteFile: "/tmp/f3s_taken_down",
 		Hosts: []Host{
 			{Name: "f0", Role: RoleF, IP: "192.168.1.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl"},

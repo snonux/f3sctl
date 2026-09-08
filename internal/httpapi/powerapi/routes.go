@@ -29,6 +29,7 @@ func (sf *Surface) Routes() []contract.Route {
 		sf.allHostsRoutes(),
 		sf.hostsRoutes(),
 		sf.fanRoutes(),
+		sf.acRoutes(),
 	)
 }
 
@@ -98,6 +99,11 @@ func (sf *Surface) resourceRoutes() []contract.Route {
 			Name: "fans", Title: "Rack fan plug",
 			Method: http.MethodGet, Path: "/fans",
 			Handle: sf.handleFans,
+		},
+		{
+			Name: "ac", Title: "F-host mains AC plug",
+			Method: http.MethodGet, Path: "/ac",
+			Handle: sf.handleAC,
 		},
 	}
 }
@@ -209,6 +215,44 @@ func (sf *Surface) fanRoutes() []contract.Route {
 				}}
 			},
 			Handle: sf.handleFansOff,
+		},
+	}
+}
+
+// acRoutes is the f-host mains AC plug's on/off pair (shelly2). Independent
+// of power on/off: never started as a job side-effect, never flipped by boot.
+func (sf *Surface) acRoutes() []contract.Route {
+	return []contract.Route{
+		{
+			Name: "ac-on", Title: "Restore f-host mains AC",
+			Method: http.MethodPost, Path: "/ac/on", Action: true,
+			CLIVerb: "ac on",
+			Available: func(s contract.State) bool { return s.ACErr == nil && !s.AC.On },
+			Handle:    sf.handleACOn,
+		},
+		{
+			Name: "ac-off", Title: "Cut f-host mains AC",
+			Method: http.MethodPost, Path: "/ac/off", Action: true,
+			CLIVerb:   "ac off",
+			Available: func(s contract.State) bool { return s.ACErr == nil && s.AC.On },
+			// Guard looks at every f-host (f0–f3): shelly2 powers all of them.
+			// Hard-cutting AC under a live host risks ZFS / bhyve damage.
+			Fields: func(s contract.State) []contract.Field {
+				busy := ACBusy(s)
+				if !busy.Busy() {
+					return nil
+				}
+				return []contract.Field{{
+					Name:     "force",
+					Type:     "checkbox",
+					Value:    false,
+					Required: true,
+					Title: "Hosts may still be running (" + busy.Why() + "): cutting " +
+						"mains AC now hard-powers them off and risks ZFS / bhyve damage. " +
+						"Shut them down first, or confirm to proceed.",
+				}}
+			},
+			Handle: sf.handleACOff,
 		},
 	}
 }

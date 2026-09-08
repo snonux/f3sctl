@@ -39,16 +39,19 @@ type Options struct {
 }
 
 // Status renders the probe table -- one row per host, in the order given --
-// followed by the rack-fan line, onto out.
+// followed by the rack-fan and f-host AC lines, onto out.
 //
-// fansErr, when non-nil, means the fan plug's state could not be read at all
-// (network or auth failure): that is reported as "unknown", never as "off",
-// because an unreachable plug is not evidence of anything -- see printFans.
-func Status(out io.Writer, statuses []power.HostStatus, opts Options, fans power.FansState, fansErr error) error {
+// fansErr / acErr, when non-nil, mean that plug's state could not be read at
+// all (network or auth failure): that is reported as "unknown", never as
+// "off", because an unreachable plug is not evidence of anything -- see
+// printFans / printAC.
+func Status(out io.Writer, statuses []power.HostStatus, opts Options,
+	fans power.FansState, fansErr error, ac power.ACState, acErr error) error {
 	if err := printHosts(out, statuses, opts); err != nil {
 		return err
 	}
 	printFans(out, fans, fansErr)
+	printAC(out, ac, acErr)
 	return nil
 }
 
@@ -88,6 +91,25 @@ func printFans(out io.Writer, fans power.FansState, err error) {
 		return
 	}
 	fmt.Fprintf(out, "\nrack fans: %s (%s)\n", OnOff(fans.On), fans.IP)
+}
+
+// printAC renders the f-host mains AC line, same unknown-not-off rule as
+// printFans. shelly2 is independent of power on/off; operators still need to
+// see its state in the same glance as the host table.
+//
+// An empty IP with no error means the status document never carried an ac
+// entity (older server, partial /status): that is unknown, never "off" — a
+// false "AC off" reading for a mains plug is actively dangerous.
+func printAC(out io.Writer, ac power.ACState, err error) {
+	if err != nil {
+		fmt.Fprintf(out, "f-host AC: unknown (%v)\n", err)
+		return
+	}
+	if ac.IP == "" {
+		fmt.Fprint(out, "f-host AC: unknown (not reported)\n")
+		return
+	}
+	fmt.Fprintf(out, "f-host AC: %s (%s)\n", OnOff(ac.On), ac.IP)
 }
 
 // Describe turns a host's probe signals into the state they imply.

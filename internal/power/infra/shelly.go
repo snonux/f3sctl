@@ -92,7 +92,7 @@ func (c *ShellyClient) Set(ctx context.Context, on bool) error {
 func (c *ShellyClient) RPC(ctx context.Context, path string) ([]byte, error) {
 	password, err := c.Password()
 	if err != nil {
-		return nil, fmt.Errorf("cannot control the rack fans: %w", err)
+		return nil, fmt.Errorf("cannot control the Shelly plug: %w", err)
 	}
 
 	url := "http://" + c.IP + path

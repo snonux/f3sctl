@@ -19,6 +19,8 @@ type State struct {
 	Hosts   []power.HostStatus
 	Fans    power.FansState
 	FansErr error
+	AC      power.ACState
+	ACErr   error
 	Job     *coordination.Job
 	// Monitoring is the per-gateway Gogios mute state. Nil when it was not
 	// collected for this request: reading it costs two SSH round trips to the

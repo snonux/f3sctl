@@ -39,7 +39,8 @@ func testConfig(t *testing.T, s *powertest.FakeShelly) config.Config {
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
 	cfg.Inventory = inventory.Inventory{
-		ShellyIP: s.Addr(),
+		ShellyIP:   s.Addr(),
+		ShellyACIP: s.Addr(),
 		Hosts: []inventory.Host{
 			{Name: "f0", Role: inventory.RoleF, IP: fHostIP, SSHPort: 22, SSHUser: "f3sctl"},
 		},
@@ -203,6 +204,87 @@ func TestFansOnSwitchesThePlugOnEvenWhileHostsAreUp(t *testing.T) {
 	}
 	if live.calls != 0 {
 		t.Errorf("liveness consulted %d times, want none: the on path has no guard", live.calls)
+	}
+}
+
+// TestACOffRefusesWhileAHostIsUp pins the AC hard-cut guard: shelly2 cuts
+// mains to every f-host, so an answering host must block ac off without
+// --force.
+func TestACOffRefusesWhileAHostIsUp(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+
+	_, _, err := runCLI(t, cfg, hostsUp("f0"), "ac", "off")
+	if err == nil {
+		t.Fatal("ac off succeeded while a host was up; the guard did not fire")
+	}
+	if !strings.Contains(err.Error(), "refusing to cut f-host AC") {
+		t.Errorf("error = %v, want a refusal mentioning f-host AC", err)
+	}
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none", got)
+	}
+}
+
+// TestACOffForceCutsWhileAHostIsUp is the escape hatch for a deliberate hard
+// cut after (or instead of) a graceful shutdown.
+func TestACOffForceCutsWhileAHostIsUp(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+
+	out, _, err := runCLI(t, cfg, hostsUp("f0"), "ac", "off", "--force")
+	if err != nil {
+		t.Fatalf("ac off --force: %v", err)
+	}
+	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
+	}
+	if !strings.Contains(out, "f-host AC: off") {
+		t.Errorf("output = %q, want it to report AC off", out)
+	}
+}
+
+// TestACOnRestoresEvenWhileHostsAreUp pins that restoring AC is never gated.
+func TestACOnRestoresEvenWhileHostsAreUp(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, false)
+	cfg := testConfig(t, shelly)
+	live := hostsUp("f0")
+
+	out, _, err := runCLI(t, cfg, live, "ac", "on")
+	if err != nil {
+		t.Fatalf("ac on: %v", err)
+	}
+	if got := shelly.SetCalls(); len(got) != 1 || !got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=true", got)
+	}
+	if !strings.Contains(out, "f-host AC: on") {
+		t.Errorf("output = %q, want it to report AC on", out)
+	}
+	if live.calls != 0 {
+		t.Errorf("liveness consulted %d times, want none", live.calls)
+	}
+}
+
+// TestACRejectsTrailingArgs mirrors the fans iz0 regression for the ac noun.
+func TestACRejectsTrailingArgs(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+
+	out, errOut, err := runCLI(t, cfg, hostsUp(), "ac", "on", "f0")
+	if err == nil {
+		t.Fatal("ac on f0 succeeded; trailing args must be a usage error")
+	}
+	if !strings.Contains(err.Error(), `unknown ac command "on f0"`) {
+		t.Errorf("error = %v, want unknown ac command", err)
+	}
+	if !strings.Contains(errOut, "f3sctl ac") {
+		t.Errorf("stderr = %q, want usage mentioning ac", errOut)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none", got)
 	}
 }
 
@@ -719,6 +801,10 @@ func (s *spyEngine) ProbeAll(context.Context) []power.HostStatus {
 
 func (s *spyEngine) FansStatus(context.Context) (power.FansState, error) {
 	return power.FansState{}, nil
+}
+
+func (s *spyEngine) ACStatus(context.Context) (power.ACState, error) {
+	return power.ACState{}, nil
 }
 
 func (s *spyEngine) record(call, host string) error {

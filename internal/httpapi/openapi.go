@@ -119,9 +119,9 @@ var sections = []section{
 	},
 	{
 		Name: contract.SectionPower,
-		Description: "Rack control: the status and job resources, the rack-fan plug, " +
-			"the cluster-wide (f0/f1/f2), all-hosts (f0-f3) and per-host power pairs, " +
-			"and the fans on/off actions.",
+		Description: "Rack control: the status and job resources, the rack-fan and " +
+			"f-host AC plugs, the cluster-wide (f0/f1/f2), all-hosts (f0-f3) and " +
+			"per-host power pairs, and the fans/ac on/off actions.",
 	},
 	{
 		Name: contract.SectionGogios,

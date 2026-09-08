@@ -12,7 +12,7 @@
 // AppMessage handlers.
 //
 //   F3SCTL_URL=https://f3s.buetow.org/cgi-bin/f3sctl/ F3SCTL_KEY=... \
-//     node docs/client-reference.js status|on|off|fans-on|fans-off
+//     node docs/client-reference.js status|on|off|fans-on|fans-off|ac-on|ac-off
 //
 // It also serves as the executable check that the shipped API matches the
 // documented one: `selftest` asserts the discovery rules hold.
@@ -127,6 +127,9 @@ async function showStatus() {
     // An unreachable plug is "unknown", never "off".
     console.log(`fans ${f.properties.error ? 'unknown' : (f.properties.on ? 'on' : 'off')}`);
   }
+  for (const a of entities(status, 'ac')) {
+    console.log(`ac ${a.properties.error ? 'unknown' : (a.properties.on ? 'on' : 'off')}`);
+  }
   return status;
 }
 
@@ -198,11 +201,10 @@ async function waitForJob(entry, timeoutMs = null) {
 
 // run performs a named action.
 //
-// holderRel names the resource that advertises it. Power and fan actions are on
-// the root; the monitoring pair is on the resource the "monitoring" link points
-// at, because reading that state costs the server an SSH round trip per gateway
-// and so is not folded into every response. Either way the action object is the
-// server's -- nothing here builds a path.
+// holderRel names the resource that advertises it. Power operations live on
+// the /power folder; fan and AC switches on /fans and /ac; the monitoring pair
+// on /monitoring. Either way the action object is the server's -- nothing here
+// builds a path.
 async function run(name, confirm, holderRel) {
   const entry = await root();
   const holder = holderRel ? await request(follow(entry, holderRel)) : entry;
@@ -230,7 +232,7 @@ async function selftest() {
   const check = (ok, msg) => console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`);
 
   check(typeof entry.properties.apiVersion === 'number', 'root carries apiVersion');
-  check(['status', 'fans', 'job', 'monitoring', 'describedby'].every((r) => {
+  check(['status', 'fans', 'ac', 'job', 'monitoring', 'describedby'].every((r) => {
     try { follow(entry, r); return true; } catch { return false; }
   }), 'root links to every documented resource');
 
@@ -238,31 +240,44 @@ async function selftest() {
   check(hosts.length > 0, 'status embeds host entities');
   check(hosts.every((h) => 'ping' in h && 'ssh' in h), 'hosts report ping and ssh separately');
 
+  // Actions live on the power folder, not the root (CLIENT.md §3).
+  const power = await request(follow(entry, 'power'));
+
   // The heart of the design: offered actions must match observed state.
   const allUp = hosts.filter((h) => h.name !== 'f3' && h.name.startsWith('f')).every((h) => h.ping);
-  check(!!action(entry, 'power-on') === !allUp, 'power-on is offered exactly when something is down');
-  check(!!action(entry, 'power-off') === hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && h.ping),
+  check(!!action(power, 'power-on') === !allUp, 'power-on is offered exactly when something is down');
+  check(!!action(power, 'power-off') === hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && h.ping),
     'power-off is offered exactly when something is up');
 
   // "all" covers f3 as well, so it is judged against a different host set than
   // power-on -- with only f3 down, power-on is correctly absent and all-on is
   // not.
   const everyFUp = hosts.filter((h) => h.name.startsWith('f')).every((h) => h.ping);
-  check(!!action(entry, 'all-on') === !everyFUp, 'all-on is offered exactly when any f-host is down');
-  check(!!action(entry, 'all-off') === hosts.some((h) => h.name.startsWith('f') && h.ssh),
+  check(!!action(power, 'all-on') === !everyFUp, 'all-on is offered exactly when any f-host is down');
+  check(!!action(power, 'all-off') === hosts.some((h) => h.name.startsWith('f') && h.ssh),
     'all-off is offered exactly when an f-host answers SSH');
 
   const fans = entities(status, 'fans')[0]?.properties ?? {};
-  check(!!action(entry, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
+  check(!!action(power, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
+
+  const ac = entities(status, 'ac')[0]?.properties ?? {};
+  check(!!action(power, 'ac-off') === (ac.on === true && !ac.error), 'ac-off is offered only when the AC plug is on');
 
   // A host that could not be probed counts as running: the fan plug cools the
   // rack, and an unmeasured host is not a host known to be off. That is the
-  // server's rule, so it is the one to check against.
-  const off = action(entry, 'fans-off');
-  const mayBeUp = hosts.some((h) => h.name.startsWith('f') && (h.ping || h.pingKnown === false));
+  // server's rule, so it is the one to check against. Fan guard excludes f3;
+  // AC guard includes it.
+  const off = action(power, 'fans-off');
+  const mayBeUpFans = hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && (h.ping || h.pingKnown === false));
   if (off) {
-    check((off.fields?.length > 0) === mayBeUp,
-      'fans-off carries a confirmation field exactly while an f-host may be running');
+    check((off.fields?.length > 0) === mayBeUpFans,
+      'fans-off carries a confirmation field exactly while an f0-f2 host may be running');
+  }
+  const acOff = action(power, 'ac-off');
+  const mayBeUpAC = hosts.some((h) => h.name.startsWith('f') && (h.ping || h.pingKnown === false));
+  if (acOff) {
+    check((acOff.fields?.length > 0) === mayBeUpAC,
+      'ac-off carries a confirmation field exactly while any f-host may be running');
   }
 
   // The mute is reachable on its own, independent of any power action -- the
@@ -277,16 +292,18 @@ async function selftest() {
 
 const commands = {
   status: showStatus,
-  on: () => run('power-on'),
-  off: () => run('power-off'),
-  'all-on': () => run('all-on'),
-  'all-off': () => run('all-off'),
-  'f3-on': () => run('f3-on'),
-  'f3-off': () => run('f3-off'),
+  on: () => run('power-on', undefined, 'power'),
+  off: () => run('power-off', undefined, 'power'),
+  'all-on': () => run('all-on', undefined, 'power'),
+  'all-off': () => run('all-off', undefined, 'power'),
+  'f3-on': () => run('f3-on', undefined, 'power'),
+  'f3-off': () => run('f3-off', undefined, 'power'),
   'monitoring-mute': () => run('monitoring-mute', undefined, 'monitoring'),
   'monitoring-unmute': () => run('monitoring-unmute', undefined, 'monitoring'),
-  'fans-on': () => run('fans-on'),
-  'fans-off': () => run('fans-off', true),
+  'fans-on': () => run('fans-on', undefined, 'fans'),
+  'fans-off': () => run('fans-off', true, 'fans'),
+  'ac-on': () => run('ac-on', undefined, 'ac'),
+  'ac-off': () => run('ac-off', true, 'ac'),
   selftest,
 };
 

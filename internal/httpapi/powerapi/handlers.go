@@ -41,6 +41,7 @@ func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req c
 		e.Entities = append(e.Entities, hostEntity(h))
 	}
 	e.Entities = append(e.Entities, sf.fansEntity(state))
+	e.Entities = append(e.Entities, sf.acEntity(state))
 
 	if job := coordination.NewestJob(state.Job, peer); job != nil {
 		e.Entities = append(e.Entities, sf.jobEntity(*job))
@@ -100,6 +101,7 @@ func (sf *Surface) handlePowerFolder(_ context.Context, state contract.State, _ 
 			{Rel: []string{"status"}, Href: sf.Href(StatusPath)},
 			{Rel: []string{"job"}, Href: sf.Href(JobPath)},
 			{Rel: []string{"fans"}, Href: sf.Href("/fans")},
+			{Rel: []string{"ac"}, Href: sf.Href("/ac")},
 		},
 		Actions: sf.sectionActions(state, contract.SectionPower),
 	}, http.StatusOK, nil
@@ -224,6 +226,75 @@ func (sf *Surface) setFans(ctx context.Context, state contract.State, req contra
 
 	state.Fans, state.FansErr = fans, nil
 	e, _, _ := sf.handleFans(ctx, state, req)
+	return e, http.StatusOK, nil
+}
+
+func (sf *Surface) acEntity(state contract.State) contract.Entity {
+	props := map[string]any{"on": state.AC.On, "ip": state.AC.IP}
+	if state.ACErr != nil {
+		props["error"] = state.ACErr.Error()
+	}
+	return contract.Entity{
+		Class:      []string{"ac"},
+		Rel:        []string{"item"},
+		Properties: props,
+		Links:      []contract.Link{{Rel: []string{"self"}, Href: sf.Href("/ac")}},
+	}
+}
+
+func (sf *Surface) handleAC(_ context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
+	e := sf.acEntity(state)
+	e.Rel = nil
+	e.Title = "F-host mains AC plug"
+	e.Links = []contract.Link{
+		{Rel: []string{"self"}, Href: sf.Href("/ac")},
+		{Rel: []string{"up"}, Href: sf.Href("/")},
+	}
+	e.Actions = sf.actionsFor(state, "ac-on", "ac-off")
+	return e, http.StatusOK, nil
+}
+
+func (sf *Surface) handleACOn(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
+	return sf.setAC(ctx, state, req, true)
+}
+
+// handleACOff switches the AC plug off, requiring explicit confirmation while
+// any f-host may still be drawing power. Independent of power off: cutting
+// AC is never an automatic side-effect of a graceful shutdown.
+func (sf *Surface) handleACOff(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
+	if !req.BoolField("force") {
+		if busy := sf.acStillBusy(ctx, state); busy.Busy() {
+			return contract.Entity{}, http.StatusConflict, fmt.Errorf(
+				"hosts may still be drawing power (%s); cutting mains AC hard-powers them off "+
+					"and risks ZFS / bhyve damage; re-send with force=true if you really mean it",
+				busy.Why())
+		}
+	}
+	return sf.setAC(ctx, state, req, false)
+}
+
+func (sf *Surface) acStillBusy(ctx context.Context, state contract.State) power.RackActivity {
+	if busy := ACBusy(state); busy.Busy() {
+		return busy
+	}
+	return sf.confirmAC(ctx)
+}
+
+func (sf *Surface) confirmAC(ctx context.Context) power.RackActivity {
+	if sf.ACConfirm != nil {
+		return sf.ACConfirm(ctx)
+	}
+	return sf.Engine.ACActivity(ctx)
+}
+
+func (sf *Surface) setAC(ctx context.Context, state contract.State, req contract.Request, on bool) (contract.Entity, int, error) {
+	ac, err := sf.Engine.ACSet(ctx, on)
+	if err != nil {
+		return contract.Entity{}, http.StatusBadGateway, err
+	}
+
+	state.AC, state.ACErr = ac, nil
+	e, _, _ := sf.handleAC(ctx, state, req)
 	return e, http.StatusOK, nil
 }
 

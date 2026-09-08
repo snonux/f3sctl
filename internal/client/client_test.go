@@ -145,6 +145,8 @@ func TestActionForVerbFallsBackToLegacyNameWhenCLIVerbAbsent(t *testing.T) {
 		{Name: "power-off"},
 		{Name: "fans-on"},
 		{Name: "fans-off"},
+		{Name: "ac-on"},
+		{Name: "ac-off"},
 		{Name: "monitoring-mute"},
 		{Name: "monitoring-unmute"},
 		{Name: "f1-on"}, // per-host action, derived rather than listed
@@ -158,6 +160,8 @@ func TestActionForVerbFallsBackToLegacyNameWhenCLIVerbAbsent(t *testing.T) {
 		"power off":         "power-off",
 		"fans on":           "fans-on",
 		"fans off":          "fans-off",
+		"ac on":             "ac-on",
+		"ac off":            "ac-off",
 		"monitoring mute":   "monitoring-mute",
 		"monitoring unmute": "monitoring-unmute",
 		"power f1 on":       "f1-on",

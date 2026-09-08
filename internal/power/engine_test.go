@@ -142,6 +142,9 @@ func buildTestEngine(t *testing.T, shelly *powertest.FakeShelly, fHostsOnly bool
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
 	cfg.Inventory.ShellyIP = shelly.Addr()
+	// Point the AC plug at the same fake by default: power on/off never
+	// touches AC, and AC-specific tests substitute their own address.
+	cfg.Inventory.ShellyACIP = shelly.Addr()
 	if fHostsOnly {
 		cfg.Inventory.Hosts = cfg.Inventory.ByRole(inventory.RoleF)
 	}
@@ -200,6 +203,67 @@ func TestClusterOffSwitchesTheFansOffWhileF3IsRunning(t *testing.T) {
 	}
 	if strings.Contains(log.String(), fansLeftOn) {
 		t.Errorf("log = %q, want no claim that the fans were left on", log.String())
+	}
+}
+
+// TestClusterOffDoesNotTouchTheACPlug pins the independence requirement:
+// power off drives shelly1 (fans) but must never flip shelly2 (f-host AC).
+func TestClusterOffDoesNotTouchTheACPlug(t *testing.T) {
+	fans := powertest.NewFakeShelly(t, true)
+	ac := powertest.NewFakeShelly(t, true)
+	eng := testEngine(t, fans)
+	eng.cfg.Inventory.ShellyACIP = ac.Addr()
+	eng.ac = execAC{shelly: newShellyClient(ac.Addr(), eng.cfg.ResolveShellyPassword)}
+
+	var log bytes.Buffer
+	if err := eng.Off(context.Background(), &log); err != nil {
+		t.Fatalf("power off: %v", err)
+	}
+	if got := fans.SetCalls(); len(got) != 1 || got[0] {
+		t.Fatalf("fan Switch.Set calls = %v, want exactly one with on=false", got)
+	}
+	if got := ac.SetCalls(); len(got) != 0 {
+		t.Fatalf("AC Switch.Set calls = %v, want none: AC is independent of power off", got)
+	}
+}
+
+// TestACActivityIncludesF3 pins the engine half of the AC-off guard: shelly2
+// powers every f-host, so a live f3 alone must keep ACActivity busy even when
+// the fan-cooled power group is silent.
+func TestACActivityIncludesF3(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	eng := testEngine(t, shelly, "f3")
+
+	ac := eng.ACActivity(context.Background())
+	if !ac.Busy() {
+		t.Fatal("ACActivity with only f3 up is not busy; f3 must count for AC")
+	}
+	if got := ac.Hosts(); len(got) != 1 || got[0] != "f3" {
+		t.Errorf("ACActivity hosts = %v, want [f3]", got)
+	}
+
+	fans := eng.RackActivity(context.Background())
+	if fans.Busy() {
+		t.Error("RackActivity with only f3 up is busy; fans must still exclude f3")
+	}
+}
+
+// TestACActivityFromIncludesF3 is the snapshot half of the same rule.
+func TestACActivityFromIncludesF3(t *testing.T) {
+	busy := ACActivityFrom([]HostStatus{
+		{Name: "f3", Role: string(inventory.RoleF), Ping: true, PingKnown: true},
+		{Name: "r0", Role: string(inventory.RoleCluster), Ping: true, PingKnown: true},
+	})
+	if !busy.Busy() || len(busy.Hosts()) != 1 || busy.Hosts()[0] != "f3" {
+		t.Errorf("ACActivityFrom = %+v, want busy with only f3", busy)
+	}
+
+	cold := ACActivityFrom([]HostStatus{
+		{Name: "f0", Role: string(inventory.RoleF), PingKnown: true},
+		{Name: "f3", Role: string(inventory.RoleF), PingKnown: true},
+	})
+	if cold.Busy() {
+		t.Error("ACActivityFrom with silent f-hosts is busy")
 	}
 }
 

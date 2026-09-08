@@ -135,6 +135,13 @@ reached: show "unknown", **not** "off". They are different situations, and
 showing the rack as uncooled when it is merely unreachable will send someone
 to the garage for nothing.
 
+The `ac` entity is the same shape for the f-host mains AC plug (shelly2). It
+is **independent of power on/off**: a graceful shutdown never cuts AC, and a
+wake never restores it. Cutting AC while hosts may still be up is guarded the
+same way as `fans-off` (a `force` checkbox while any of f0–f3 may be drawing
+power — f3 included, because this plug powers all of them). Treat a hard cut
+as last-resort or post-shutdown only.
+
 ### Two power groups
 
 `power-on` / `power-off` act on **f0, f1, f2** — the k3s cluster. f3 is
@@ -385,13 +392,15 @@ started, or an older server). Render what is there; do not require any of it.
   eventually give up while the server-reported job is still healthy.
 
 `fans-on` and `fans-off` are **synchronous**: they return `200` with the plug's
-state read back from the device. No job, no polling.
+state read back from the device. No job, no polling. Same for `ac-on` /
+`ac-off`.
 
-`fans-off` is the one slow request in this API. Before it cuts the cooling it
-re-probes the rack, and proving that a silent host really is powered off takes
-several pings spaced ten seconds apart — so a request that is about to succeed
-can take the better part of a minute. Allow **60 s** for it. (`fans-off` with
-`force=true`, and every other route, answers in the usual few seconds.)
+`fans-off` and `ac-off` are the slow requests in this API. Before either cuts
+the plug it re-probes the hosts on its circuit, and proving that a silent
+host really is powered off takes several pings spaced ten seconds apart — so
+a request that is about to succeed can take the better part of a minute.
+Allow **60 s** for both. (`fans-off` / `ac-off` with `force=true`, and every
+other route, answers in the usual few seconds.)
 
 ---
 
@@ -443,27 +452,30 @@ in that state the `ping` flags in `/status` are not evidence of an idle rack
 either, so do not present it as one. This is why §6 says to render the title as
 given instead of writing your own.
 
-**`fans-off` is judged twice, on two different budgets, and they can
-disagree.** The `force` field's presence is decided by a cheap single-probe
-snapshot taken once for the whole response; the plug switch itself is guarded
-by a slower, stricter, multi-probe confirmation run only when the request
-actually tries to flip it. When the snapshot reads the rack as cold, the field
-is omitted — but the confirming probe can still find a host up, and a
-`fans-off` sent **without** `force` then comes back `409` even though nothing
+**`fans-off` (and likewise `ac-off`) is judged twice, on two different
+budgets, and they can disagree.** The `force` field's presence is decided by a
+cheap single-probe snapshot taken once for the whole response; the plug switch
+itself is guarded by a slower, stricter, multi-probe confirmation run only when
+the request actually tries to flip it. When the snapshot reads the circuit as
+cold, the field is omitted — but the confirming probe can still find a host up,
+and a request sent **without** `force` then comes back `409` even though nothing
 in the response ever offered the field to withhold.
+
+`fans-off` only ever names f0/f1/f2 (the plug does not cool f3). `ac-off` names
+every f-host including f3 (shelly2 cuts mains to all of them).
 
 Do not treat this 409 like the others in §7 (re-fetch and re-render, hope the
 next snapshot agrees with the probe that just ran). It is not guaranteed to
 resolve itself in any particular number of retries, and re-fetching throws
 away information your user already gave you: if they explicitly asked for
-`fans off` **and** confirmed the force checkbox last time it was offered, send
-`force=true` on the retry directly, whether or not this response's `fields`
-array happens to list it. The server's own multi-probe confirmation is the
-real safety gate, not the advertisement — sending an unsolicited-but-genuine
-`force=true` can never make the action less safe, it only avoids a second
-round trip for a "yes" the user already gave. Never fabricate `force=true`
-when the user has not actually confirmed it; that would skip the confirmation
-this whole field exists to get.
+`fans off` / `ac off` **and** confirmed the force checkbox last time it was
+offered, send `force=true` on the retry directly, whether or not this
+response's `fields` array happens to list it. The server's own multi-probe
+confirmation is the real safety gate, not the advertisement — sending an
+unsolicited-but-genuine `force=true` can never make the action less safe, it
+only avoids a second round trip for a "yes" the user already gave. Never
+fabricate `force=true` when the user has not actually confirmed it; that would
+skip the confirmation this whole field exists to get.
 
 ---
 
@@ -618,16 +630,16 @@ project assumes — you will never see the refusal anyway.
 
 **Stable — a client may rely on these:**
 
-- `rel` names: `self`, `status`, `fans`, `job`, `describedby`, `up` — plus the
+- `rel` names: `self`, `status`, `fans`, `ac`, `job`, `describedby`, `up` — plus the
   two section folders `power` and `gogios` on the root: every operation is
   reachable from what those offer, and a client that renders only the root's
   folders and the read-only resources is rendering the whole API
 - action `name`s: `power-on`, `power-off`, `f3-on`, `f3-off`, `fans-on`,
-  `fans-off`, `monitoring-mute`, `monitoring-unmute`, `gogios-cache-clear` —
-  advertised where their section folder puts them (power operations on
-  `/power`'s actions; the mute pair on `/monitoring` and on the `/gogios`
-  folder), never on the root
-- `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans (`on`,
+  `fans-off`, `ac-on`, `ac-off`, `monitoring-mute`, `monitoring-unmute`,
+  `gogios-cache-clear` — advertised where their section folder puts them
+  (power operations on `/power`'s actions; the mute pair on `/monitoring`
+  and on the `/gogios` folder), never on the root
+- `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans and ac (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,
   `node`, `error`)
 - job `state` values: `running`, `done`, `failed`

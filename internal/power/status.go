@@ -133,6 +133,19 @@ func RackActivityFrom(statuses []HostStatus) RackActivity {
 	return a
 }
 
+// ACActivityFrom is RackActivityFrom for the f-host AC plug: every Role-f
+// host counts, f3 included, because shelly2 cuts mains to the whole set.
+func ACActivityFrom(statuses []HostStatus) RackActivity {
+	var a RackActivity
+	for _, st := range statuses {
+		if st.Role != string(inventory.RoleF) {
+			continue
+		}
+		a.add(st.Name, st.liveness())
+	}
+	return a
+}
+
 // Why explains what is keeping the fans on, distinguishing hosts that answered
 // from hosts nothing could be learned about. The difference matters to whoever
 // reads it: the first is the rack working as intended, the second means this
@@ -166,8 +179,21 @@ func (a RackActivity) Why() string {
 // confirmLiveness) and the caller is usually a person waiting at a terminal or
 // a shutdown holding the rack in an undefined state.
 func (e *Engine) RackActivity(ctx context.Context) RackActivity {
-	hosts := e.cfg.Inventory.PowerGroup()
+	return e.activityOf(ctx, e.cfg.Inventory.PowerGroup())
+}
 
+// ACActivity probes every f-host (f0–f3) and reports which may still be
+// drawing power. This is the strict half of the AC-off guard: shelly2 cuts
+// mains to the whole set, so f3 counts here even though RackActivity
+// excludes it for the fan plug.
+func (e *Engine) ACActivity(ctx context.Context) RackActivity {
+	return e.activityOf(ctx, e.cfg.Inventory.EveryFHost())
+}
+
+// activityOf is the shared probe loop behind RackActivity and ACActivity:
+// confirmed consecutive silences per host, in parallel, folded into a
+// RackActivity.
+func (e *Engine) activityOf(ctx context.Context, hosts []inventory.Host) RackActivity {
 	state := make([]hostLiveness, len(hosts))
 	var wg sync.WaitGroup
 	for i, h := range hosts {

@@ -90,6 +90,9 @@ type Surface struct {
 	// cooling. Nil means Engine.RackActivity; only tests substitute anything
 	// else. See confirmRack.
 	RackConfirm func(context.Context) power.RackActivity
+	// ACConfirm is the AC-off guard's strict re-probe (every f-host). Nil
+	// means Engine.ACActivity. See confirmAC.
+	ACConfirm func(context.Context) power.RackActivity
 	// Actions renders the actions list of a resource that advertises the
 	// whole surface (the status route). ActionsFor renders the actions list of
 	// a resource that advertises only its own controls. SectionActions
@@ -108,14 +111,19 @@ type Surface struct {
 }
 
 // Engine is the slice of the power engine the REST surface drives directly:
-// writing the plug, and the strict rack-activity probe. Satisfied by
+// writing the plugs, and the strict rack-activity probes. Satisfied by
 // *power.Engine in production and by fakes in tests.
 type Engine interface {
 	// FansSet switches the rack-fan plug and returns the read-back.
 	FansSet(ctx context.Context, on bool) (power.FansState, error)
-	// RackActivity reports what may still be drawing power in the rack,
-	// judged on the strict, consecutive-silence evidence.
+	// ACSet switches the f-host mains AC plug and returns the read-back.
+	ACSet(ctx context.Context, on bool) (power.ACState, error)
+	// RackActivity reports what may still be drawing power in the fan-cooled
+	// rack (f0/f1/f2), judged on the strict, consecutive-silence evidence.
 	RackActivity(ctx context.Context) power.RackActivity
+	// ACActivity reports what may still be drawing power on the AC circuit
+	// (f0–f3), judged on the same strict evidence.
+	ACActivity(ctx context.Context) power.RackActivity
 }
 
 // Jobs is the slice of the coordination manager the surface drives: starting
@@ -225,4 +233,10 @@ func EveryFHostUp(s contract.State) (up, sshUp, total int) {
 // anything.
 func RackBusy(s contract.State) power.RackActivity {
 	return power.RackActivityFrom(s.Hosts)
+}
+
+// ACBusy reports which f-hosts may still be drawing power on the AC circuit
+// (f0–f3), judged against this request's snapshot. Gates switching AC off.
+func ACBusy(s contract.State) power.RackActivity {
+	return power.ACActivityFrom(s.Hosts)
 }

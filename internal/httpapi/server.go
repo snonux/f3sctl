@@ -69,6 +69,10 @@ type Server struct {
 	// Server.fansStatusFn.
 	fansStatus func(context.Context) (power.FansState, error)
 
+	// acStatus reads the f-host mains AC Shelly plug, feeding State.AC and
+	// State.ACErr. Nil means Engine.ACStatus; same reasoning as fansStatus.
+	acStatus func(context.Context) (power.ACState, error)
+
 	// monitorStatus reads the Gogios mute marker from both gateways, feeding
 	// State.Monitoring. Nil means the engine's own read
 	// (Engine.MonitoringStatus, an SSH round trip to each gateway, several
@@ -244,20 +248,21 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 // snapshot probes what the requested route actually needs, once.
 //
 // Job is a local disk read (coordination.Manager.Read), cheap enough to take
-// unconditionally. Hosts and Fans are not: Hosts costs Engine.ProbeAll, 7
+// unconditionally. Hosts, Fans and AC are not: Hosts costs Engine.ProbeAll, 7
 // concurrent ping+TCP probes bounded by ProbeTimeout+1s each (~3s total);
-// Fans costs Engine.FansStatus, an HTTP round trip to the Shelly plug bounded
-// by a 5s timeout. Every Available predicate and every handler that reads
-// either lives in routes whose SkipsProbe flag is false -- see that field's
-// doc comment in contract. Paying for both on every request used to mean
+// Fans and AC each cost an HTTP round trip to a Shelly plug bounded by a 5s
+// timeout. Every Available predicate and every handler that reads any of
+// them lives in routes whose SkipsProbe flag is false -- see that field's
+// doc comment in contract. Paying for all three on every request used to mean
 // /job, polled every 10s through a multi-minute shutdown, waited out a full
-// fleet probe and a plug read for data it discards.
+// fleet probe and plug reads for data it discards.
 func (s *Server) snapshot(ctx context.Context, req contract.Request) contract.State {
 	st := contract.State{Job: s.jobs.Read()}
 
 	if !skipsProbe(s.router.routes, req.Path) {
 		st.Hosts = s.probeHostsFn()(ctx)
 		st.Fans, st.FansErr = s.fansStatusFn()(ctx)
+		st.AC, st.ACErr = s.acStatusFn()(ctx)
 	}
 	return st
 }
@@ -308,13 +313,22 @@ func (s *Server) probeHostsFn() func(context.Context) []power.HostStatus {
 	return s.engine.ProbeAll
 }
 
-// fansStatusFn returns the Shelly plug read, falling back to the engine's
-// real one. Same nil-safety pattern as the power surface's confirmRack.
+// fansStatusFn returns the rack-fan Shelly plug read, falling back to the
+// engine's real one. Same nil-safety pattern as the power surface's confirmRack.
 func (s *Server) fansStatusFn() func(context.Context) (power.FansState, error) {
 	if s.fansStatus != nil {
 		return s.fansStatus
 	}
 	return s.engine.FansStatus
+}
+
+// acStatusFn returns the f-host AC Shelly plug read, falling back to the
+// engine's real one.
+func (s *Server) acStatusFn() func(context.Context) (power.ACState, error) {
+	if s.acStatus != nil {
+		return s.acStatus
+	}
+	return s.engine.ACStatus
 }
 
 // monitorStatusFn returns the gateway mute read, falling back to the

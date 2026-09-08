@@ -140,32 +140,58 @@ const (
 // settle budget runs out. See the constants above for why the read-back
 // exists at all and why it is retried.
 func (f execFans) Set(ctx context.Context, on bool) (FansState, error) {
-	if err := f.shelly.Set(ctx, on); err != nil {
-		return FansState{IP: f.shelly.IP}, err
+	output, err := settleShelly(ctx, f.shelly, on)
+	return FansState{On: output, IP: f.shelly.IP}, err
+}
+
+// execAC is the ACBackend adapter: same Shelly HTTP RPC + settle read-back as
+// execFans, pointed at the f-host mains plug (shelly2). Kept as its own type
+// so the engine can hold two clients with different IPs and so a fake for one
+// plug cannot stand in for the other.
+type execAC struct{ shelly *infra.ShellyClient }
+
+var _ ACBackend = (*execAC)(nil)
+
+func (a execAC) Status(ctx context.Context) (ACState, error) {
+	on, err := a.shelly.Status(ctx)
+	return ACState{On: on, IP: a.shelly.IP}, err
+}
+
+func (a execAC) Set(ctx context.Context, on bool) (ACState, error) {
+	output, err := settleShelly(ctx, a.shelly, on)
+	return ACState{On: output, IP: a.shelly.IP}, err
+}
+
+// settleShelly sends Switch.Set and polls Status until the relay reports the
+// requested state or the settle budget runs out. Shared by execFans and
+// execAC: both plugs are the same Shelly model with the same slow-relay
+// behaviour.
+func settleShelly(ctx context.Context, shelly *infra.ShellyClient, on bool) (bool, error) {
+	if err := shelly.Set(ctx, on); err != nil {
+		return false, err
 	}
 
-	output, err := f.shelly.Status(ctx)
+	output, err := shelly.Status(ctx)
 	if err != nil {
-		return FansState{IP: f.shelly.IP}, err
+		return false, err
 	}
 	for attempt := 1; attempt < fansSettleAttempts && output != on; attempt++ {
 		select {
 		case <-ctx.Done():
-			return FansState{On: output, IP: f.shelly.IP}, ctx.Err()
+			return output, ctx.Err()
 		case <-time.After(fansSettleInterval):
 		}
-		output, err = f.shelly.Status(ctx)
+		output, err = shelly.Status(ctx)
 		if err != nil {
-			return FansState{On: output, IP: f.shelly.IP}, err
+			return output, err
 		}
 	}
 	if output != on {
-		return FansState{On: output, IP: f.shelly.IP},
-			fmt.Errorf("shelly plug did not change state: asked for on=%t, "+
-				"it still reports on=%t after %s", on, output,
-				time.Duration(fansSettleAttempts-1)*fansSettleInterval)
+		return output, fmt.Errorf("shelly plug did not change state: asked for on=%t, "+
+			"it still reports on=%t after %s", on, output,
+			time.Duration(fansSettleAttempts-1)*fansSettleInterval)
 	}
-	return FansState{On: output, IP: f.shelly.IP}, nil
+	return output, nil
 }
 
 // execNFS is the NFSChecker adapter.
