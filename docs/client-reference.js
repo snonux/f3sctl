@@ -199,15 +199,18 @@ async function waitForJob(entry, timeoutMs = null) {
   }
 }
 
-// run performs a named action.
-//
-// holderRel names the resource that advertises it. Power operations live on
-// the /power folder; fan and AC switches on /fans and /ac; the monitoring pair
-// on /monitoring. Either way the action object is the server's -- nothing here
-// builds a path.
+// holderRel is a single root-level rel, or a slash-separated chain through
+// section folders (e.g. "power/ac", "gogios/monitoring"). Power operations
+// live on the /power folder; fan switches on /fans; AC switches on /ac via
+// Power control; the monitoring pair on /monitoring via Gogios.
 async function run(name, confirm, holderRel) {
   const entry = await root();
-  const holder = holderRel ? await request(follow(entry, holderRel)) : entry;
+  let holder = entry;
+  if (holderRel) {
+    for (const rel of holderRel.split('/')) {
+      holder = await request(follow(holder, rel));
+    }
+  }
 
   const act = action(holder, name);
   if (!act) {
@@ -232,9 +235,13 @@ async function selftest() {
   const check = (ok, msg) => console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`);
 
   check(typeof entry.properties.apiVersion === 'number', 'root carries apiVersion');
-  check(['status', 'fans', 'ac', 'job', 'monitoring', 'describedby'].every((r) => {
+  check(['status', 'fans', 'job', 'describedby', 'power', 'gogios'].every((r) => {
     try { follow(entry, r); return true; } catch { return false; }
-  }), 'root links to every documented resource');
+  }), 'root links to the section folders and read-only resources');
+  check((() => { try { follow(entry, 'ac'); return false; } catch { return true; } })(),
+    'ac is not a root section (reached through Power control)');
+  check((() => { try { follow(entry, 'monitoring'); return false; } catch { return true; } })(),
+    'monitoring is not a root section (reached through Gogios)');
 
   const hosts = entities(status, 'host').map((h) => h.properties);
   check(hosts.length > 0, 'status embeds host entities');
@@ -242,6 +249,8 @@ async function selftest() {
 
   // Actions live on the power folder, not the root (CLIENT.md §3).
   const power = await request(follow(entry, 'power'));
+  check((() => { try { follow(power, 'ac'); return true; } catch { return false; } })(),
+    'Power control links to the f-host AC plug');
 
   // The heart of the design: offered actions must match observed state.
   const allUp = hosts.filter((h) => h.name !== 'f3' && h.name.startsWith('f')).every((h) => h.ping);
@@ -280,10 +289,11 @@ async function selftest() {
       'ac-off carries a confirmation field exactly while any f-host may be running');
   }
 
-  // The mute is reachable on its own, independent of any power action -- the
-  // property that stops a stranded mute from being unclearable once the fleet
-  // is up and power-on has been withheld.
-  const mon = await request(follow(entry, 'monitoring'));
+  // The mute is reachable through the Gogios folder, independent of any power
+  // action -- the property that stops a stranded mute from being unclearable
+  // once the fleet is up and power-on has been withheld.
+  const gogios = await request(follow(entry, 'gogios'));
+  const mon = await request(follow(gogios, 'monitoring'));
   const muted = mon.properties.muted;
   check(typeof muted === 'boolean', 'monitoring reports a mute state');
   check(!!action(mon, 'monitoring-unmute') === muted, 'unmute is offered exactly when muted');
@@ -298,12 +308,12 @@ const commands = {
   'all-off': () => run('all-off', undefined, 'power'),
   'f3-on': () => run('f3-on', undefined, 'power'),
   'f3-off': () => run('f3-off', undefined, 'power'),
-  'monitoring-mute': () => run('monitoring-mute', undefined, 'monitoring'),
-  'monitoring-unmute': () => run('monitoring-unmute', undefined, 'monitoring'),
+  'monitoring-mute': () => run('monitoring-mute', undefined, 'gogios/monitoring'),
+  'monitoring-unmute': () => run('monitoring-unmute', undefined, 'gogios/monitoring'),
   'fans-on': () => run('fans-on', undefined, 'fans'),
   'fans-off': () => run('fans-off', true, 'fans'),
-  'ac-on': () => run('ac-on', undefined, 'ac'),
-  'ac-off': () => run('ac-off', true, 'ac'),
+  'ac-on': () => run('ac-on', undefined, 'power/ac'),
+  'ac-off': () => run('ac-off', true, 'power/ac'),
   selftest,
 };
 

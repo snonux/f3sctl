@@ -96,9 +96,10 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 // Not every noun's actions live on the root, and since the section folders
 // (see docs/CLIENT.md §3) not even the power actions live there: the root is
 // a folder index, and holderRel is walked through the folders first --
-// "power" resolves to its own /power folder, "monitoring" through the Gogios
-// folder (a Gogios concern, reachable from it), "fans" and "gogios" each to
-// the resource the root's own rel offers. Reading the link chain from the
+// "power" resolves to its own /power folder, "ac" through that folder (the
+// f-host AC plug is a Power-control resource, not a root section),
+// "monitoring" through the Gogios folder, "fans" and "gogios" each to the
+// resource the root's own rel offers. Reading the link chain from the
 // documents rather than building a path keeps this discovery-driven: no
 // action name or path is hard-coded, and a noun whose rel the root does not
 // offer simply falls back to the root -- behaviour a server predating the
@@ -172,7 +173,7 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 var nounHolderPath = map[string][]string{
 	"power":      {"power"},
 	"fans":       {"fans"},
-	"ac":         {"ac"},
+	"ac":         {"power", "ac"},
 	"monitoring": {"gogios", "monitoring"},
 	"gogios":     {"gogios"},
 }

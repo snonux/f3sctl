@@ -470,12 +470,12 @@ func TestRootIsAFolderIndex(t *testing.T) {
 	if len(e.Actions) != 0 {
 		t.Errorf("root actions = %v, want none: the operations live in the section folders", actionNames(e))
 	}
-	for _, rel := range []string{"self", "describedby", "power", "status", "job", "fans", "ac", "gogios"} {
+	for _, rel := range []string{"self", "describedby", "power", "status", "job", "fans", "gogios"} {
 		if !hasServedRel(e.Links, rel) {
 			t.Errorf("root links = %+v, missing rel %q", e.Links, rel)
 		}
 	}
-	for _, rel := range []string{"monitoring", "gogios-critical"} {
+	for _, rel := range []string{"monitoring", "gogios-critical", "ac"} {
 		if hasServedRel(e.Links, rel) {
 			t.Errorf("root links = %+v carry rel %q: that belongs in its section folder", e.Links, rel)
 		}

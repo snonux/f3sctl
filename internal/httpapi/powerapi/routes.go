@@ -65,16 +65,17 @@ func (sf *Surface) hostsRoutes() []contract.Route {
 }
 
 // resourceRoutes is the read-only power resources: the power section folder,
-// the status overview, the current-or-last job, and the rack-fan plug.
-// Navigable resources rendered in "links", never in "actions" (see
-// TestGETRoutesAreLinksNotActions). None of these takes a CLIVerb -- they are
-// followed by relation, not invoked by a CLI verb.
+// the status overview, the current-or-last job, the rack-fan plug, and the
+// f-host AC plug. Navigable resources rendered in "links", never in "actions"
+// (see TestGETRoutesAreLinksNotActions). None of these takes a CLIVerb -- they
+// are followed by relation, not invoked by a CLI verb.
 //
 // The /power folder is section navigation and the root's "power" rel: a GET
 // resource whose actions list is every power operation possible right now
 // (see handlePowerFolder), replacing the flat actions list the ROOT used to
 // carry. It is NOT SkipsProbe -- its actions are judged on fleet state -- so
-// unlike the root itself a folder render still pays the probe.
+// unlike the root itself a folder render still pays the probe. The AC plug is
+// NoRootLink: it is reached through that folder, not as its own root section.
 func (sf *Surface) resourceRoutes() []contract.Route {
 	return []contract.Route{
 		{
@@ -103,7 +104,11 @@ func (sf *Surface) resourceRoutes() []contract.Route {
 		{
 			Name: "ac", Title: "F-host mains AC plug",
 			Method: http.MethodGet, Path: "/ac",
-			Handle: sf.handleAC,
+			// NoRootLink: reached through the /power folder (Power control),
+			// same nesting as monitoring under /gogios -- it is a power-domain
+			// resource, not an overview-level section of its own.
+			NoRootLink: true,
+			Handle:     sf.handleAC,
 		},
 	}
 }

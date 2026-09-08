@@ -630,15 +630,17 @@ project assumes — you will never see the refusal anyway.
 
 **Stable — a client may rely on these:**
 
-- `rel` names: `self`, `status`, `fans`, `ac`, `job`, `describedby`, `up` — plus the
+- `rel` names: `self`, `status`, `fans`, `job`, `describedby`, `up` — plus the
   two section folders `power` and `gogios` on the root: every operation is
   reachable from what those offer, and a client that renders only the root's
-  folders and the read-only resources is rendering the whole API
+  folders and the read-only resources is rendering the whole API. Nested under
+  those folders (not on the root): `ac` under Power control, `monitoring` and
+  the Gogios drill-downs under Gogios
 - action `name`s: `power-on`, `power-off`, `f3-on`, `f3-off`, `fans-on`,
   `fans-off`, `ac-on`, `ac-off`, `monitoring-mute`, `monitoring-unmute`,
   `gogios-cache-clear` — advertised where their section folder puts them
-  (power operations on `/power`'s actions; the mute pair on `/monitoring`
-  and on the `/gogios` folder), never on the root
+  (power operations including fans/ac on `/power`'s actions; the mute pair on
+  `/monitoring` and on the `/gogios` folder), never on the root
 - `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans and ac (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,
   `node`, `error`)
@@ -656,7 +658,7 @@ project assumes — you will never see the refusal anyway.
 A machine-readable description of the surface is at the `describedby` link
 (`/openapi.json`), generated from the same registry that serves requests. It
 groups the operations into two sections by tag — **Power** (rack control:
-status, jobs, the power pairs, the fan plug) and **Gogios** (alerting: the
+status, jobs, the power pairs, the fan and f-host AC plugs) and **Gogios** (alerting: the
 mute pair and the alert-report browse), with **API** covering the entry point
 itself — so a generated reader shows the two domains separately. It describes
 what exists in general; the Siren responses describe what is possible now.

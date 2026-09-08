@@ -78,11 +78,12 @@ func (sf *Surface) sectionActions(state contract.State, section string) []contra
 }
 
 // handlePowerFolder renders the power section folder: a compact index of the
-// domain. Its links are the power resources (status, job, the fan plug); its
-// actions are every power operation the route table offers right now -- the
-// cluster-wide, all-hosts and per-host pairs plus the fan switch pair -- the
-// same state-dependent offer the ROOT used to carry in one flat list, moved
-// here so a browser's overview menu is folders rather than a dozen controls.
+// domain. Its links are the power resources (status, job, the fan plug, the
+// f-host AC plug); its actions are every power operation the route table
+// offers right now -- the cluster-wide, all-hosts and per-host pairs plus the
+// fan and AC switch pairs -- the same state-dependent offer the ROOT used to
+// carry in one flat list, moved here so a browser's overview menu is folders
+// rather than a dozen controls.
 //
 // It looks up nothing by hand: SectionActions narrows the route table's own
 // offer by contract.Route.Section, so a power action added to the surface is
@@ -248,7 +249,8 @@ func (sf *Surface) handleAC(_ context.Context, state contract.State, _ contract.
 	e.Title = "F-host mains AC plug"
 	e.Links = []contract.Link{
 		{Rel: []string{"self"}, Href: sf.Href("/ac")},
-		{Rel: []string{"up"}, Href: sf.Href("/")},
+		// Nested under Power control, not the root overview (NoRootLink).
+		{Rel: []string{"up"}, Href: sf.Href("/power")},
 	}
 	e.Actions = sf.actionsFor(state, "ac-on", "ac-off")
 	return e, http.StatusOK, nil
