@@ -7,10 +7,10 @@ import (
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
-// Routes is this surface's complete slice of the API: the two read-only
-// status/job resources, the rack-fan resource, the cluster-wide power pair,
-// the every-f-host pair, a power pair per f-host, and the fan plug's own
-// on/off actions.
+// Routes is this surface's complete slice of the API: the two section
+// folders (Power control for host wake/shutdown, AC control for Shelly
+// plugs), the read-only status/job resources, the cluster-wide and all-hosts
+// power pairs, a power pair per f-host, and each plug's on/off actions.
 //
 // The per-host routes are generated from sf.Inv, the inventory this surface
 // was configured with, NOT from inventory.Default(): power.New, ProbeAll and
@@ -23,27 +23,30 @@ import (
 // argv from these same routes, so the CLI<->API<->job contract would miss the
 // host as well.
 func (sf *Surface) Routes() []contract.Route {
-	return sf.section(
-		sf.resourceRoutes(),
+	// Two OpenAPI / Siren sections live in this package: host Power control
+	// and Shelly AC control. They share the engine but are separate root
+	// folders so the overview menu stays domain-shaped.
+	out := sf.section(contract.SectionPower,
+		sf.powerResourceRoutes(),
 		sf.clusterRoutes(),
 		sf.allHostsRoutes(),
 		sf.hostsRoutes(),
+	)
+	return append(out, sf.section(contract.SectionAC,
+		sf.acResourceRoutes(),
 		sf.fanRoutes(),
 		sf.acRoutes(),
-	)
+	)...)
 }
 
-// section stamps every route this surface declares with this package's OpenAPI
-// tag (contract.SectionPower), in one place. The package split IS the section
-// split -- that is what "one domain per surface package" means on the wire --
-// so stamping here means a route added to any of this package's route methods
-// is sectioned correctly with no chance of being forgotten. See
-// contract.Route.Section and openapi.go's sections.
-func (sf *Surface) section(groups ...[]contract.Route) []contract.Route {
+// section stamps every route in groups with the given OpenAPI / folder
+// section tag. powerapi declares two sections (Power and AC); callers pass
+// which one. See contract.Route.Section and openapi.go's sections.
+func (sf *Surface) section(sec string, groups ...[]contract.Route) []contract.Route {
 	var out []contract.Route
 	for _, g := range groups {
 		for i := range g {
-			g[i].Section = contract.SectionPower
+			g[i].Section = sec
 		}
 		out = append(out, g...)
 	}
@@ -64,19 +67,17 @@ func (sf *Surface) hostsRoutes() []contract.Route {
 	return out
 }
 
-// resourceRoutes is the read-only power resources: the power section folder,
-// the status overview, the current-or-last job, the rack-fan plug, and the
-// f-host AC plug. Navigable resources rendered in "links", never in "actions"
-// (see TestGETRoutesAreLinksNotActions). None of these takes a CLIVerb -- they
-// are followed by relation, not invoked by a CLI verb.
+// powerResourceRoutes is the host-power navigable resources: the Power
+// control folder, status overview, and current-or-last job. (Shelly plugs
+// live under acResourceRoutes.) Navigable resources are rendered in "links",
+// never in "actions" (see TestGETRoutesAreLinksNotActions).
 //
 // The /power folder is section navigation and the root's "power" rel: a GET
-// resource whose actions list is every power operation possible right now
-// (see handlePowerFolder), replacing the flat actions list the ROOT used to
-// carry. It is NOT SkipsProbe -- its actions are judged on fleet state -- so
-// unlike the root itself a folder render still pays the probe. The AC plug is
-// NoRootLink: it is reached through that folder, not as its own root section.
-func (sf *Surface) resourceRoutes() []contract.Route {
+// resource whose actions list is every host power operation possible right
+// now (see handlePowerFolder). It is NOT SkipsProbe -- its actions are judged
+// on fleet state -- so unlike the root itself a folder render still pays the
+// probe.
+func (sf *Surface) powerResourceRoutes() []contract.Route {
 	return []contract.Route{
 		{
 			Name: "power", Title: "Power control",
@@ -96,17 +97,28 @@ func (sf *Surface) resourceRoutes() []contract.Route {
 			SkipsProbe: true,
 			Handle:     sf.handleJob,
 		},
+	}
+}
+
+// acResourceRoutes is the Shelly-plug navigable resources: the AC control
+// folder and the two plugs (rack fans on shelly1, f-host mains on shelly2).
+// Both plugs are NoRootLink -- reached through /ac-control, peer to /power.
+func (sf *Surface) acResourceRoutes() []contract.Route {
+	return []contract.Route{
+		{
+			Name: "ac-control", Title: "AC control",
+			Method: http.MethodGet, Path: "/ac-control",
+			Handle: sf.handleACControlFolder,
+		},
 		{
 			Name: "fans", Title: "Rack fan plug",
 			Method: http.MethodGet, Path: "/fans",
-			Handle: sf.handleFans,
+			NoRootLink: true,
+			Handle:     sf.handleFans,
 		},
 		{
 			Name: "ac", Title: "F-host mains AC plug",
 			Method: http.MethodGet, Path: "/ac",
-			// NoRootLink: reached through the /power folder (Power control),
-			// same nesting as monitoring under /gogios -- it is a power-domain
-			// resource, not an overview-level section of its own.
 			NoRootLink: true,
 			Handle:     sf.handleAC,
 		},

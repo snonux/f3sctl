@@ -97,8 +97,8 @@ type Surface struct {
 	// whole surface (the status route). ActionsFor renders the actions list of
 	// a resource that advertises only its own controls. SectionActions
 	// renders every action of one whole API section (contract.Route.Section)
-	// -- what the /power folder offers: every power operation the route
-	// table declares, judged state by state, without the folder naming any
+	// -- what a section folder offers (/power for host power, /ac-control for
+	// Shelly plugs), judged state by state, without the folder naming any
 	// action by hand. In production the composition root injects its Router
 	// bound methods here, so the Siren action shape (name, title, method,
 	// href, cliVerb, fields) has exactly one source; a surface never renders

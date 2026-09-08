@@ -200,9 +200,9 @@ async function waitForJob(entry, timeoutMs = null) {
 }
 
 // holderRel is a single root-level rel, or a slash-separated chain through
-// section folders (e.g. "power/ac", "gogios/monitoring"). Power operations
-// live on the /power folder; fan switches on /fans; AC switches on /ac via
-// Power control; the monitoring pair on /monitoring via Gogios.
+// section folders (e.g. "ac-control/fans", "gogios/monitoring"). Host power
+// lives on /power; Shelly plugs on /ac-control (fans + f-host AC); the
+// monitoring pair on /monitoring via Gogios.
 async function run(name, confirm, holderRel) {
   const entry = await root();
   let holder = entry;
@@ -235,11 +235,13 @@ async function selftest() {
   const check = (ok, msg) => console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`);
 
   check(typeof entry.properties.apiVersion === 'number', 'root carries apiVersion');
-  check(['status', 'fans', 'job', 'describedby', 'power', 'gogios'].every((r) => {
+  check(['status', 'job', 'describedby', 'power', 'ac-control', 'gogios'].every((r) => {
     try { follow(entry, r); return true; } catch { return false; }
   }), 'root links to the section folders and read-only resources');
+  check((() => { try { follow(entry, 'fans'); return false; } catch { return true; } })(),
+    'fans is not a root section (reached through AC control)');
   check((() => { try { follow(entry, 'ac'); return false; } catch { return true; } })(),
-    'ac is not a root section (reached through Power control)');
+    'ac is not a root section (reached through AC control)');
   check((() => { try { follow(entry, 'monitoring'); return false; } catch { return true; } })(),
     'monitoring is not a root section (reached through Gogios)');
 
@@ -247,10 +249,13 @@ async function selftest() {
   check(hosts.length > 0, 'status embeds host entities');
   check(hosts.every((h) => 'ping' in h && 'ssh' in h), 'hosts report ping and ssh separately');
 
-  // Actions live on the power folder, not the root (CLIENT.md §3).
+  // Host power actions live on the power folder; Shelly plugs on AC control.
   const power = await request(follow(entry, 'power'));
-  check((() => { try { follow(power, 'ac'); return true; } catch { return false; } })(),
-    'Power control links to the f-host AC plug');
+  const acControl = await request(follow(entry, 'ac-control'));
+  check((() => { try { follow(acControl, 'fans'); return true; } catch { return false; } })(),
+    'AC control links to the rack fan plug');
+  check((() => { try { follow(acControl, 'ac'); return true; } catch { return false; } })(),
+    'AC control links to the f-host AC plug');
 
   // The heart of the design: offered actions must match observed state.
   const allUp = hosts.filter((h) => h.name !== 'f3' && h.name.startsWith('f')).every((h) => h.ping);
@@ -267,22 +272,22 @@ async function selftest() {
     'all-off is offered exactly when an f-host answers SSH');
 
   const fans = entities(status, 'fans')[0]?.properties ?? {};
-  check(!!action(power, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
+  check(!!action(acControl, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
 
   const ac = entities(status, 'ac')[0]?.properties ?? {};
-  check(!!action(power, 'ac-off') === (ac.on === true && !ac.error), 'ac-off is offered only when the AC plug is on');
+  check(!!action(acControl, 'ac-off') === (ac.on === true && !ac.error), 'ac-off is offered only when the AC plug is on');
 
   // A host that could not be probed counts as running: the fan plug cools the
   // rack, and an unmeasured host is not a host known to be off. That is the
   // server's rule, so it is the one to check against. Fan guard excludes f3;
   // AC guard includes it.
-  const off = action(power, 'fans-off');
+  const off = action(acControl, 'fans-off');
   const mayBeUpFans = hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && (h.ping || h.pingKnown === false));
   if (off) {
     check((off.fields?.length > 0) === mayBeUpFans,
       'fans-off carries a confirmation field exactly while an f0-f2 host may be running');
   }
-  const acOff = action(power, 'ac-off');
+  const acOff = action(acControl, 'ac-off');
   const mayBeUpAC = hosts.some((h) => h.name.startsWith('f') && (h.ping || h.pingKnown === false));
   if (acOff) {
     check((acOff.fields?.length > 0) === mayBeUpAC,
@@ -310,10 +315,10 @@ const commands = {
   'f3-off': () => run('f3-off', undefined, 'power'),
   'monitoring-mute': () => run('monitoring-mute', undefined, 'gogios/monitoring'),
   'monitoring-unmute': () => run('monitoring-unmute', undefined, 'gogios/monitoring'),
-  'fans-on': () => run('fans-on', undefined, 'fans'),
-  'fans-off': () => run('fans-off', true, 'fans'),
-  'ac-on': () => run('ac-on', undefined, 'power/ac'),
-  'ac-off': () => run('ac-off', true, 'power/ac'),
+  'fans-on': () => run('fans-on', undefined, 'ac-control/fans'),
+  'fans-off': () => run('fans-off', true, 'ac-control/fans'),
+  'ac-on': () => run('ac-on', undefined, 'ac-control/ac'),
+  'ac-off': () => run('ac-off', true, 'ac-control/ac'),
   selftest,
 };
 

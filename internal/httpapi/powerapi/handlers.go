@@ -77,13 +77,10 @@ func (sf *Surface) sectionActions(state contract.State, section string) []contra
 	return sf.SectionActions(state, section)
 }
 
-// handlePowerFolder renders the power section folder: a compact index of the
-// domain. Its links are the power resources (status, job, the fan plug, the
-// f-host AC plug); its actions are every power operation the route table
-// offers right now -- the cluster-wide, all-hosts and per-host pairs plus the
-// fan and AC switch pairs -- the same state-dependent offer the ROOT used to
-// carry in one flat list, moved here so a browser's overview menu is folders
-// rather than a dozen controls.
+// handlePowerFolder renders the Power control section folder: host wake and
+// shutdown. Its links are status and job; its actions are every host power
+// operation the route table offers right now. Shelly plug switches live on
+// the sibling AC control folder (/ac-control).
 //
 // It looks up nothing by hand: SectionActions narrows the route table's own
 // offer by contract.Route.Section, so a power action added to the surface is
@@ -101,10 +98,26 @@ func (sf *Surface) handlePowerFolder(_ context.Context, state contract.State, _ 
 			{Rel: []string{"up"}, Href: sf.Href("/")},
 			{Rel: []string{"status"}, Href: sf.Href(StatusPath)},
 			{Rel: []string{"job"}, Href: sf.Href(JobPath)},
+		},
+		Actions: sf.sectionActions(state, contract.SectionPower),
+	}, http.StatusOK, nil
+}
+
+// handleACControlFolder renders the AC control section folder: both Shelly
+// plugs (rack fans on shelly1, f-host mains on shelly2). Peer to Power
+// control on the root; plug resources are NoRootLink and reached from here.
+func (sf *Surface) handleACControlFolder(_ context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
+	return contract.Entity{
+		Class:      []string{"ac-control", "section"},
+		Title:      "AC control",
+		Properties: map[string]any{"node": sf.Node},
+		Links: []contract.Link{
+			{Rel: []string{"self"}, Href: sf.Href("/ac-control")},
+			{Rel: []string{"up"}, Href: sf.Href("/")},
 			{Rel: []string{"fans"}, Href: sf.Href("/fans")},
 			{Rel: []string{"ac"}, Href: sf.Href("/ac")},
 		},
-		Actions: sf.sectionActions(state, contract.SectionPower),
+		Actions: sf.sectionActions(state, contract.SectionAC),
 	}, http.StatusOK, nil
 }
 
@@ -157,7 +170,8 @@ func (sf *Surface) handleFans(_ context.Context, state contract.State, _ contrac
 	e.Title = "Rack fan plug"
 	e.Links = []contract.Link{
 		{Rel: []string{"self"}, Href: sf.Href("/fans")},
-		{Rel: []string{"up"}, Href: sf.Href("/")},
+		// Nested under AC control, not the root overview (NoRootLink).
+		{Rel: []string{"up"}, Href: sf.Href("/ac-control")},
 	}
 	e.Actions = sf.actionsFor(state, "fans-on", "fans-off")
 	return e, http.StatusOK, nil
@@ -249,8 +263,8 @@ func (sf *Surface) handleAC(_ context.Context, state contract.State, _ contract.
 	e.Title = "F-host mains AC plug"
 	e.Links = []contract.Link{
 		{Rel: []string{"self"}, Href: sf.Href("/ac")},
-		// Nested under Power control, not the root overview (NoRootLink).
-		{Rel: []string{"up"}, Href: sf.Href("/power")},
+		// Nested under AC control, not the root overview (NoRootLink).
+		{Rel: []string{"up"}, Href: sf.Href("/ac-control")},
 	}
 	e.Actions = sf.actionsFor(state, "ac-on", "ac-off")
 	return e, http.StatusOK, nil

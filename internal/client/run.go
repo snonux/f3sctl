@@ -96,14 +96,13 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 // Not every noun's actions live on the root, and since the section folders
 // (see docs/CLIENT.md §3) not even the power actions live there: the root is
 // a folder index, and holderRel is walked through the folders first --
-// "power" resolves to its own /power folder, "ac" through that folder (the
-// f-host AC plug is a Power-control resource, not a root section),
-// "monitoring" through the Gogios folder, "fans" and "gogios" each to the
-// resource the root's own rel offers. Reading the link chain from the
-// documents rather than building a path keeps this discovery-driven: no
-// action name or path is hard-coded, and a noun whose rel the root does not
-// offer simply falls back to the root -- behaviour a server predating the
-// folders (or a fixture without them) still navigates.
+// "power" resolves to its own /power folder, "ac" and "fans" through the
+// AC control folder (both Shelly plugs), "monitoring" through the Gogios
+// folder, "gogios" to the resource the root's own rel offers. Reading the
+// link chain from the documents rather than building a path keeps this
+// discovery-driven: no action name or path is hard-coded, and a noun whose
+// rel the root does not offer simply falls back to the root -- behaviour a
+// server predating the folders (or a fixture without them) still navigates.
 func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force bool) error {
 	root, err := c.Root(ctx)
 	if err != nil {
@@ -172,8 +171,8 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 // holder, the root if none followed.
 var nounHolderPath = map[string][]string{
 	"power":      {"power"},
-	"fans":       {"fans"},
-	"ac":         {"power", "ac"},
+	"fans":       {"ac-control", "fans"},
+	"ac":         {"ac-control", "ac"},
 	"monitoring": {"gogios", "monitoring"},
 	"gogios":     {"gogios"},
 }

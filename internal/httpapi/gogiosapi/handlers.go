@@ -101,8 +101,9 @@ func (sf *Surface) setMute(ctx context.Context, state contract.State, _ contract
 // subject headline, the six summary counts, when it was last updated -- plus
 // the links to each drill-down category and to /monitoring (the separate
 // mute resource), and the whole family's controls: the cache-clear action
-// and the mute/unmute pair. It is one of the two section folders (the other
-// is powerapi's /power), and it is what the root's "gogios" rel resolves to --
+// and the mute/unmute pair. It is one of the section folders (alongside
+// powerapi's /power and /ac-control), and it is what the root's "gogios" rel
+// resolves to --
 // a browser's Gogios menu opens here rather than across six root-level
 // drill-down entries and a mute resource it would have to find separately.
 //

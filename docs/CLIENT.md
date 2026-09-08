@@ -565,16 +565,17 @@ X-API-Key: ...
 ```
 ```json
 { "class": ["f3sctl"],
-  "properties": { "apiVersion": 1, "version": "v0.9.0", "node": "pi0" },
+  "properties": { "apiVersion": 1, "version": "v0.10.1", "node": "pi0" },
   "links": [
-    { "rel": ["power"],  "href": "/cgi-bin/f3sctl/power",  "title": "Power control" },
-    { "rel": ["gogios"], "href": "/cgi-bin/f3sctl/gogios", "title": "Gogios status and alerting" },
-    { "rel": ["status"], "href": "/cgi-bin/f3sctl/status" }, ... ] }
+    { "rel": ["power"],      "href": "/cgi-bin/f3sctl/power",      "title": "Power control" },
+    { "rel": ["ac-control"], "href": "/cgi-bin/f3sctl/ac-control", "title": "AC control" },
+    { "rel": ["gogios"],     "href": "/cgi-bin/f3sctl/gogios",     "title": "Gogios status and alerting" },
+    { "rel": ["status"],     "href": "/cgi-bin/f3sctl/status" }, ... ] }
 ```
 
-The root is a **folder index**: it never carries actions. Its two section
-folders — power and Gogios — are where the operations live, each following its
-own domain:
+The root is a **folder index**: it never carries actions. Its section
+folders — Power control, AC control, and Gogios — are where the operations
+live, each following its own domain:
 
 ```json
 { "class": ["power", "section"],
@@ -582,13 +583,24 @@ own domain:
   "links": [ { "rel": ["status"], "href": "/cgi-bin/f3sctl/status" }, ... ],
   "actions": [
     { "name": "power-off", "method": "POST", "href": "/cgi-bin/f3sctl/power/off" },
-    { "name": "f3-on",     "method": "POST", "href": "/cgi-bin/f3sctl/power/f3/on" },
-    { "name": "fans-off",  "method": "POST", "href": "/cgi-bin/f3sctl/fans/off", "fields": [...] } ] }
+    { "name": "f3-on",     "method": "POST", "href": "/cgi-bin/f3sctl/power/f3/on" } ] }
 ```
 
-Note what is **not** there: no `power-on` (everything is already up), no
-`fans-on` (already on). The client renders three buttons because it was given
-three actions.
+```json
+{ "class": ["ac-control", "section"],
+  "title": "AC control",
+  "links": [
+    { "rel": ["fans"], "href": "/cgi-bin/f3sctl/fans" },
+    { "rel": ["ac"],   "href": "/cgi-bin/f3sctl/ac" } ],
+  "actions": [
+    { "name": "fans-off", "method": "POST", "href": "/cgi-bin/f3sctl/fans/off", "fields": [...] },
+    { "name": "ac-off",   "method": "POST", "href": "/cgi-bin/f3sctl/ac/off",   "fields": [...] } ] }
+```
+
+Note what is **not** on Power control: no `power-on` (everything is already
+up), and no Shelly plug switches (those are on AC control). Note what is
+**not** on AC control: no `fans-on` / `ac-on` (already on). The client
+renders the buttons it was given.
 
 The Gogios folder (`rel: gogios`, class `gogios, section`) is the same idea for
 the alerting domain: its links lead to each report drill-down and to
@@ -609,8 +621,8 @@ X-API-Key: ...
 → `202`. Poll `/status`; the f-hosts lose `ssh`, then `ping`. Meanwhile the
 power folder offers **no** power actions at all, because a job is running.
 
-When it finishes, the power folder offers `power-on` and `fans-on`, and
-nothing else.
+When it finishes, the power folder offers `power-on`, and AC control offers
+`fans-on` once the plug is off.
 
 ---
 
@@ -630,17 +642,17 @@ project assumes — you will never see the refusal anyway.
 
 **Stable — a client may rely on these:**
 
-- `rel` names: `self`, `status`, `fans`, `job`, `describedby`, `up` — plus the
-  two section folders `power` and `gogios` on the root: every operation is
-  reachable from what those offer, and a client that renders only the root's
-  folders and the read-only resources is rendering the whole API. Nested under
-  those folders (not on the root): `ac` under Power control, `monitoring` and
-  the Gogios drill-downs under Gogios
+- `rel` names: `self`, `status`, `job`, `describedby`, `up` — plus the
+  three section folders `power`, `ac-control` and `gogios` on the root: every
+  operation is reachable from what those offer, and a client that renders only
+  the root's folders and the read-only resources is rendering the whole API.
+  Nested under those folders (not on the root): `fans` and `ac` under AC
+  control, `monitoring` and the Gogios drill-downs under Gogios
 - action `name`s: `power-on`, `power-off`, `f3-on`, `f3-off`, `fans-on`,
   `fans-off`, `ac-on`, `ac-off`, `monitoring-mute`, `monitoring-unmute`,
   `gogios-cache-clear` — advertised where their section folder puts them
-  (power operations including fans/ac on `/power`'s actions; the mute pair on
-  `/monitoring` and on the `/gogios` folder), never on the root
+  (host power on `/power`; Shelly plug switches on `/ac-control`; the mute
+  pair on `/monitoring` and on the `/gogios` folder), never on the root
 - `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans and ac (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,
   `node`, `error`)
@@ -657,12 +669,13 @@ project assumes — you will never see the refusal anyway.
 
 A machine-readable description of the surface is at the `describedby` link
 (`/openapi.json`), generated from the same registry that serves requests. It
-groups the operations into two sections by tag — **Power** (rack control:
-status, jobs, the power pairs, the fan and f-host AC plugs) and **Gogios** (alerting: the
-mute pair and the alert-report browse), with **API** covering the entry point
-itself — so a generated reader shows the two domains separately. It describes
-what exists in general; the Siren responses describe what is possible now.
-When they seem to disagree, the Siren response is the one to act on.
+groups the operations into sections by tag — **Power** (host wake/shutdown,
+status, jobs), **AC** (rack-fan and f-host mains Shelly plugs), and **Gogios**
+(alerting: the mute pair and the alert-report browse), with **API** covering
+the entry point itself — so a generated reader shows the domains separately.
+It describes what exists in general; the Siren responses describe what is
+possible now. When they seem to disagree, the Siren response is the one to
+act on.
 
 ---
 

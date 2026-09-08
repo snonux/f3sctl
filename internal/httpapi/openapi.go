@@ -70,12 +70,13 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 		"info": map[string]any{
 			"title":   "f3sctl",
 			"version": internal.Version,
-			"description": "Power, status and rack-fan control for the f3s homelab. " +
-				"Operations are grouped into two sections: Power (the rack -- status, " +
-				"jobs, power operations, the fan plug) and Gogios (alerting -- the mute " +
-				"pair and the alert-report browse), with API covering the entry point " +
-				"itself. Hypermedia (Siren): fetch the root and follow what it offers " +
-				"rather than hard-coding these paths.",
+			"description": "Power, status and Shelly-plug control for the f3s homelab. " +
+				"Operations are grouped into sections: Power (host wake/shutdown, " +
+				"status, jobs), AC (rack-fan and f-host mains Shelly plugs), and " +
+				"Gogios (alerting -- the mute pair and the alert-report browse), " +
+				"with API covering the entry point itself. Hypermedia (Siren): " +
+				"fetch the root and follow what it offers rather than hard-coding " +
+				"these paths.",
 		},
 		// The sections: one tag object per contract.Route.Section a route
 		// declares, in the fixed order of the sections table below. This is
@@ -108,9 +109,10 @@ type section struct {
 	Description string
 }
 
-// sections is the tag vocabulary: power and gogios as separate sections,
-// plus the entry-point resources. Each description says what belongs there,
-// the same split the surface packages (powerapi, gogiosapi) draw in Go.
+// sections is the tag vocabulary: power, AC (Shelly plugs), and gogios as
+// separate sections, plus the entry-point resources. Each description says
+// what belongs there; powerapi declares both Power and AC, gogiosapi declares
+// Gogios.
 var sections = []section{
 	{
 		Name: contract.SectionAPI,
@@ -119,9 +121,13 @@ var sections = []section{
 	},
 	{
 		Name: contract.SectionPower,
-		Description: "Rack control: the status and job resources, the rack-fan and " +
-			"f-host AC plugs, the cluster-wide (f0/f1/f2), all-hosts (f0-f3) and " +
-			"per-host power pairs, and the fans/ac on/off actions.",
+		Description: "Host power control: the status and job resources, the " +
+			"cluster-wide (f0/f1/f2), all-hosts (f0-f3) and per-host power pairs.",
+	},
+	{
+		Name: contract.SectionAC,
+		Description: "Shelly plug control: the rack-fan plug (shelly1) and the " +
+			"f-host mains AC plug (shelly2), with their on/off actions.",
 	},
 	{
 		Name: contract.SectionGogios,

@@ -16,11 +16,10 @@ import (
 
 // fakeAPI is a minimal stand-in for the httpapi server, wired just well enough
 // to drive the client's --remote path end to end over real HTTP: GET /
-// (root, with links to "fans" and "status"), GET /fans (advertising the
-// fans-off action with its force checkbox, declared by the server's power
-// surface and advertised the way the composition root's Router renders it),
-// POST /fans/off (the action itself), and
-// GET /status (so runAction's post-action showStatus has somewhere to land).
+// (root, with links to "ac-control" and "status"), GET /ac-control (linking
+// to "fans"), GET /fans (advertising the fans-off action with its force
+// checkbox), POST /fans/off (the action itself), and GET /status (so
+// runAction's post-action showStatus has somewhere to land).
 //
 // This is deliberately not a copy of httpapi's own Siren rendering -- it only
 // has to satisfy the wire contract client.Entity decodes, the same contract
@@ -70,6 +69,8 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/" && r.Method == http.MethodGet:
 		f.handleRoot(w)
+	case r.URL.Path == "/ac-control" && r.Method == http.MethodGet:
+		f.handleACControl(w)
 	case r.URL.Path == "/fans" && r.Method == http.MethodGet:
 		f.handleFans(w)
 	case r.URL.Path == "/fans/off" && r.Method == http.MethodPost:
@@ -81,15 +82,23 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRoot answers GET / with the two links runAction needs to reach the
-// fans-off action and the post-action status: "fans" and "status".
+// handleRoot answers GET / with the section-folder link runAction needs to
+// reach fans-off ("ac-control") and "status" for the post-action showStatus.
 func (f *fakeAPI) handleRoot(w http.ResponseWriter) {
 	writeEntity(w, Entity{
 		Properties: map[string]any{"apiVersion": float64(SupportedAPIVersion)},
 		Links: []Link{
-			{Rel: []string{"fans"}, Href: "/fans"},
+			{Rel: []string{"ac-control"}, Href: "/ac-control"},
 			{Rel: []string{"status"}, Href: "/status"},
 		},
+	})
+}
+
+// handleACControl answers GET /ac-control with the fans plug link.
+func (f *fakeAPI) handleACControl(w http.ResponseWriter) {
+	writeEntity(w, Entity{
+		Class: []string{"ac-control", "section"},
+		Links: []Link{{Rel: []string{"fans"}, Href: "/fans"}},
 	})
 }
 

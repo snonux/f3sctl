@@ -106,15 +106,15 @@ func (s *Server) handleRoot(_ context.Context, _ contract.State, _ contract.Requ
 		},
 		// The root is a foldER index, deliberately carrying no actions of
 		// its own: every operation lives in its section folder instead --
-		// power operations on the /power folder, the Gogios mute pair and
-		// the report cache clear on the /gogios one -- so a browser pointing
-		// at the overview sees two folders and the read-only resources, not
-		// a dozen operations (see docs/CLIENT.md §3). Only possible actions
-		// are ever advertised, and none of these are, because the root
-		// renders none at all -- which is also why this route is
-		// SkipsProbe: nothing here depends on fleet state, so fetching
-		// the entry point stops paying the ~3s probe every menu render
-		// used to cost (see rz0 for the flag's discipline).
+		// host power on /power, Shelly plugs on /ac-control, the Gogios mute
+		// pair and the report cache clear on /gogios -- so a browser pointing
+		// at the overview sees the section folders and the read-only
+		// resources, not a dozen operations (see docs/CLIENT.md §3). Only
+		// possible actions are ever advertised, and none of these are,
+		// because the root renders none at all -- which is also why this
+		// route is SkipsProbe: nothing here depends on fleet state, so
+		// fetching the entry point stops paying the ~3s probe every menu
+		// render used to cost (see rz0 for the flag's discipline).
 		Links: s.router.Links(),
 	}, http.StatusOK, nil
 }

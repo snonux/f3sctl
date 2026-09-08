@@ -232,15 +232,14 @@ func TestIsGogiosAgreesWithParseGogiosArgs(t *testing.T) {
 }
 
 // fakeRemoteAPI is a minimal Siren-over-HTTP fixture for driving runRemote
-// end to end: GET / (root, linking to "fans" and "status"), GET /fans
-// (advertising fans-off with its required force checkbox, declared by the
-// server's power surface and advertised the way the composition root's Router
-// renders it), POST /fans/off, and GET /status (so
-// runAction's post-action showStatus has somewhere to land). It exists
-// because internal/client's own fake (internal/client/remote_test.go) is
-// unexported and this test wants to pin the *cli-side* wiring -- runRemote
-// itself, and parseGlobalFlags/useAPI feeding it -- not just the client
-// package in isolation.
+// end to end: GET / (root, linking to "ac-control" and "status"), GET
+// /ac-control (linking to "fans"), GET /fans (advertising fans-off with its
+// required force checkbox), POST /fans/off, and GET /status (so runAction's
+// post-action showStatus has somewhere to land). It exists because
+// internal/client's own fake (internal/client/remote_test.go) is unexported
+// and this test wants to pin the *cli-side* wiring -- runRemote itself, and
+// parseGlobalFlags/useAPI feeding it -- not just the client package in
+// isolation.
 type fakeRemoteAPI struct {
 	srv     *httptest.Server
 	wantKey string
@@ -274,6 +273,8 @@ func (f *fakeRemoteAPI) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/" && r.Method == http.MethodGet:
 		f.handleRoot(w)
+	case r.URL.Path == "/ac-control" && r.Method == http.MethodGet:
+		f.handleACControl(w)
 	case r.URL.Path == "/fans" && r.Method == http.MethodGet:
 		f.handleFans(w)
 	case r.URL.Path == "/fans/off" && r.Method == http.MethodPost:
@@ -285,15 +286,23 @@ func (f *fakeRemoteAPI) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRoot answers GET / with the two links runAction needs: "fans", to
-// find the fans-off action, and "status", for the post-action showStatus.
+// handleRoot answers GET / with the section-folder link runAction needs
+// ("ac-control") and "status" for the post-action showStatus.
 func (f *fakeRemoteAPI) handleRoot(w http.ResponseWriter) {
 	writeRemoteEntity(w, client.Entity{
 		Properties: map[string]any{"apiVersion": float64(client.SupportedAPIVersion)},
 		Links: []client.Link{
-			{Rel: []string{"fans"}, Href: "/fans"},
+			{Rel: []string{"ac-control"}, Href: "/ac-control"},
 			{Rel: []string{"status"}, Href: "/status"},
 		},
+	})
+}
+
+// handleACControl answers GET /ac-control with the fans plug link.
+func (f *fakeRemoteAPI) handleACControl(w http.ResponseWriter) {
+	writeRemoteEntity(w, client.Entity{
+		Class: []string{"ac-control", "section"},
+		Links: []client.Link{{Rel: []string{"fans"}, Href: "/fans"}},
 	})
 }
 

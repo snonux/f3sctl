@@ -12,8 +12,12 @@ const (
 	// URLs a client knows without following any other link first. Routes of
 	// the composition root's resourceRoutes declare it inline.
 	SectionAPI = "API"
-	// SectionPower is everything the rack concerns: powerapi.
+	// SectionPower is host power control: wake/shutdown jobs and status.
 	SectionPower = "Power"
+	// SectionAC is the Shelly plugs (rack fans and f-host mains AC).
+	// Declared from powerapi alongside SectionPower: both share the engine,
+	// but they are separate section folders on the root.
+	SectionAC = "AC"
 	// SectionGogios is alerting: gogiosapi.
 	SectionGogios = "Gogios"
 )

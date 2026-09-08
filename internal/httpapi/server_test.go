@@ -459,10 +459,9 @@ func hasAction(e servedEntity, name string) bool {
 
 // TestRootIsAFolderIndex pins the folder-shaped overview: the root carries no
 // actions of its own -- every operation lives in its section folder -- and
-// its links are the two section folders plus the read-only resources. The
-// drill-downs and the mute resource must NOT be linked from the root: they
-// are what the folders are for. See handleRoot's folder comment and
-// enrichState's folder routes.
+// its links are the section folders plus the read-only resources. The
+// drill-downs, mute resource, and Shelly plugs must NOT be linked from the
+// root: they are what the folders are for. See handleRoot's folder comment.
 func TestRootIsAFolderIndex(t *testing.T) {
 	srv, pc := countingServer(t)
 	e := getEntity(t, srv, "/")
@@ -470,12 +469,12 @@ func TestRootIsAFolderIndex(t *testing.T) {
 	if len(e.Actions) != 0 {
 		t.Errorf("root actions = %v, want none: the operations live in the section folders", actionNames(e))
 	}
-	for _, rel := range []string{"self", "describedby", "power", "status", "job", "fans", "gogios"} {
+	for _, rel := range []string{"self", "describedby", "power", "ac-control", "status", "job", "gogios"} {
 		if !hasServedRel(e.Links, rel) {
 			t.Errorf("root links = %+v, missing rel %q", e.Links, rel)
 		}
 	}
-	for _, rel := range []string{"monitoring", "gogios-critical", "ac"} {
+	for _, rel := range []string{"monitoring", "gogios-critical", "fans", "ac"} {
 		if hasServedRel(e.Links, rel) {
 			t.Errorf("root links = %+v carry rel %q: that belongs in its section folder", e.Links, rel)
 		}
@@ -520,11 +519,10 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 }
 
-// TestPowerFolderOffersThePowerActions pins that /power is the one overview
-// of the domain: with a fleet up and cooling, the folder advertises the
-// shutdowns it can actually perform and the fans-off confirmation, withholds
-// what cannot work (waking an up host), and links its own resources. This is
-// the list the ROOT used to carry -- see handlePowerFolder and handleRoot.
+// TestPowerFolderOffersThePowerActions pins that /power is host power only:
+// with a fleet up, the folder advertises the shutdowns it can actually
+// perform, withholds what cannot work (waking an up host), and does not
+// carry Shelly plug actions (those live on /ac-control).
 func TestPowerFolderOffersThePowerActions(t *testing.T) {
 	hosts := []power.HostStatus{
 		{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
@@ -537,19 +535,54 @@ func TestPowerFolderOffersThePowerActions(t *testing.T) {
 	if e.Title != "Power control" {
 		t.Errorf("title = %q, want %q", e.Title, "Power control")
 	}
-	for _, name := range []string{"power-off", "all-off", "f0-off", "fans-off", "ac-off"} {
+	for _, name := range []string{"power-off", "all-off", "f0-off"} {
 		if !hasAction(e, name) {
-			t.Errorf("power folder actions = %v, want %s offered (the fleet is up and the plugs are on)", actionNames(e), name)
+			t.Errorf("power folder actions = %v, want %s offered (the fleet is up)", actionNames(e), name)
 		}
 	}
-	for _, name := range []string{"power-on", "all-on", "f0-on", "fans-on", "ac-on"} {
+	for _, name := range []string{"power-on", "all-on", "f0-on", "fans-off", "ac-off", "fans-on", "ac-on"} {
 		if hasAction(e, name) {
-			t.Errorf("power folder actions = %v, want %s withheld: only possible actions are ever advertised", actionNames(e), name)
+			t.Errorf("power folder actions = %v, want %s withheld (plugs are on AC control)", actionNames(e), name)
 		}
 	}
-	for _, rel := range []string{"self", "up", "status", "job", "fans", "ac"} {
+	for _, rel := range []string{"self", "up", "status", "job"} {
 		if !hasServedRel(e.Links, rel) {
 			t.Errorf("power folder links = %+v, missing rel %q", e.Links, rel)
+		}
+	}
+	for _, rel := range []string{"fans", "ac"} {
+		if hasServedRel(e.Links, rel) {
+			t.Errorf("power folder links = %+v carry rel %q: that belongs on AC control", e.Links, rel)
+		}
+	}
+}
+
+// TestACControlFolderOffersThePlugActions pins that /ac-control is the
+// Shelly-plug overview: with plugs on it advertises fans-off and ac-off,
+// withholds the already-on switches, and links both plugs.
+func TestACControlFolderOffersThePlugActions(t *testing.T) {
+	hosts := []power.HostStatus{
+		{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
+	}
+	srv := folderServer(t, hosts, nil)
+	e := getEntity(t, srv, "/ac-control")
+
+	if e.Title != "AC control" {
+		t.Errorf("title = %q, want %q", e.Title, "AC control")
+	}
+	for _, name := range []string{"fans-off", "ac-off"} {
+		if !hasAction(e, name) {
+			t.Errorf("ac-control folder actions = %v, want %s offered (plugs are on)", actionNames(e), name)
+		}
+	}
+	for _, name := range []string{"fans-on", "ac-on", "power-off", "all-off"} {
+		if hasAction(e, name) {
+			t.Errorf("ac-control folder actions = %v, want %s withheld", actionNames(e), name)
+		}
+	}
+	for _, rel := range []string{"self", "up", "fans", "ac"} {
+		if !hasServedRel(e.Links, rel) {
+			t.Errorf("ac-control folder links = %+v, missing rel %q", e.Links, rel)
 		}
 	}
 }
