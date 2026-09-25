@@ -572,6 +572,93 @@ func TestOnAbortsWhenWakeFails(t *testing.T) {
 	}
 }
 
+// TestRewakeResendsToEveryHostAndLogsFailures pins Engine.rewake: every host of
+// the wake gets another magic packet, and one host's send error is logged
+// without stopping the packets to the hosts after it.
+func TestRewakeResendsToEveryHostAndLogsFailures(t *testing.T) {
+	power := &fakePower{wakeErr: map[string]error{"f1": errors.New("network is unreachable")}}
+	eng := &Engine{power: power}
+	hosts := []inventory.Host{{Name: "f0"}, {Name: "f1"}, {Name: "f2"}, {Name: "f3"}}
+
+	var log bytes.Buffer
+	eng.rewake(&log, hosts)
+
+	if got := power.wakeCalls(); strings.Join(got, ",") != "f0,f1,f2,f3" {
+		t.Errorf("Wake calls = %v, want every host re-woken, f1's failure notwithstanding", got)
+	}
+	if !strings.Contains(log.String(), "re-sending the magic packet to f1") {
+		t.Errorf("log = %q, want f1's failed re-send reported", log.String())
+	}
+}
+
+// TestOnFailsAndUnmutesWhenANodeNeverComesBack pins on()'s timeout path: the
+// wake returns an error naming the missing node rather than claiming success,
+// and Gogios is still un-muted so that node alerts.
+func TestOnFailsAndUnmutesWhenANodeNeverComesBack(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, false)
+	eng := testEngine(t, shelly)
+	eng.fans = &fakeFans{}
+	eng.power = &fakePower{}
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	eng.monitor = newTestMonitor(t, verb, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1", "r2"}, -time.Second)
+
+	var log bytes.Buffer
+	err := eng.On(context.Background(), &log)
+	if !errors.Is(err, ErrClusterIncomplete) || !strings.Contains(err.Error(), "wake incomplete") ||
+		!strings.HasSuffix(err.Error(), ": r0") {
+		t.Fatalf("On err = %v, want an incomplete wake naming r0", err)
+	}
+	if got := verb.callsList(); len(got) != 1 || got[0] != "gogios-unmute:blowfish" {
+		t.Errorf("gateway calls = %v, want Gogios un-muted despite the missing node", got)
+	}
+	if strings.Contains(log.String(), "All k3s nodes answer") {
+		t.Errorf("log = %q, must not claim the cluster answered", log.String())
+	}
+}
+
+// TestOnResendsMagicPacketsWhileTheClusterIsDown pins the rewake wiring in
+// on(): while a node stays down the woken hosts get their packets again, so
+// Wake is called more than once per host before the cluster answers.
+func TestOnResendsMagicPacketsWhileTheClusterIsDown(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, false)
+	eng := testEngine(t, shelly)
+	eng.fans = &fakeFans{}
+	power := &fakePower{}
+	eng.power = power
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	d := &downForProbes{n: 20}
+	eng.monitor = newTestMonitor(t, verb, d.probe, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
+	eng.monitor.poll = time.Millisecond
+	eng.monitor.rewakeEvery = time.Millisecond
+
+	if err := eng.On(context.Background(), &bytes.Buffer{}); err != nil {
+		t.Fatalf("On: %v", err)
+	}
+	hosts := len(eng.cfg.Inventory.PowerGroup())
+	if got := len(power.wakeCalls()); got <= hosts {
+		t.Errorf("Wake calls = %d for %d hosts, want the packets re-sent while r0 was down", got, hosts)
+	}
+}
+
+// TestOnReportsAGatewayFailureAfterACompleteWake pins the other error: every
+// node came back but one gateway could not be un-muted. That is not an
+// incomplete wake, and the error says so.
+func TestOnReportsAGatewayFailureAfterACompleteWake(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, false)
+	eng := testEngine(t, shelly)
+	eng.fans = &fakeFans{}
+	eng.power = &fakePower{}
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{
+		"gogios-unmute:blowfish": errors.New("ssh: connect timed out"),
+	}}
+	eng.monitor = newTestMonitor(t, verb, (&downForProbes{}).probe, []string{"blowfish"}, []string{"r0"}, time.Minute)
+
+	err := eng.On(context.Background(), &bytes.Buffer{})
+	if err == nil || errors.Is(err, ErrClusterIncomplete) || !strings.Contains(err.Error(), "woke, but") {
+		t.Fatalf("On err = %v, want a complete wake with a failed un-mute", err)
+	}
+}
+
 // TestNFSBackendMountsUsesTheSameSeamAsCheckLocalNFS is the regression test
 // for oz0: execNFS.Mounts used to call the free function localNFSMounts
 // directly instead of going through Engine.localMounts/nfsMounts, the seam

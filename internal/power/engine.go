@@ -9,6 +9,7 @@ package power
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -345,15 +346,46 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 
 	e.reporter().Step("waiting for the k3s nodes, then un-muting Gogios")
 
-	// Un-muting is best-effort: the hosts are already waking, and a monitoring
-	// marker left behind is a smaller problem than reporting the whole wake as
-	// failed. UnmuteGogios prints how to clear it by hand if it gives up.
-	if err := e.UnmuteGogios(ctx, log); err != nil {
-		fmt.Fprintf(log, "  (continuing anyway; the hosts are waking)\n")
+	// While it waits for the cluster, UnmuteGogios re-sends the magic packets
+	// (rewake), since a host can ignore the first one. On timeout it un-mutes
+	// anyway, so a host that never came back alerts instead of hiding behind
+	// the mute, and names the missing nodes. That is the wake's error: the
+	// packets went out, but the cluster did not come back, and a job that
+	// says "done" would contradict the page. A gateway that could not be
+	// un-muted after a complete wake is reported too -- a mute left on one
+	// gateway is a monitoring gap -- but worded as what it is.
+	rewake := func() {
+		e.reporter().Step("re-sending Wake-on-LAN packets to hosts still down")
+		e.rewake(log, hosts)
+		e.reporter().Step("waiting for the k3s nodes, then un-muting Gogios")
+	}
+	if err := e.UnmuteGogios(ctx, log, rewake); err != nil {
+		if errors.Is(err, ErrClusterIncomplete) {
+			return fmt.Errorf("wake incomplete: %w", err)
+		}
+		return fmt.Errorf("woke, but Gogios is not fully un-muted: %w", err)
 	}
 
-	fmt.Fprintln(log, "Magic packets sent. The hosts should be reachable in a minute or so.")
+	fmt.Fprintln(log, "All k3s nodes answer; Gogios monitoring is un-muted.")
 	return nil
+}
+
+// rewake re-sends a magic packet to every host of a wake. Hosts already up
+// ignore it, so there is no need to work out which ones are still down.
+// Failures are logged, not returned: this is a retry of a step that already
+// succeeded once, and the caller keeps waiting either way. A successful
+// re-send refreshes the host's "done" entry in the job's host map.
+func (e *Engine) rewake(log io.Writer, hosts []inventory.Host) {
+	for _, h := range hosts {
+		if err := e.powerBackend().Wake(h); err != nil {
+			// Logged only: the host's first packet already went out, and
+			// marking it failed would leave a failed host in a job that ends
+			// done once the cluster answers.
+			fmt.Fprintf(log, "  ! re-sending the magic packet to %s: %v\n", h.Name, err)
+			continue
+		}
+		e.reporter().HostState(h.Name, HostDone, "magic packet re-sent")
+	}
 }
 
 // Off shuts down the k3s bhyve hosts f0/f1/f2, and switches the rack fans off

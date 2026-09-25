@@ -18,6 +18,7 @@ package power
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -69,6 +70,37 @@ type Monitor struct {
 	// Engine: a test hands it a stub that says "they are all up" and skips
 	// the real ICMP. Wired to Engine.Probe in production.
 	probe func(ctx context.Context, hosts []inventory.Host) []HostStatus
+	// poll is the gap between waitForCluster's probes, and rewakeEvery the
+	// gap between the rewake callbacks it fires while nodes are still down.
+	// Fields only so tests need not wait real seconds; zero means the
+	// defaults (clusterPollInterval, rewakeInterval), read through pollGap
+	// and rewakeGap.
+	poll        time.Duration
+	rewakeEvery time.Duration
+}
+
+// clusterPollInterval is how often waitForCluster re-probes r0/r1/r2.
+const clusterPollInterval = 15 * time.Second
+
+// rewakeInterval is how often the wake path re-sends its magic packets while
+// k3s nodes are still unreachable. A single packet is not reliable: on
+// 2026-09-25 f1 ignored the one "power on" sent, stayed off for seven hours,
+// and a second packet sent by hand woke it first time. Re-sending to a host
+// that is already up is harmless -- a running NIC ignores a magic packet.
+const rewakeInterval = 2 * time.Minute
+
+func (m *Monitor) pollGap() time.Duration {
+	if m.poll <= 0 {
+		return clusterPollInterval
+	}
+	return m.poll
+}
+
+func (m *Monitor) rewakeGap() time.Duration {
+	if m.rewakeEvery <= 0 {
+		return rewakeInterval
+	}
+	return m.rewakeEvery
 }
 
 // NewMonitor builds a Monitor over the gateways and cluster nodes in cfg,
@@ -100,11 +132,13 @@ type GatewayMute struct {
 
 // Status reports, per gateway, whether Gogios is currently muted.
 //
-// This exists because a mute can outlive the shutdown that created it. The wake
-// path un-mutes only after r0/r1/r2 answer, and on giving up it deliberately
-// leaves the marker in place -- so "muted" is a state the fleet can sit in
-// indefinitely with nobody watching. It has to be observable, not merely
-// settable.
+// This exists because a mute can outlive the shutdown that created it: a mute
+// set by "power off" stays until something clears it, and a wake that stops
+// early never reaches the un-mute: the fans would not switch on, a magic
+// packet could not be sent, a gateway could not be reached, or a local run was
+// killed mid-wait. So
+// "muted" is a state the fleet can sit in indefinitely with nobody watching.
+// It has to be observable, not merely settable.
 //
 // Reads the verb through m.verb, the same seam eachGateway's mute and un-mute
 // calls go through, so the transport is fakeable one way rather than carrying
@@ -144,9 +178,10 @@ func AnyMuted(states []GatewayMute) bool {
 //
 // UnmuteGogios is the right call at the end of a wake, where waiting prevents a
 // storm of alerts from a cluster that is still booting. This is the operator's
-// escape hatch for the other case: the fleet is already up, monitoring is
-// still muted because an earlier un-mute timed out, and there is nothing left
-// to wait for. Without it a stranded mute can only be cleared by hand over SSH.
+// escape hatch for the other case: monitoring is still muted with nothing left
+// to wait for -- a "power off" never followed by a wake, a local wake killed
+// mid-wait, or a gateway that could not be reached for the un-mute. Without it
+// a stranded mute can only be cleared by hand over SSH.
 func (m *Monitor) Unmute(ctx context.Context, log io.Writer) error {
 	return m.eachGateway(ctx, log, "gogios-unmute", "un-muted")
 }
@@ -155,54 +190,97 @@ func (m *Monitor) Unmute(ctx context.Context, log io.Writer) error {
 //
 // It waits because the alerts being suppressed are scraped from that cluster:
 // clearing the marker while the nodes are still booting would fire every one
-// of them. It does not wait forever, and on giving up it leaves the marker in
-// place and says so — a stuck mute is a monitoring gap, so the operator needs
-// to know it happened.
+// of them. While it waits it calls rewake (if non-nil) every rewakeGap, so
+// the wake path can re-send magic packets to hosts that ignored the first one.
+//
+// It does not wait forever, and when the budget runs out it un-mutes ANYWAY
+// and returns an error naming the nodes that are missing. Leaving the marker
+// in place on timeout is what hid f1 being down for seven hours on
+// 2026-09-25: the node that failed to come back was exactly the one whose
+// alerts the mute suppressed. A node still down after the budget is an
+// outage, and an outage should page.
+//
+// Only a cancelled context leaves the marker, since then the caller abandoned
+// the wake and nobody asked for monitoring to resume yet; it prints how to
+// clear it by hand. No production path cancels today (the CLI and the API's
+// detached jobs both run on context.Background()), so this is a guard for a
+// future caller, not something an operator's Ctrl-C reaches: a killed local
+// run simply exits and leaves the mute for "f3sctl monitoring unmute".
 //
 // Gogios does expire the marker itself after PrometheusOnlyIfNotExistsMaxS
 // (24h). Relying on that expiry is what hid a two-day audiobookshelf outage in
 // August 2026 after an early wake-up, which is why the wake path clears it
 // explicitly instead.
-func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer) error {
+func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()) error {
 	fmt.Fprintln(log, "Waiting for the k3s nodes before un-muting Gogios monitoring...")
 
-	if err := m.waitForCluster(ctx, log); err != nil {
-		fmt.Fprintf(log, "  %v\n", err)
+	waitErr := m.waitForCluster(ctx, log, rewake)
+	if waitErr != nil && ctx.Err() != nil {
+		fmt.Fprintf(log, "  %v\n", waitErr)
 		fmt.Fprintf(log, "  Leaving Gogios muted. Clear it by hand once the nodes are up:\n")
 		for _, gw := range m.gateways {
 			fmt.Fprintf(log, "    ssh -p %d %s@%s gogios-unmute\n", gw.SSHPort, gw.SSHUser, gw.IP)
 		}
-		return err
+		return waitErr
+	}
+	if waitErr != nil {
+		fmt.Fprintf(log, "  %v\n", waitErr)
+		fmt.Fprintln(log, "  Un-muting Gogios anyway, so the missing nodes alert.")
 	}
 
-	return m.eachGateway(ctx, log, "gogios-unmute", "un-muted")
+	unmuteErr := m.eachGateway(ctx, log, "gogios-unmute", "un-muted")
+	switch {
+	case waitErr != nil && unmuteErr != nil:
+		// One line, like every other error this package returns; %w keeps
+		// errors.Is(err, ErrClusterIncomplete) working for Engine.on.
+		return fmt.Errorf("%w; %v", waitErr, unmuteErr)
+	case waitErr != nil:
+		return waitErr
+	default:
+		return unmuteErr
+	}
 }
 
-// waitForCluster polls r0/r1/r2 until all three answer or the timeout expires.
-func (m *Monitor) waitForCluster(ctx context.Context, log io.Writer) error {
-	deadline := time.Now().Add(m.unmute)
+// ErrClusterIncomplete marks an UnmuteGogios error caused by k3s nodes that
+// never answered, as opposed to a gateway that could not be un-muted. Engine.on
+// tells the two apart: the first is an incomplete wake, the second a complete
+// wake with a monitoring problem.
+var ErrClusterIncomplete = errors.New("k3s nodes still unreachable")
+
+// waitForCluster polls r0/r1/r2 until all three answer or the timeout expires,
+// calling rewake (if non-nil) every rewakeGap while any node is still down.
+func (m *Monitor) waitForCluster(ctx context.Context, log io.Writer, rewake func()) error {
+	start := time.Now()
+	deadline := start.Add(m.unmute)
+	lastRewake := start
 
 	for {
-		pending := 0
+		var down []string
 		for _, st := range m.probe(ctx, m.nodes) {
 			if !st.Ping {
-				pending++
+				down = append(down, st.Name)
 			}
 		}
-		if pending == 0 {
+		if len(down) == 0 {
 			return nil
 		}
+		names := strings.Join(down, ", ")
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%d of %d k3s nodes still unreachable after %s",
-				pending, len(m.nodes), m.unmute)
+			return fmt.Errorf("%w after %s: %s", ErrClusterIncomplete, m.unmute, names)
 		}
 
-		fmt.Fprintf(log, "  %d of %d k3s nodes still down; waiting...\n", pending, len(m.nodes))
+		if rewake != nil && time.Since(lastRewake) >= m.rewakeGap() {
+			fmt.Fprintf(log, "  still down: %s; re-sending the magic packets...\n", names)
+			rewake()
+			lastRewake = time.Now()
+		} else {
+			fmt.Fprintf(log, "  still down: %s; waiting...\n", names)
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(15 * time.Second):
+		case <-time.After(m.pollGap()):
 		}
 	}
 }
@@ -264,10 +342,11 @@ func (e *Engine) UnmuteNow(ctx context.Context, log io.Writer) error {
 	return e.monitorBackend().Unmute(ctx, log)
 }
 
-// UnmuteGogios waits for the k3s nodes and then removes the marker. Delegates
-// to the Monitor; see Monitor.UnmuteGogios.
-func (e *Engine) UnmuteGogios(ctx context.Context, log io.Writer) error {
-	return e.monitorBackend().UnmuteGogios(ctx, log)
+// UnmuteGogios waits for the k3s nodes and then removes the marker, calling
+// rewake (may be nil) periodically while nodes are still down. Delegates to
+// the Monitor; see Monitor.UnmuteGogios.
+func (e *Engine) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()) error {
+	return e.monitorBackend().UnmuteGogios(ctx, log, rewake)
 }
 
 // MonitoringStatus reports, per gateway, whether Gogios is currently muted.

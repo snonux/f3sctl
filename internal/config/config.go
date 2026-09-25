@@ -98,14 +98,16 @@ type Config struct {
 	VMShutdownTimeout Duration `json:"vm_shutdown_timeout"`
 
 	// UnmuteTimeout bounds how long the wake path waits for r0/r1/r2 before
-	// giving up on clearing the Gogios mute marker.
+	// clearing the Gogios mute marker regardless (so any node still missing
+	// alerts; see Monitor.UnmuteGogios).
 	//
 	// Budget it against a cold boot, not a warm one: an f-host reaches sshd
 	// roughly a minute after the magic packet, and its k3s guest needs a
 	// further couple of minutes on top. The old 600s looked generous but was
 	// not — while ntpd_sync_on_start blocked rc for ~14 minutes (fixed
-	// 2026-08-09, see the f3s skill) it expired every time, and each expiry
-	// stranded the mute and left Gogios blind until someone noticed.
+	// 2026-08-09, see the f3s skill) it expired every time. Back then each
+	// expiry stranded the mute and left Gogios blind; now an expiry un-mutes
+	// early instead, which pages for nodes that were merely slow.
 	UnmuteTimeout Duration `json:"unmute_timeout"`
 
 	// ProbeTimeout bounds a single ping or TCP dial during status probing.

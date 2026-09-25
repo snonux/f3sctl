@@ -196,7 +196,7 @@ func TestMonitorUnmuteGogiosWaitsForTheClusterThenClears(t *testing.T) {
 	m := newTestMonitor(t, verb, allUp, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, time.Minute)
 
 	var log bytes.Buffer
-	if err := m.UnmuteGogios(context.Background(), &log); err != nil {
+	if err := m.UnmuteGogios(context.Background(), &log, nil); err != nil {
 		t.Fatalf("UnmuteGogios: %v", err)
 	}
 	if got := verb.callsList(); len(got) != 2 || got[0] != "gogios-unmute:blowfish" {
@@ -204,40 +204,144 @@ func TestMonitorUnmuteGogiosWaitsForTheClusterThenClears(t *testing.T) {
 	}
 }
 
-// TestMonitorUnmuteGogiosLeavesTheMarkerWhenTheClusterNeverAnswers pins the
-// failure mode UnmuteGogios's doc promises: when the wait expires, it does
-// NOT clear the marker (clearing it while the nodes boot would fire the very
-// alerts the mute suppresses), leaves it in place, prints how to clear it by
-// hand, and returns the error.
-func TestMonitorUnmuteGogiosLeavesTheMarkerWhenTheClusterNeverAnswers(t *testing.T) {
-	oneDown := func(_ context.Context, hosts []inventory.Host) []HostStatus {
-		out := make([]HostStatus, len(hosts))
-		for i, h := range hosts {
-			out[i] = HostStatus{Name: h.Name, Ping: i != 0} // r0 never answers
-		}
-		return out
+// oneNodeDown is a probe on which r0 never answers and the rest do.
+func oneNodeDown(_ context.Context, hosts []inventory.Host) []HostStatus {
+	out := make([]HostStatus, len(hosts))
+	for i, h := range hosts {
+		out[i] = HostStatus{Name: h.Name, Ping: i != 0} // r0 never answers
 	}
+	return out
+}
+
+// TestMonitorUnmuteGogiosUnmutesAnywayWhenTheClusterNeverAnswers pins the
+// timeout path: a node still down after the budget is an outage, so the
+// marker is cleared on every gateway (letting that node alert) and the error
+// still reports the missing node. Leaving the marker in place here is what
+// hid f1 being down for seven hours on 2026-09-25.
+func TestMonitorUnmuteGogiosUnmutesAnywayWhenTheClusterNeverAnswers(t *testing.T) {
 	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-	// A negligible budget so the wait expires on the first probe rather than
-	// after a real 15s tick.
-	// A negative budget makes the wait already expired on its first
-	// check, so the test does not pay waitForCluster's real 15s poll gap:
-	// the point is "wait fails -> marker left", not the wait itself.
-	m := newTestMonitor(t, verb, oneDown, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, -time.Second)
+	// A negative budget makes the wait already expired on its first check,
+	// so the test does not pay waitForCluster's real poll gap.
+	m := newTestMonitor(t, verb, oneNodeDown, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, -time.Second)
 
 	var log bytes.Buffer
-	err := m.UnmuteGogios(context.Background(), &log)
-	if err == nil {
-		t.Fatal("UnmuteGogios with a never-answering cluster succeeded, want an error")
+	err := m.UnmuteGogios(context.Background(), &log, nil)
+	if !errors.Is(err, ErrClusterIncomplete) || !strings.HasSuffix(err.Error(), ": r0") {
+		t.Fatalf("UnmuteGogios err = %v, want ErrClusterIncomplete naming r0", err)
+	}
+	want := []string{"gogios-unmute:blowfish", "gogios-unmute:sunfish"}
+	if got := verb.callsList(); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("calls = %v, want %v: a timed-out wait must still un-mute", got, want)
+	}
+	if !strings.Contains(log.String(), "Un-muting Gogios anyway") {
+		t.Errorf("log = %q, want it to say it un-muted despite the missing node", log.String())
+	}
+}
+
+// TestMonitorUnmuteGogiosReportsBothTheTimeoutAndAFailedUnmute pins that a
+// gateway failure on the timeout path does not hide the missing node: both
+// problems are in the returned error.
+func TestMonitorUnmuteGogiosReportsBothTheTimeoutAndAFailedUnmute(t *testing.T) {
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{
+		"gogios-unmute:sunfish": errors.New("ssh: connect timed out"),
+	}}
+	m := newTestMonitor(t, verb, oneNodeDown, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, -time.Second)
+
+	err := m.UnmuteGogios(context.Background(), &bytes.Buffer{}, nil)
+	if !errors.Is(err, ErrClusterIncomplete) || !strings.Contains(err.Error(), "sunfish") {
+		t.Fatalf("UnmuteGogios err = %v, want both the timeout and the failed gateway", err)
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("UnmuteGogios err = %q, want a single line", err)
+	}
+}
+
+// TestMonitorUnmuteGogiosLeavesTheMarkerWhenTheWakeIsCancelled pins the one
+// case that keeps the mute: the operator aborted the wake, so nobody asked
+// for monitoring to resume. It prints how to clear the marker by hand.
+func TestMonitorUnmuteGogiosLeavesTheMarkerWhenTheWakeIsCancelled(t *testing.T) {
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	m := newTestMonitor(t, verb, oneNodeDown, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, time.Hour)
+	m.poll = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var log bytes.Buffer
+	if err := m.UnmuteGogios(ctx, &log, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("UnmuteGogios err = %v, want context.Canceled", err)
 	}
 	if got := verb.callsList(); len(got) != 0 {
-		t.Errorf("gogios-unmute calls = %v, want none: the marker must stay in place when the wait fails", got)
-	}
-	if !strings.Contains(log.String(), "Leaving Gogios muted") {
-		t.Errorf("log = %q, want it to say the marker is left in place", log.String())
+		t.Errorf("gogios-unmute calls = %v, want none: an aborted wake keeps the mute", got)
 	}
 	if !strings.Contains(log.String(), "ssh -p 22 u@192.0.2.1 gogios-unmute") {
 		t.Errorf("log = %q, want it to print how to clear the marker by hand", log.String())
+	}
+}
+
+// downForProbes is a probe on which r0 stays down for the first n probes and
+// then answers; it counts the probes it served.
+type downForProbes struct {
+	mu     sync.Mutex
+	n, got int
+}
+
+func (d *downForProbes) probe(_ context.Context, hosts []inventory.Host) []HostStatus {
+	d.mu.Lock()
+	d.got++
+	up := d.got > d.n
+	d.mu.Unlock()
+	out := make([]HostStatus, len(hosts))
+	for i, h := range hosts {
+		out[i] = HostStatus{Name: h.Name, Ping: i != 0 || up}
+	}
+	return out
+}
+
+// TestMonitorUnmuteGogiosRewakesWhileNodesAreDown pins the WoL retry: while a
+// node stays down the rewake callback fires, but only once per rewakeGap --
+// not on every poll -- and the wait then ends with the un-mute once the node
+// answers.
+func TestMonitorUnmuteGogiosRewakesWhileNodesAreDown(t *testing.T) {
+	d := &downForProbes{n: 40}
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	m := newTestMonitor(t, verb, d.probe, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
+	m.poll = time.Millisecond
+	m.rewakeEvery = 10 * time.Millisecond
+
+	rewakes := 0
+	if err := m.UnmuteGogios(context.Background(), &bytes.Buffer{}, func() { rewakes++ }); err != nil {
+		t.Fatalf("UnmuteGogios: %v", err)
+	}
+	if rewakes == 0 {
+		t.Error("rewake never called while r0 was down, want the magic packets re-sent")
+	}
+	// 40 down polls at >=1ms each span >=40ms, so a 10ms gap allows at most
+	// ~4 rewakes (plus scheduling slack); firing on every poll would be 40.
+	if rewakes >= d.n/2 {
+		t.Errorf("rewake called %d times over %d down polls, want it throttled to the rewake gap", rewakes, d.n)
+	}
+	if got := verb.callsList(); len(got) != 1 || got[0] != "gogios-unmute:blowfish" {
+		t.Errorf("calls = %v, want one un-mute once r0 answered", got)
+	}
+}
+
+// TestMonitorUnmuteGogiosDoesNotRewakeBeforeTheGap is the negative case for
+// the throttle: a node down for several polls, but for less than one rewake
+// gap in total, gets no re-sent packet.
+func TestMonitorUnmuteGogiosDoesNotRewakeBeforeTheGap(t *testing.T) {
+	d := &downForProbes{n: 5}
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	m := newTestMonitor(t, verb, d.probe, []string{"blowfish"}, []string{"r0"}, time.Minute)
+	m.poll = time.Millisecond
+	m.rewakeEvery = time.Hour
+
+	rewakes := 0
+	if err := m.UnmuteGogios(context.Background(), &bytes.Buffer{}, func() { rewakes++ }); err != nil {
+		t.Fatalf("UnmuteGogios: %v", err)
+	}
+	if rewakes != 0 {
+		t.Errorf("rewake called %d times within the first gap, want 0", rewakes)
 	}
 }
 

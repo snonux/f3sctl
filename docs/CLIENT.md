@@ -119,9 +119,14 @@ A host that failed to shut down cleanly ends up in single-user mode: powered
 on, no network, and **not wakeable by Wake-on-LAN**, because WoL only wakes a
 powered-off NIC. It looks identical to "off" from here.
 
-So: if a `power-on` job completes and a host is still `!ping` a few minutes
-later, tell the user it may need a physical power cycle rather than letting
-them press the button again forever. That is the one piece of domain knowledge
+A `power-on` job re-sends its magic packets every two minutes while k3s nodes
+are still down, and if they never answer within the un-mute budget it ends
+`failed` with "wake incomplete: … : r1" (Gogios is un-muted anyway, so the
+missing node alerts). The error names k3s nodes while the host map lists
+f-hosts, and "done" there only means "magic packet sent": r0/r1/r2 run on
+f0/f1/f2, so "… : r1" points at f1. So: if a `power-on` job fails that way, or completes and
+a host is still `!ping` a few minutes later, tell the user it may need a
+physical power cycle rather than letting them press the button again forever. That is the one piece of domain knowledge
 worth putting in a client, and it is about presentation, not about the API.
 
 Overall rack state is best derived as:

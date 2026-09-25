@@ -24,8 +24,9 @@ const acOffDwell = 15 * time.Second
 // A board that has just regained mains needs a moment before its NIC is in
 // the standby state Wake-on-LAN relies on: the supply comes up, the embedded
 // controller boots, and only then does the NIC power its PHY and start
-// listening. A packet sent before that is simply lost, and on() sends each one
-// only once.
+// listening. A packet sent before that is simply lost. on() does re-send the
+// packets while the cluster is still down, but only every rewakeInterval
+// (2m), so skipping this wait would delay the wake by minutes, not save time.
 const acSettleWait = 30 * time.Second
 
 // CycleAll power-cycles every f-host, f3 included, through mains AC:

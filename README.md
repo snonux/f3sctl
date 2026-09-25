@@ -108,8 +108,19 @@ irreversible happens:
 7. **Fans off** — only once f0/f1/f2 are genuinely down. The plug does not
    cool f3, so a running f3 does not keep the fans on.
 
-Every run ends with a timing summary — each stage and each host, longest
+Every shutdown ends with a timing summary — each stage and each host, longest
 called out — so "why did that take so long" is a question the log answers.
+
+## What `power on` does
+
+Fans on, one magic packet per host, then a wait (`unmute_timeout`) for
+r0/r1/r2 to answer ping before Gogios is un-muted. While any node is still
+down, the magic packets are re-sent every two minutes: a NIC can ignore the
+first one (f1 did on 2026-09-25 and stayed off for seven hours). If the wait
+runs out, Gogios is un-muted **anyway** and the wake fails naming the missing
+nodes, so a host that never came back pages instead of hiding behind the mute.
+A local run killed mid-wait leaves the mute in place; clear it with
+`f3sctl monitoring unmute`.
 
 ## What `power all cycle` does
 
