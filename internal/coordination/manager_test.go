@@ -15,9 +15,9 @@ import (
 
 // defaultUnmuteTimeout is config.Default().UnmuteTimeout.D(), used throughout
 // this file so newTestManager's staleCeiling matches the shipped default
-// (max(20m, defaultOffWorstCase) + staleBuffer's 10m = the historical fixed
-// 30m, since 20m > defaultOffWorstCase's 18m) unless a test deliberately
-// overrides either input to prove the ceiling now tracks both.
+// (20m + defaultOffWorstCase's 18m + staleBuffer's 10m = 48m, summed because
+// a power cycle runs both paths in one job) unless a test deliberately
+// overrides either input to prove the ceiling tracks both.
 const defaultUnmuteTimeout = 20 * time.Minute
 
 // defaultOffWorstCase is power.ShutdownWorstCase(config.Default()): 4 hosts
@@ -177,7 +177,7 @@ func TestManagerStartRecordsFailureWhenSpawnFails(t *testing.T) {
 // power action forever.
 func TestManagerReadTreatsAnOldRunningJobAsStale(t *testing.T) {
 	m := newTestManager(t)
-	old := time.Now().Add(-31 * time.Minute).UTC().Format(time.RFC3339)
+	old := time.Now().Add(-(m.StaleCeiling() + time.Minute)).UTC().Format(time.RFC3339)
 	if err := m.write(Job{ID: "stale", State: JobRunning, Started: old}); err != nil {
 		t.Fatalf("seeding a stale job: %v", err)
 	}
@@ -336,20 +336,20 @@ func TestJobIsStaleBoundaryIsExclusive(t *testing.T) {
 	}
 }
 
-// TestStaleCeilingForTakesTheLargerWorstCase pins the exact formula
-// (max(unmuteTimeout, offWorstCase) + staleBuffer) rather than just its
-// externally visible effect, exercising both directions -- UnmuteTimeout
-// dominant and offWorstCase dominant -- so a future change to either input's
-// handling is caught here first.
-func TestStaleCeilingForTakesTheLargerWorstCase(t *testing.T) {
+// TestStaleCeilingForCoversBothPathsInOneJob pins the exact formula
+// (unmuteTimeout + offWorstCase + staleBuffer) rather than just its
+// externally visible effect. The sum, not the max, is what a power cycle
+// needs: it runs a whole shutdown and then a whole wake in the same job, so a
+// ceiling that cleared only the larger half would fail it mid-wake.
+func TestStaleCeilingForCoversBothPathsInOneJob(t *testing.T) {
 	for _, tc := range []struct {
 		name                        string
 		unmuteTimeout, offWorstCase time.Duration
 		want                        time.Duration
 	}{
-		{"unmuteTimeout dominates", 37 * time.Minute, 5 * time.Minute, 37*time.Minute + staleBuffer},
-		{"offWorstCase dominates", 2 * time.Minute, 18 * time.Minute, 18*time.Minute + staleBuffer},
-		{"equal", 10 * time.Minute, 10 * time.Minute, 10*time.Minute + staleBuffer},
+		{"unmuteTimeout larger", 37 * time.Minute, 5 * time.Minute, 42*time.Minute + staleBuffer},
+		{"offWorstCase larger", 2 * time.Minute, 18 * time.Minute, 20*time.Minute + staleBuffer},
+		{"shipped defaults", defaultUnmuteTimeout, defaultOffWorstCase, 38*time.Minute + staleBuffer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := staleCeilingFor(tc.unmuteTimeout, tc.offWorstCase); got != tc.want {
@@ -357,6 +357,23 @@ func TestStaleCeilingForTakesTheLargerWorstCase(t *testing.T) {
 					tc.unmuteTimeout, tc.offWorstCase, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestManagerReadSurvivesAFullPowerCycle is the regression test for the sum:
+// a cycle job 35m in -- a full default shutdown (18m) followed by a wake still
+// waiting on the k3s nodes -- is past what the old max(20m, 18m)+10m = 30m
+// ceiling allowed, and must still read as running.
+func TestManagerReadSurvivesAFullPowerCycle(t *testing.T) {
+	m := newTestManager(t)
+	old := time.Now().Add(-35 * time.Minute).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "cycling", State: JobRunning, Started: old}); err != nil {
+		t.Fatalf("seeding a running job: %v", err)
+	}
+
+	if got := m.Read(); got == nil || got.State != JobRunning {
+		t.Errorf("Read() = %+v, want State=%q: a 35m-old cycle job is within "+
+			"UnmuteTimeout + ShutdownWorstCase", got, JobRunning)
 	}
 }
 

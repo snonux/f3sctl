@@ -126,8 +126,8 @@ func newJobID() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// staleBuffer is the slack added on top of whichever path's worst case is
-// larger to get the server's staleness ceiling (Manager.staleCeiling).
+// staleBuffer is the slack added on top of the job paths' worst cases to get
+// the server's staleness ceiling (Manager.staleCeiling).
 //
 // It mirrors internal/client.jobWaitBuffer's reasoning (see that constant's
 // doc comment, added by gy0), but -- unlike UnmuteTimeout alone -- it is
@@ -145,29 +145,25 @@ func newJobID() (string, error) {
 //     10-minute buffer, which is arithmetic nonsense (3*240s is already 12
 //     minutes, bigger than the buffer alone) -- see kz0's follow-up fix.
 //
-// Ten minutes of slack on top of max(UnmuteTimeout, ShutdownWorstCase(cfg))
-// is generous for either path's own prelude, and keeps the default ceiling
-// unchanged (20m UnmuteTimeout beats the default ShutdownWorstCase of
-// 4*240s+2m=18m, so 20m+10m = the old fixed 30m) while now scaling with
-// either an operator-raised UnmuteTimeout or an operator-raised
-// VMShutdownTimeout instead of silently falling behind either one -- see
-// kz0.
+// The buffer also absorbs the power cycle's own fixed cost between those two
+// halves (power.CycleAll: the strict dark check, AC off dwell and NIC settle
+// wait -- about a minute and a half), which is bounded and small next to it.
 const staleBuffer = 10 * time.Minute
 
 // staleCeilingFor derives the server's job-staleness ceiling from the two
-// independent worst cases a running job may actually be experiencing: the
-// wake path (bounded by unmuteTimeout) and the shutdown path (bounded by
-// offWorstCase, see power.ShutdownWorstCase). A job is never both at once, so
-// the ceiling only needs to clear whichever of the two is larger, not their
-// sum -- but it must clear whichever that is, not just unmuteTimeout, or a
-// small unmuteTimeout paired with a large VMShutdownTimeout reintroduces the
-// exact false-failure bug kz0 exists to close, just for the Off job type.
+// worst cases a running job may be experiencing: the wake path (bounded by
+// unmuteTimeout) and the shutdown path (bounded by offWorstCase, see
+// power.ShutdownWorstCase).
+//
+// It is their SUM, not their max. A plain `power off` or `power on` job is
+// only ever on one of the two, but `power all cycle` (power.CycleAll) runs a
+// whole shutdown and then a whole wake in the same job, and a ceiling that
+// only cleared the larger half would declare a healthy cycle failed part way
+// through its wake. Being generous costs a crashed job reading as running for
+// longer; being tight kills healthy ones -- see kz0 for the history of that
+// trade-off. With the defaults (20m + 18m + 10m) the ceiling is 48m.
 func staleCeilingFor(unmuteTimeout, offWorstCase time.Duration) time.Duration {
-	worst := unmuteTimeout
-	if offWorstCase > worst {
-		worst = offWorstCase
-	}
-	return worst + staleBuffer
+	return unmuteTimeout + offWorstCase + staleBuffer
 }
 
 // Manager owns the on-disk lifecycle of one node's power job: claiming the
@@ -268,8 +264,8 @@ func (m *Manager) Read() *Job {
 }
 
 // stale reports whether a job claiming to run has outlived any plausible
-// runtime, judged against m.staleCeiling (max(UnmuteTimeout,
-// ShutdownWorstCase) + staleBuffer -- see NewManager, staleCeilingFor and
+// runtime, judged against m.staleCeiling (UnmuteTimeout + ShutdownWorstCase +
+// staleBuffer -- see NewManager, staleCeilingFor and
 // staleBuffer's doc comments). Before kz0 this was a fixed 30 minutes, which
 // quietly stopped being generous enough the moment an operator raised
 // UnmuteTimeout past ~25m (as happened 2026-08-09, 600s -> 1200s, to survive a
@@ -280,9 +276,9 @@ func (m *Manager) Read() *Job {
 // reopened the same bug from the other side: it covered the wake path but not
 // the shutdown path's own, independent worst case (power.ShutdownWorstCase),
 // so lowering UnmuteTimeout while leaving VMShutdownTimeout at its default (or
-// raising it) could again call a healthy job "failed" mid-shutdown. Taking the
-// max of both keeps the ceiling honest about whichever path a job is actually
-// on.
+// raising it) could again call a healthy job "failed" mid-shutdown. The
+// ceiling now covers both paths, summed, because a power cycle runs both in
+// one job (see staleCeilingFor).
 func (m *Manager) stale(j Job) bool {
 	started, err := time.Parse(time.RFC3339, j.Started)
 	if err != nil {

@@ -141,7 +141,7 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 	if state, _ := result.Properties["state"].(string); state == "running" {
 		id, _ := result.Properties["id"].(string)
 		fmt.Fprintf(c.stdout, "%s accepted; waiting for it to finish...\n", action.Name)
-		return c.waitForJob(ctx, root, id)
+		return c.waitForJob(ctx, root, id, serverStaleCeiling(result))
 	}
 
 	if action.Name == "gogios-cache-clear" {
@@ -253,9 +253,16 @@ func (c *Client) showMonitoring(ctx context.Context) error {
 // The poll deadline comes from jobWaitTimeout, not a constant here, so it
 // tracks the server's actual worst-case runtime -- see jobWaitTimeout's
 // comment for why an independent constant caused a "gave up" report on
-// 2026-08-09 for a job that succeeded moments later.
-func (c *Client) waitForJob(ctx context.Context, root Entity, id string) error {
+// 2026-08-09 for a job that succeeded moments later. serverCeiling, the
+// accepting node's own staleness ceiling (see serverStaleCeiling), raises that
+// deadline when it is the longer of the two: a power cycle runs a shutdown and
+// a wake in one job, which outlasts the wake-only budget jobWaitTimeout
+// derives from this side's UnmuteTimeout.
+func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverCeiling time.Duration) error {
 	timeout := c.jobWaitTimeout()
+	if serverCeiling+jobWaitBuffer > timeout {
+		timeout = serverCeiling + jobWaitBuffer
+	}
 	// Bound the wait by BOTH the caller's ctx and the server's worst-case
 	// runtime: a Ctrl-C (runRemote wires signal.NotifyContext) cancels ctx, and
 	// a caller that handed over an unbounded context still gives up after
@@ -308,6 +315,15 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string) error {
 			return c.showStatus(ctx)
 		}
 	}
+}
+
+// serverStaleCeiling reads the staleness ceiling a job entity advertises
+// ("staleAfterSeconds", see docs/CLIENT.md), or zero when it carries none --
+// an older server, or a fixture without it. The property arrives as a JSON
+// number, i.e. float64 once decoded.
+func serverStaleCeiling(job Entity) time.Duration {
+	secs, _ := job.Properties["staleAfterSeconds"].(float64)
+	return time.Duration(secs) * time.Second
 }
 
 // jobPollInterval is the gap between polling cycles, and jobPollRetries is how

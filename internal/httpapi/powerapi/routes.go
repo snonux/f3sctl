@@ -159,8 +159,10 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 	}
 }
 
-// allHostsRoutes is the every-f-host pair: f0-f3, f3 included. See
-// clusterRoutes for the cluster-only pair this complements.
+// allHostsRoutes is the every-f-host set: f0-f3, f3 included -- the on/off
+// pair plus the AC power cycle, which is that pair with the mains plug cut
+// and restored in between (see power.Engine.CycleAll). See clusterRoutes for
+// the cluster-only pair this complements.
 func (sf *Surface) allHostsRoutes() []contract.Route {
 	return []contract.Route{
 		{
@@ -184,6 +186,21 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 				return !JobRunning(s) && sshUp > 0
 			},
 			Handle: sf.action("all-off"),
+		},
+		{
+			Name: "all-cycle", Title: "Power-cycle every f-host through mains AC (f0-f3)",
+			Method: http.MethodPost, Path: "/power/all/cycle", Action: true,
+			CLIVerb: "power all cycle",
+			// Needs the AC plug readable: the cycle's middle is cutting and
+			// restoring it, and a plug that cannot be read back cannot be
+			// confirmed restored. Host state does not gate it -- hosts that
+			// are already off are skipped by the shutdown half and woken by
+			// the wake half, and one that is up but not answering SSH makes
+			// the shutdown half refuse before AC is touched.
+			Available: func(s contract.State) bool {
+				return !JobRunning(s) && s.ACErr == nil
+			},
+			Handle: sf.action("all-cycle"),
 		},
 	}
 }
@@ -243,7 +260,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 		{
 			Name: "ac-on", Title: "Restore f-host mains AC",
 			Method: http.MethodPost, Path: "/ac/on", Action: true,
-			CLIVerb: "ac on",
+			CLIVerb:   "ac on",
 			Available: func(s contract.State) bool { return s.ACErr == nil && !s.AC.On },
 			Handle:    sf.handleACOn,
 		},

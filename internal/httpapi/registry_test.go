@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -551,6 +552,40 @@ func TestAllOffNeedsSSHNotPing(t *testing.T) {
 	}
 	if r.IsAvailable(midBoot) {
 		t.Error("all-off offered while no host answers SSH; the job could only fail")
+	}
+}
+
+// TestAllCycleNeedsAReadableACPlugAndNoJob pins when the power cycle is
+// offered: whatever the hosts are doing (the shutdown half skips hosts that
+// are off and refuses over ones it cannot reach), but only while the AC plug
+// can be read -- its middle is cutting and restoring that plug -- and never
+// while a job is already running.
+func TestAllCycleNeedsAReadableACPlugAndNoJob(t *testing.T) {
+	r, ok := routeByName("all-cycle")
+	if !ok {
+		t.Fatal("no all-cycle action")
+	}
+	if r.CLIVerb != "power all cycle" {
+		t.Errorf("all-cycle CLIVerb = %q, want %q", r.CLIVerb, "power all cycle")
+	}
+
+	allOff := contract.State{Hosts: []power.HostStatus{
+		{Name: "f0", Role: "f"}, {Name: "f3", Role: "f"},
+	}}
+	if !r.IsAvailable(allOff) {
+		t.Error("all-cycle withheld with every host off; a cold cycle of a dark rack is valid")
+	}
+
+	plugDown := allOff
+	plugDown.ACErr = errors.New("unreachable")
+	if r.IsAvailable(plugDown) {
+		t.Error("all-cycle offered while the AC plug cannot be read")
+	}
+
+	busy := allOff
+	busy.PeerBusy = true
+	if r.IsAvailable(busy) {
+		t.Error("all-cycle offered while a job is running on the peer")
 	}
 }
 

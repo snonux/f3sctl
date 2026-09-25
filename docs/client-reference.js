@@ -311,6 +311,7 @@ const commands = {
   off: () => run('power-off', undefined, 'power'),
   'all-on': () => run('all-on', undefined, 'power'),
   'all-off': () => run('all-off', undefined, 'power'),
+  'all-cycle': () => run('all-cycle', undefined, 'power'),
   'f3-on': () => run('f3-on', undefined, 'power'),
   'f3-off': () => run('f3-off', undefined, 'power'),
   'monitoring-mute': () => run('monitoring-mute', undefined, 'gogios/monitoring'),

@@ -15,6 +15,7 @@ f3sctl power off             # export zusb, mute Gogios, stop guests, power off
                              # — f3 is racked separately and isn't cooled by
                              # this plug, so it plays no part in the guard
 f3sctl power f1 on|off       # any single host: f0, f1, f2 or f3
+f3sctl power all cycle       # cold-cycle f0-f3: all off, AC off, AC on, all on
 f3sctl fans status|on|off    # the rack-fan Shelly plug on its own
 f3sctl ac status|on|off      # f-host mains AC (shelly2); independent of power on/off
 ```
@@ -109,6 +110,24 @@ irreversible happens:
 
 Every run ends with a timing summary — each stage and each host, longest
 called out — so "why did that take so long" is a question the log answers.
+
+## What `power all cycle` does
+
+A cold restart of every f-host, for when a warm reboot is not enough (a wedged
+NIC, a board that stopped honouring Wake-on-LAN). One job, four steps:
+
+1. **`power all off`** — the whole sequence above, f3 included.
+2. **Cut f-host AC** (shelly2) — only once every f-host is confirmed dark by
+   the same strict probe the `ac off` guard uses. A shutdown that failed, or a
+   host still answering, stops the run here with AC untouched.
+3. **Restore AC** after 15 s, so the supplies genuinely drain. This happens
+   even if the run is interrupted during the wait: a rack without mains is the
+   one state nothing remote can recover from.
+4. **`power all on`** after a further 30 s, so the NICs are back on standby
+   power before the magic packets go out.
+
+Like every shutdown it goes through the API, and it is offered as the
+`all-cycle` action.
 
 ## The API
 

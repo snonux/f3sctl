@@ -34,6 +34,9 @@ Usage:
   f3sctl power all on          Fans on, wake f0/f1/f2/f3, un-mute Gogios
   f3sctl power all off         As "power off", but f3 too: the whole rack dark, then
                                fans off once nothing answers
+  f3sctl power all cycle       Cold-cycle f0-f3: "power all off", cut f-host AC once
+                               every f-host is dark, restore it, then "power all on"
+                               (goes through the API, like every shutdown)
   f3sctl power f0|f1|f2|f3 on  Wake one host only
   f3sctl power f0|f1|f2|f3 off Power off one host only (fans and Gogios untouched)
   f3sctl fans status           Rack-fan Shelly plug state
@@ -204,6 +207,7 @@ type powerEngine interface {
 	Off(ctx context.Context, log io.Writer) error
 	OnAll(ctx context.Context, log io.Writer) error
 	OffAll(ctx context.Context, log io.Writer) error
+	CycleAll(ctx context.Context, log io.Writer) error
 	OnHost(ctx context.Context, log io.Writer, name string) error
 	OffHost(ctx context.Context, log io.Writer, name string) error
 	ProbeAll(ctx context.Context) []power.HostStatus
@@ -246,7 +250,7 @@ func hostOp(op func(powerEngine, context.Context, io.Writer, string) error, name
 // shutdowns and routed straight to the API, never reaching powerActionFor's
 // validation at all.
 type powerSpelling struct {
-	verb   string // "status", "on", or "off"
+	verb   string // "status", "on", "off", or "cycle" (only with target "all")
 	target string // "" (whole rack), "all", or a host name
 }
 
@@ -265,7 +269,7 @@ func parsePowerArgs(args []string) (sp powerSpelling, ok bool) {
 		switch {
 		// "all" is a group, not a host name, so it is matched before the
 		// per-host spellings below.
-		case args[0] == "all" && (args[1] == "on" || args[1] == "off"):
+		case args[0] == "all" && (args[1] == "on" || args[1] == "off" || args[1] == "cycle"):
 			return powerSpelling{verb: args[1], target: "all"}, true
 		case isPowerVerb(args[0]):
 			// A verb where a host name belongs: `power off on`, `power status
@@ -324,6 +328,8 @@ func powerActionForSpelling(sp powerSpelling) powerAction {
 		return rackOp(powerEngine.OnAll)
 	case sp.target == "all" && sp.verb == "off":
 		return rackOp(powerEngine.OffAll)
+	case sp.target == "all" && sp.verb == "cycle":
+		return rackOp(powerEngine.CycleAll)
 	case sp.verb == "on":
 		return hostOp(powerEngine.OnHost, sp.target)
 	default: // sp.verb == "off"

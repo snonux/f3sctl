@@ -105,3 +105,17 @@ func TestParseFansReportsAnErrorPropertyAsAnError(t *testing.T) {
 		t.Errorf("parseFans(on=true) = %+v, want On=true IP=192.168.1.99", fans)
 	}
 }
+
+// TestServerStaleCeilingReadsTheJobProperty pins how the accepted job's
+// advertised staleness ceiling is read: a decoded JSON number (float64) in
+// seconds, and zero -- "no opinion" -- when the property is absent, so an
+// older server leaves waitForJob on its own jobWaitTimeout.
+func TestServerStaleCeilingReadsTheJobProperty(t *testing.T) {
+	job := Entity{Properties: map[string]any{"staleAfterSeconds": float64(2880)}}
+	if got, want := serverStaleCeiling(job), 48*time.Minute; got != want {
+		t.Errorf("serverStaleCeiling = %s, want %s", got, want)
+	}
+	if got := serverStaleCeiling(Entity{}); got != 0 {
+		t.Errorf("serverStaleCeiling without the property = %s, want 0", got)
+	}
+}

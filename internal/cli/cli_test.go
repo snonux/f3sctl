@@ -544,6 +544,11 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 		{"all", "on", "off"},
 		{"on", "off"},
 		{"status", "off"},
+		// Only the whole set cycles: there is no per-host or cluster-only
+		// cycle, because the AC plug feeds every f-host at once.
+		{"cycle"},
+		{"f1", "cycle"},
+		{"cycle", "all"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			shelly := powertest.NewFakeShelly(t, true)
@@ -579,7 +584,8 @@ func TestPowerRejectsMalformedSpellings(t *testing.T) {
 // misreading a malformed spelling as a legitimate shutdown and sending it to
 // runRemote before powerActionFor ever saw it. It must agree with
 // powerActionFor on every case here: shutdown if and only if
-// powerActionFor(args[1:]) resolves and the verb it names is "off".
+// powerActionFor(args[1:]) resolves and the verb it names is "off" or
+// "cycle" (a cycle starts with a full shutdown).
 func TestIsShutdownAgreesWithPowerActionFor(t *testing.T) {
 	for _, args := range [][]string{
 		{"power", "off"},
@@ -587,6 +593,8 @@ func TestIsShutdownAgreesWithPowerActionFor(t *testing.T) {
 		{"power", "status"},
 		{"power", "all", "off"},
 		{"power", "all", "on"},
+		{"power", "all", "cycle"},
+		{"power", "f3", "cycle"},
 		{"power", "f3", "off"},
 		{"power", "f3", "on"},
 		{"power", "on", "off"},     // the misclassified spelling
@@ -601,7 +609,7 @@ func TestIsShutdownAgreesWithPowerActionFor(t *testing.T) {
 			var want bool
 			if len(args) > 0 && args[0] == "power" {
 				sp, ok := parsePowerArgs(args[1:])
-				want = ok && sp.verb == "off"
+				want = ok && (sp.verb == "off" || sp.verb == "cycle")
 			}
 			if got := isShutdown(args); got != want {
 				t.Errorf("isShutdown(%v) = %v, want %v", args, got, want)
@@ -785,6 +793,9 @@ func (s *spyEngine) On(context.Context, io.Writer) error     { return s.record("
 func (s *spyEngine) Off(context.Context, io.Writer) error    { return s.record("Off", "") }
 func (s *spyEngine) OnAll(context.Context, io.Writer) error  { return s.record("OnAll", "") }
 func (s *spyEngine) OffAll(context.Context, io.Writer) error { return s.record("OffAll", "") }
+func (s *spyEngine) CycleAll(context.Context, io.Writer) error {
+	return s.record("CycleAll", "")
+}
 
 func (s *spyEngine) OnHost(_ context.Context, _ io.Writer, name string) error {
 	return s.record("OnHost", name)
@@ -835,6 +846,7 @@ func TestPowerActionForBindsTheRightMethod(t *testing.T) {
 		{[]string{"off"}, "Off", ""},
 		{[]string{"all", "on"}, "OnAll", ""},
 		{[]string{"all", "off"}, "OffAll", ""},
+		{[]string{"all", "cycle"}, "CycleAll", ""},
 		{[]string{"f0", "on"}, "OnHost", "f0"},
 		{[]string{"f0", "off"}, "OffHost", "f0"},
 		{[]string{"f3", "on"}, "OnHost", "f3"},

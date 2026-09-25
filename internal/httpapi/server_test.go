@@ -535,7 +535,7 @@ func TestPowerFolderOffersThePowerActions(t *testing.T) {
 	if e.Title != "Power control" {
 		t.Errorf("title = %q, want %q", e.Title, "Power control")
 	}
-	for _, name := range []string{"power-off", "all-off", "f0-off"} {
+	for _, name := range []string{"power-off", "all-off", "all-cycle", "f0-off"} {
 		if !hasAction(e, name) {
 			t.Errorf("power folder actions = %v, want %s offered (the fleet is up)", actionNames(e), name)
 		}
@@ -575,7 +575,7 @@ func TestACControlFolderOffersThePlugActions(t *testing.T) {
 			t.Errorf("ac-control folder actions = %v, want %s offered (plugs are on)", actionNames(e), name)
 		}
 	}
-	for _, name := range []string{"fans-on", "ac-on", "power-off", "all-off"} {
+	for _, name := range []string{"fans-on", "ac-on", "power-off", "all-off", "all-cycle"} {
 		if hasAction(e, name) {
 			t.Errorf("ac-control folder actions = %v, want %s withheld", actionNames(e), name)
 		}

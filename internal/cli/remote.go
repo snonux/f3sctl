@@ -117,7 +117,8 @@ func isGogios(args []string) bool {
 }
 
 // isShutdown reports whether args ask for a host, group, or the whole rack to
-// be powered off.
+// be powered off -- including `power all cycle`, which begins with a full
+// shutdown and so needs the same pinned key.
 //
 // Built on parsePowerArgs -- the same parse powerActionFor uses (cli.go) --
 // rather than pattern-matching args itself. It used to check only that a
@@ -132,7 +133,7 @@ func isShutdown(args []string) bool {
 		return false
 	}
 	sp, ok := parsePowerArgs(args[1:])
-	return ok && sp.verb == "off"
+	return ok && (sp.verb == "off" || sp.verb == "cycle")
 }
 
 // runRemote drives the command through the HTTP API.

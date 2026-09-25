@@ -77,6 +77,14 @@ type Engine struct {
 	// powerDownTimeout.
 	powerDownTimeout time.Duration
 
+	// acOffDwell and acSettleWait are CycleAll's two fixed waits: how long AC
+	// stays cut, and how long the NICs get on standby power before the magic
+	// packets go out. Fields for the same reason as powerDownTimeout; read
+	// them through acDwell and acSettle. New wires them to the constants of
+	// the same names (see cycle.go).
+	acOffDwell   time.Duration
+	acSettleWait time.Duration
+
 	// power, probe, fans, nfs and zusb are the abstractions Engine's policy
 	// methods (off, on, awaitPowerDown, zusbPreflight, and the
 	// smaller steps they call) act through, rather than shelling out to
@@ -141,6 +149,8 @@ func New(cfg config.Config) (*Engine, error) {
 		nfsMounts:         localNFSMounts,
 		downProbeInterval: downProbeInterval,
 		powerDownTimeout:  powerDownTimeout,
+		acOffDwell:        acOffDwell,
+		acSettleWait:      acSettleWait,
 	}
 	e.isUp = e.pingOnce
 	e.power = execPower{e}

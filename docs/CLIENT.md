@@ -176,6 +176,20 @@ A client should not assume one implies the other. With f0–f2 up and only f3
 down, `power-on` is absent (the cluster is already up) while `all-on` is
 offered. Render whichever the server gives you.
 
+#### Power cycle
+
+`all-cycle` (`POST /power/all/cycle`, CLI `power all cycle`) is a cold restart
+of every f-host through mains AC, as one job: the full `all-off` sequence,
+then — only once every f-host is confirmed dark — cut the f-host AC plug,
+wait, restore it, and run the full `all-on` sequence. It is offered whenever no
+job is running and the AC plug can be read, whatever the hosts are doing.
+
+A shutdown half that fails ends the job with AC untouched (`error` contains
+`before touching AC`). The one outcome that needs a human is AC cut and not
+restored: `error` then contains `AC is still OFF` and names `f3sctl ac on`.
+It runs a shutdown and a wake back to back, so it is the longest job there
+is — take the poll deadline from `staleAfterSeconds`, as below.
+
 ### Monitoring mute
 
 Follow the root's `monitoring` link. It reports whether Gogios alerting is
