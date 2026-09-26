@@ -260,10 +260,7 @@ func (c *Client) showMonitoring(ctx context.Context) error {
 // derives from this side's UnmuteTimeout.
 func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverCeiling time.Duration) error {
 	poll := c.poll.withDefaults()
-	timeout := c.jobWaitTimeout()
-	if serverCeiling+poll.waitBuffer > timeout {
-		timeout = serverCeiling + poll.waitBuffer
-	}
+	timeout := c.jobDeadline(serverCeiling)
 	// Bound the wait by BOTH the caller's ctx and the server's worst-case
 	// runtime: a Ctrl-C (runRemote wires signal.NotifyContext) cancels ctx, and
 	// a caller that handed over an unbounded context still gives up after
@@ -291,6 +288,17 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 	}
 }
 
+// jobDeadline returns how long waitForJob polls: jobWaitTimeout, raised to
+// the accepting node's staleness ceiling plus the wait buffer when that is
+// longer (a power cycle outlasts the wake-only budget -- see waitForJob).
+func (c *Client) jobDeadline(serverCeiling time.Duration) time.Duration {
+	timeout := c.jobWaitTimeout()
+	if extended := serverCeiling + c.poll.withDefaults().waitBuffer; extended > timeout {
+		return extended
+	}
+	return timeout
+}
+
 // errJobWaitTimeout is what waitForJob returns (wrapped, with the deadline it
 // used) when the job outlived the client's patience, as opposed to the caller
 // cancelling the wait.
@@ -300,6 +308,11 @@ var errJobWaitTimeout = errors.New("gave up waiting for the job")
 // what it learned. It reports true once the job has stopped running.
 func (c *Client) reportPoll(ctx context.Context, root Entity, id string) bool {
 	job, err := c.pollJob(ctx, root, id)
+	if err != nil && ctx.Err() != nil {
+		// Cancelled or out of time mid-poll: the read failed because of that,
+		// not the network, and waitForJob's next select reports why.
+		return false
+	}
 	if err != nil {
 		// A transient network blip mid-shutdown is expected -- the
 		// cluster is, after all, being taken apart.

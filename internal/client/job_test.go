@@ -37,6 +37,9 @@ type fakeJobAPI struct {
 
 func newFakeJobAPI(t *testing.T, script ...jobReply) *fakeJobAPI {
 	t.Helper()
+	if len(script) == 0 {
+		t.Fatal("newFakeJobAPI needs at least one scripted reply")
+	}
 	f := &fakeJobAPI{script: script}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.srv.Close)
@@ -209,7 +212,7 @@ func TestWaitForJobGivesUpAtItsOwnDeadline(t *testing.T) {
 // alone used to get wrong.
 func TestWaitForJobSurfacesTheCallersCancellation(t *testing.T) {
 	api := newFakeJobAPI(t, jobEntity(map[string]any{"id": "mine", "state": "running"}))
-	c, _ := newJobClient(t, api, config.Default(), fastPoll(0))
+	c, out := newJobClient(t, api, config.Default(), fastPoll(0))
 	root := mustRoot(t, c)
 
 	cancelled, cancel := context.WithCancel(context.Background())
@@ -217,6 +220,10 @@ func TestWaitForJobSurfacesTheCallersCancellation(t *testing.T) {
 	err := c.waitForJob(cancelled, root, "mine", 0)
 	if !errors.Is(err, context.Canceled) || errors.Is(err, errJobWaitTimeout) {
 		t.Errorf("waitForJob after cancel = %v, want context.Canceled", err)
+	}
+	// The read the cancel interrupted is not a network problem to report.
+	if got := out.String(); strings.Contains(got, "cannot read the job") {
+		t.Errorf("output %q reports the cancellation as a failed read", got)
 	}
 
 	api.setOnJob(nil)
@@ -303,5 +310,77 @@ func TestJobPollingDefaults(t *testing.T) {
 	}
 	if got := (jobPolling{interval: time.Second}).withDefaults().interval; got != time.Second {
 		t.Errorf("explicit interval became %s, want 1s", got)
+	}
+}
+
+// TestWaitForJobSaysStillRunningWithoutAStep pins the fallback line for a
+// running job that advertises no step: the operator still sees progress.
+func TestWaitForJobSaysStillRunningWithoutAStep(t *testing.T) {
+	api := newFakeJobAPI(t,
+		jobEntity(map[string]any{"id": "mine", "state": "running"}),
+		jobEntity(map[string]any{"id": "mine", "state": "done"}),
+	)
+	c, out := newJobClient(t, api, config.Default(), fastPoll(0))
+
+	if err := c.waitForJob(context.Background(), mustRoot(t, c), "mine", 0); err != nil {
+		t.Fatalf("waitForJob: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "still running...") || !strings.Contains(got, "job done") {
+		t.Errorf("output %q, want \"still running...\" then \"job done\"", got)
+	}
+}
+
+// TestJobDeadlineHonoursTheServerCeiling pins both sides of jobDeadline: a
+// server ceiling below jobWaitTimeout leaves the deadline alone, and one
+// above it (a power cycle's shutdown plus wake) becomes ceiling + buffer.
+func TestJobDeadlineHonoursTheServerCeiling(t *testing.T) {
+	c := &Client{cfg: config.Default()}
+	base := c.jobWaitTimeout()
+
+	if got := c.jobDeadline(0); got != base {
+		t.Errorf("jobDeadline(0) = %s, want jobWaitTimeout %s", got, base)
+	}
+	if got := c.jobDeadline(time.Minute); got != base {
+		t.Errorf("jobDeadline(1m) = %s, want jobWaitTimeout %s", got, base)
+	}
+	ceiling := base + time.Hour
+	if got, want := c.jobDeadline(ceiling), ceiling+jobWaitBuffer; got != want {
+		t.Errorf("jobDeadline(%s) = %s, want %s", ceiling, got, want)
+	}
+}
+
+// TestWaitForJobServerCeilingExtendsTheWait proves the ceiling reaches the
+// real poll loop: a job that finishes well after this side's own budget
+// succeeds when the server advertised a longer ceiling, and -- the negative
+// control -- gives up without one.
+func TestWaitForJobServerCeilingExtendsTheWait(t *testing.T) {
+	cfg := config.Default()
+	cfg.UnmuteTimeout = config.Duration(time.Millisecond)
+	poll := fastPoll(30 * time.Millisecond) // own budget: ~31ms
+
+	slowJob := func(t *testing.T) *fakeJobAPI {
+		script := make([]jobReply, 0, 21)
+		for range 20 {
+			script = append(script, jobEntity(map[string]any{"id": "mine", "state": "running"}))
+		}
+		script = append(script, jobEntity(map[string]any{"id": "mine", "state": "done"}))
+		api := newFakeJobAPI(t, script...)
+		api.setOnJob(func() { time.Sleep(5 * time.Millisecond) }) // >=100ms to finish
+		return api
+	}
+
+	api := slowJob(t)
+	c, out := newJobClient(t, api, cfg, poll)
+	if err := c.waitForJob(context.Background(), mustRoot(t, c), "mine", 10*time.Second); err != nil {
+		t.Fatalf("waitForJob with a 10s server ceiling: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "job done") {
+		t.Errorf("output %q lacks the job's completion", got)
+	}
+
+	api = slowJob(t)
+	c, _ = newJobClient(t, api, cfg, poll)
+	if err := c.waitForJob(context.Background(), mustRoot(t, c), "mine", 0); !errors.Is(err, errJobWaitTimeout) {
+		t.Errorf("waitForJob without a server ceiling = %v, want errJobWaitTimeout", err)
 	}
 }
