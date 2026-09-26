@@ -148,9 +148,11 @@ power — f3 included, because this plug powers all of them). Treat a hard cut
 as last-resort or post-shutdown only.
 
 While **any** power job runs, on either node, both plug switches (`fans-on`,
-`fans-off`, `ac-on`, `ac-off`) are withheld, like every power action: the
-rack-wide jobs drive both plugs themselves. See "Stuck job: recovering the
-plugs" under the power cycle below.
+`fans-off`, `ac-on`, `ac-off`) are withheld, like every power action. The
+rack-wide jobs switch the fan plug themselves, and `all-cycle` also cuts and
+restores AC; the other jobs touch neither plug, but every plug switch is
+withheld during any job, for one consistent rule. See "Stuck job: recovering
+the plugs" under the power cycle below.
 
 ### Two power groups
 
@@ -211,9 +213,10 @@ If the process running a job dies (the Pi reboots mid-cycle, say), its
 `job.json` keeps saying `running` until `staleAfterSeconds` has passed, and
 until then the API withholds both plug switches along with every power
 action. An AC plug left off, or fans that need switching, cannot wait that
-long, so the way out meanwhile is on a Pi itself: run `f3sctl ac on` or
-`f3sctl fans on` there, without `--remote`. The local commands switch the plug
-directly and do not consult the job. A client cannot do this for you; it can only say so.
+long, so the way out meanwhile is local: on any LAN host with f3sctl and its
+config (a Pi, say), run `f3sctl ac on` or `f3sctl fans on` without
+`--remote`. The plug commands run locally by default, need no authorisation,
+switch the plug directly and do not consult the job. A client cannot do this for you; it can only say so.
 
 ### Monitoring mute
 
@@ -665,8 +668,9 @@ X-API-Key: ...
 ```
 → `202`. Poll `/status`; the f-hosts lose `ssh`, then `ping`. Meanwhile the
 power folder offers **no** power actions at all, because a job is running,
-and AC control offers no plug switches either: the job drives the fan and AC
-plugs itself, so a manual flip mid-job would race it.
+and AC control offers no plug switches either: this job drives the fan plug
+itself, and every plug switch is withheld during any job (see "Stuck job:
+recovering the plugs").
 
 When it finishes, the power folder offers `power-on`, and AC control offers
 `fans-on` once the plug is off.
