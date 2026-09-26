@@ -17,20 +17,24 @@ import (
 // powerapi/gogiosapi's own tests) or uses the fully-wired newServer / ServeCGI
 // paths.
 
-// testPowerSurface returns the power surface with inert collaborators.
-func testPowerSurface(inv inventory.Inventory) *powerapi.Surface {
-	return powerapi.New("test", contract.Hrefs(""), inv, nil, nil, nil)
+// testPowerSurface returns the power surface with inert collaborators,
+// rendering its actions through actions -- the actionRenderer of the Server
+// it is about to be assembled into, exactly as newServer wires it.
+func testPowerSurface(inv inventory.Inventory, actions contract.ActionRenderer) *powerapi.Surface {
+	return powerapi.New("test", contract.Hrefs(""), inv, nil, nil, nil, actions)
 }
 
-// testGogiosSurface returns the Gogios surface with inert collaborators.
-func testGogiosSurface() *gogiosapi.Surface {
-	return gogiosapi.New("test", contract.Hrefs(""), config.Default(), nil)
+// testGogiosSurface returns the Gogios surface with inert collaborators,
+// rendering its actions through actions (see testPowerSurface).
+func testGogiosSurface(actions contract.ActionRenderer) *gogiosapi.Surface {
+	return gogiosapi.New("test", contract.Hrefs(""), config.Default(), nil, actions)
 }
 
 // testRoutes builds the same table newServer would, from the given inventory
 // and inert surfaces -- the pure-declaration subset of production wiring.
 func testRoutes(inv inventory.Inventory) []contract.Route {
-	return testServer().buildRoutes(inv, testPowerSurface(inv), testGogiosSurface())
+	srv := testServer()
+	return srv.buildRoutes(inv, testPowerSurface(inv, srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()))
 }
 
 // assemble is Server.build for tests, whose route tables are known to be
@@ -57,7 +61,8 @@ func mustRouter(base string, rs []contract.Route) *Router {
 // testServer returns a Server with no collaborators at all, for building the
 // route table (which needs a Server only to bind the root-resource handlers).
 func testServer() *Server {
-	return (&Server{}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+	srv := &Server{}
+	return srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()), "")
 }
 
 // routeByName finds a route by its stable client-facing name, the way the

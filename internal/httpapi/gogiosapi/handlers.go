@@ -48,22 +48,8 @@ func (sf *Surface) handleMonitoring(_ context.Context, state contract.State, _ c
 			{Rel: []string{"self"}, Href: sf.Href("/monitoring")},
 			{Rel: []string{"up"}, Href: sf.Href("/")},
 		},
-		Actions: sf.actionsFor(state, "monitoring-mute", "monitoring-unmute"),
+		Actions: sf.actions.ActionsFor(state, "monitoring-mute", "monitoring-unmute"),
 	}, http.StatusOK, nil
-}
-
-// actionsFor renders this resource's own actions, nil-safely: the table can
-// be declared (and its predicates tested) without the composition root's
-// Router attached, and a route declaration never needs to render an actions
-// list -- only serving one does. The injected ActionsFor (see Surface) is
-// what keeps the Siren action shape in exactly one place, the composition
-// root's Router, so a surface cannot grow its own action rendering that
-// drifts from the rest of the API's.
-func (sf *Surface) actionsFor(state contract.State, names ...string) []contract.Action {
-	if sf.ActionsFor == nil {
-		return nil
-	}
-	return sf.ActionsFor(state, names...)
 }
 
 func (sf *Surface) handleUnmute(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
@@ -146,7 +132,7 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 		// The folder advertises the whole family's controls: the report cache
 		// clear, and the gateway mute pair -- which is why the route's render
 		// needs state.Monitoring too (see enrichState's IsFolderPath fetch).
-		Actions: sf.actionsFor(state, "gogios-cache-clear", "monitoring-mute", "monitoring-unmute"),
+		Actions: sf.actions.ActionsFor(state, "gogios-cache-clear", "monitoring-mute", "monitoring-unmute"),
 	}, http.StatusOK, nil
 }
 

@@ -68,14 +68,14 @@ type Surface struct {
 	// production this is the power engine's Monitor; a subset interface of
 	// it, because mute/unmute are the only engine powers this surface needs.
 	Monitor Monitor
-	// ActionsFor renders the actions list a resource advertises for the named
-	// routes, judged against the current state. In production the composition
-	// root injects its Router bound method here, so the Siren action shape
-	// (name, title, method, href, cliVerb, fields) has exactly one source; a
-	// surface never renders its own actions. Nil here only means the table is
-	// being declared rather than served (tests of declarations alone), where
-	// no actions list is ever rendered.
-	ActionsFor func(state contract.State, names ...string) []contract.Action
+	// actions renders the actions list a resource advertises for the named
+	// routes, judged against the current state. It is unexported and set only
+	// by New, which refuses a nil one, so a Surface built outside this
+	// package always renders its actions through the composition root's
+	// Router -- the single source of the Siren action shape (name, title,
+	// method, href, cliVerb, fields) -- and there is no path on which a served
+	// resource silently advertises nothing.
+	actions contract.ActionRenderer
 }
 
 // Monitor is the slice of the power engine the mute drives. Satisfied by
@@ -89,9 +89,20 @@ type Monitor interface {
 	MonitoringStatus(ctx context.Context) []power.GatewayMute
 }
 
-// New returns a Surface bound to its collaborators.
-func New(node string, href func(string) string, cfg config.Config, monitor Monitor) *Surface {
-	return &Surface{Node: node, Href: href, Config: cfg, Monitor: monitor}
+// New returns a Surface bound to its collaborators, rendering every actions
+// list through actions.
+//
+// It panics on a nil actions: unlike Monitor, which a test serving only the
+// report routes may leave nil, every resource with controls renders through
+// it, and a Surface without one is a wiring bug in the caller, not a state to
+// serve in. In production actions resolves the composition root's Router
+// lazily, since the Router is built from the very route table this Surface
+// declares.
+func New(node string, href func(string) string, cfg config.Config, monitor Monitor, actions contract.ActionRenderer) *Surface {
+	if actions == nil {
+		panic("gogiosapi: New called with a nil ActionRenderer")
+	}
+	return &Surface{Node: node, Href: href, Config: cfg, Monitor: monitor, actions: actions}
 }
 
 // Muted reports whether Gogios is muted on at least one gateway.

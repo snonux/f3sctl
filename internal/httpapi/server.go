@@ -117,12 +117,6 @@ func newServer(cfg config.Config) (*Server, error) {
 	jobs := coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg))
 	peers := coordination.NewPeerSet(cfg.PeerNodes, resolvePeerJobPath(cfg, base))
 
-	// The two domain surfaces, each bound to exactly the collaborators its
-	// handlers need. Both share this node's href builder and, once the Router
-	// exists below, the same action rendering -- the single Siren source.
-	pw := powerapi.New(node, href, cfg.Inventory, eng, jobs, peers)
-	gg := gogiosapi.New(node, href, cfg, eng)
-
 	srv := &Server{
 		cfg:    cfg,
 		engine: eng,
@@ -132,15 +126,24 @@ func newServer(cfg config.Config) (*Server, error) {
 		siren:  NewSirenRenderer(),
 		node:   node,
 	}
+
+	// The two domain surfaces, each bound to exactly the collaborators its
+	// handlers need. Both share this node's href builder and srv's action
+	// renderer -- the single Siren source -- which resolves the Router that
+	// build hangs off srv lazily, at render time (see serverActions).
+	actions := srv.actionRenderer()
+	pw := powerapi.New(node, href, cfg.Inventory, eng, jobs, peers, actions)
+	gg := gogiosapi.New(node, href, cfg, eng, actions)
 	return srv.build(cfg.Inventory, pw, gg, base)
 }
 
-// build builds this Server's route table, hangs a Router (and the OpenAPI
-// builder over it) off the Server, and injects the router's action rendering
-// into both surfaces -- the wiring that makes the Server servable. It is its
-// own step so tests can construct a Server literal, wire the surfaces they
-// want, and go through exactly the same route-table and injection path
-// production takes (their assemble helper wraps this one).
+// build builds this Server's route table and hangs a Router (and the OpenAPI
+// builder over it) off the Server -- the wiring that makes the Server
+// servable. The surfaces must have been constructed with s.actionRenderer(),
+// which is what makes the actions they render come from this Router. It is
+// its own step so tests can construct a Server literal, build the surfaces
+// they want, and go through exactly the same route-table path production
+// takes (their assemble helper wraps this one).
 //
 // It fails only on an ambiguous route table (see NewRouter).
 func (s *Server) build(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) (*Server, error) {
@@ -150,9 +153,6 @@ func (s *Server) build(inv inventory.Inventory, pw *powerapi.Surface, gg *gogios
 	}
 	s.router = router
 	s.openapi = NewOpenAPIBuilder(router, inv)
-
-	pw.Actions, pw.ActionsFor, pw.SectionActions = router.actions, router.actionsFor, router.SectionActions
-	gg.ActionsFor = router.actionsFor
 	return s, nil
 }
 

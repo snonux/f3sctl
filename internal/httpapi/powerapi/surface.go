@@ -101,21 +101,17 @@ type Surface struct {
 	// ACConfirm is the AC-off guard's strict re-probe (every f-host). Nil
 	// means Engine.ACActivity. See confirmAC.
 	ACConfirm func(context.Context) power.RackActivity
-	// Actions renders the actions list of a resource that advertises the
-	// whole surface (the status route). ActionsFor renders the actions list of
-	// a resource that advertises only its own controls. SectionActions
-	// renders every action of one whole API section (contract.Route.Section)
-	// -- what a section folder offers (/power for host power, /ac-control for
-	// Shelly plugs), judged state by state, without the folder naming any
-	// action by hand. In production the composition root injects its Router
-	// bound methods here, so the Siren action shape (name, title, method,
-	// href, cliVerb, fields) has exactly one source; a surface never renders
-	// its own actions. Nil here only means the table is being declared
-	// rather than served (tests of declarations alone), where no actions
-	// list is ever rendered.
-	Actions        func(state contract.State) []contract.Action
-	ActionsFor     func(state contract.State, names ...string) []contract.Action
-	SectionActions func(state contract.State, section string) []contract.Action
+	// actions renders every actions list this surface's resources advertise:
+	// the whole API's (the status route), a resource's own controls, or one
+	// whole API section's (contract.Route.Section) -- what a section folder
+	// offers (/power for host power, /ac-control for Shelly plugs), judged
+	// state by state, without the folder naming any action by hand. It is
+	// unexported and set only by New, which refuses a nil one, so a Surface
+	// built outside this package always renders its actions through the
+	// composition root's Router -- the single source of the Siren action
+	// shape (name, title, method, href, cliVerb, fields) -- and there is no
+	// path on which a served resource silently advertises nothing.
+	actions contract.ActionRenderer
 }
 
 // Engine is the slice of the power engine the REST surface drives directly:
@@ -152,11 +148,23 @@ type Peers interface {
 	FetchJob(ctx context.Context, self, apiKey string) *coordination.Job
 }
 
-// New returns a Surface bound to its collaborators.
-func New(node string, href func(string) string, inv inventory.Inventory, eng Engine, jobs Jobs, peers Peers) *Surface {
+// New returns a Surface bound to its collaborators, rendering every actions
+// list through actions.
+//
+// It panics on a nil actions: unlike the other collaborators, which a test
+// serving only some routes may leave nil, every resource with controls
+// renders through it, and a Surface without one is a wiring bug in the
+// caller, not a state to serve in. In production actions resolves the
+// composition root's Router lazily, since the Router is built from the very
+// route table this Surface declares.
+func New(node string, href func(string) string, inv inventory.Inventory, eng Engine, jobs Jobs, peers Peers, actions contract.ActionRenderer) *Surface {
+	if actions == nil {
+		panic("powerapi: New called with a nil ActionRenderer")
+	}
 	return &Surface{
 		Node: node, Href: href, Inv: inv,
 		Engine: eng, Jobs: jobs, Peers: peers,
+		actions: actions,
 	}
 }
 

@@ -35,11 +35,11 @@ func hasRel(links []contract.Link, rel string) bool {
 	return false
 }
 
-// testSurface returns a Surface with no real collaborators: the read-side
-// handlers under test here render only from state, and the table-declaration
-// nil-safety means no Monitor or ActionsFor is needed to serve them.
+// testSurface returns a Surface with no real collaborators beyond the echo
+// renderer: the read-side handlers under test here render only from state, so
+// no Monitor is needed to serve them.
 func testSurface() *Surface {
-	return New("test", contract.Hrefs(""), config.Default(), nil)
+	return New("test", contract.Hrefs(""), config.Default(), nil, echoActions{})
 }
 
 // gogiosSample is a small, representative Gogios report for handler tests:
@@ -353,7 +353,7 @@ func gogiosCacheTestSurface(t *testing.T, body string) (*Surface, *int32) {
 	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
 	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
 
-	return New("test", contract.Hrefs(""), cfg, nil), &hits
+	return New("test", contract.Hrefs(""), cfg, nil, echoActions{}), &hits
 }
 
 // gogiosReportJSON is a minimal, valid Gogios report body for
@@ -410,7 +410,7 @@ func TestHandleGogiosClearCacheSurfacesAFetchErrorAfterClearing(t *testing.T) {
 	cfg.GogiosURL = upstream.URL
 	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
 	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
-	sf := New("test", contract.Hrefs(""), cfg, nil)
+	sf := New("test", contract.Hrefs(""), cfg, nil, echoActions{})
 
 	e, status, err := sf.handleClearCache(context.Background(), contract.State{}, contract.Request{})
 	if err != nil {

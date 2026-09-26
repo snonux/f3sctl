@@ -118,7 +118,7 @@ func TestRouterActionsForNarrowsToTheNamedRoutes(t *testing.T) {
 	// is available; every other action stays withheld by its own Available
 	// predicate regardless of the name filter.
 	state := contract.State{Fans: power.FansState{On: true}}
-	got := rt.actionsFor(state, "fans-on", "fans-off")
+	got := rt.ActionsFor(state, "fans-on", "fans-off")
 	if len(got) != 1 || got[0].Name != "fans-off" {
 		t.Fatalf("ActionsFor(fans-on, fans-off) = %v, want just [fans-off]", names(got))
 	}

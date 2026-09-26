@@ -35,7 +35,7 @@ func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req c
 			{Rel: []string{"self"}, Href: sf.Href(StatusPath)},
 			{Rel: []string{"up"}, Href: sf.Href("/")},
 		},
-		Actions: sf.allActions(state),
+		Actions: sf.actions.Actions(state),
 	}
 
 	e.Entities = append(e.Entities, sf.hostEntities(state.Hosts)...)
@@ -46,34 +46,6 @@ func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req c
 		e.Entities = append(e.Entities, sf.jobEntity(*job))
 	}
 	return e, http.StatusOK, nil
-}
-
-// allActions and actionsFor render actions onto a resource, nil-safely: the
-// table can be declared (and its predicates tested) without the composition
-// root's Router attached, and a route declaration never needs to render an
-// actions list -- only serving one does. The injected fields (see Surface)
-// are what keep the Siren action shape in exactly one place, the composition
-// root's Router, so a surface cannot grow its own action rendering that
-// drifts from the rest of the API's.
-func (sf *Surface) allActions(state contract.State) []contract.Action {
-	if sf.Actions == nil {
-		return nil
-	}
-	return sf.Actions(state)
-}
-
-func (sf *Surface) actionsFor(state contract.State, names ...string) []contract.Action {
-	if sf.ActionsFor == nil {
-		return nil
-	}
-	return sf.ActionsFor(state, names...)
-}
-
-func (sf *Surface) sectionActions(state contract.State, section string) []contract.Action {
-	if sf.SectionActions == nil {
-		return nil
-	}
-	return sf.SectionActions(state, section)
 }
 
 // handlePowerFolder renders the Power control section folder: host wake and
@@ -98,7 +70,7 @@ func (sf *Surface) handlePowerFolder(_ context.Context, state contract.State, _ 
 			{Rel: []string{"status"}, Href: sf.Href(StatusPath)},
 			{Rel: []string{"job"}, Href: sf.Href(JobPath)},
 		},
-		Actions: sf.sectionActions(state, contract.SectionPower),
+		Actions: sf.actions.SectionActions(state, contract.SectionPower),
 	}, http.StatusOK, nil
 }
 
@@ -116,7 +88,7 @@ func (sf *Surface) handleACControlFolder(_ context.Context, state contract.State
 			{Rel: []string{"fans"}, Href: sf.Href("/fans")},
 			{Rel: []string{"ac"}, Href: sf.Href("/ac")},
 		},
-		Actions: sf.sectionActions(state, contract.SectionAC),
+		Actions: sf.actions.SectionActions(state, contract.SectionAC),
 	}, http.StatusOK, nil
 }
 
@@ -194,7 +166,7 @@ func (sf *Surface) handleFans(_ context.Context, state contract.State, _ contrac
 		// Nested under AC control, not the root overview (NoRootLink).
 		{Rel: []string{"up"}, Href: sf.Href("/ac-control")},
 	}
-	e.Actions = sf.actionsFor(state, "fans-on", "fans-off")
+	e.Actions = sf.actions.ActionsFor(state, "fans-on", "fans-off")
 	return e, http.StatusOK, nil
 }
 
@@ -326,7 +298,7 @@ func (sf *Surface) handleAC(_ context.Context, state contract.State, _ contract.
 		// Nested under AC control, not the root overview (NoRootLink).
 		{Rel: []string{"up"}, Href: sf.Href("/ac-control")},
 	}
-	e.Actions = sf.actionsFor(state, "ac-on", "ac-off")
+	e.Actions = sf.actions.ActionsFor(state, "ac-on", "ac-off")
 	return e, http.StatusOK, nil
 }
 

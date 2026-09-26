@@ -79,7 +79,7 @@ func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 	cfg := config.Default()
 	cfg.StateDir = t.TempDir()
 	inv := inventory.Default()
-	return (&Server{
+	srv := &Server{
 		cfg:           cfg,
 		jobs:          coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
 		peers:         coordination.NewPeerSet(nil, ""),
@@ -87,7 +87,8 @@ func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 		siren:         NewSirenRenderer(),
 		node:          "test",
 		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, testPowerSurface(inv), gogiosapi.New("test", contract.Hrefs(""), cfg, gw), "")
+	}
+	return srv.assemble(inv, testPowerSurface(inv, srv.actionRenderer()), gogiosapi.New("test", contract.Hrefs(""), cfg, gw, srv.actionRenderer()), "")
 }
 
 // TestPostMonitoringMuteFinishesAPartialMute drives POST /monitoring/mute

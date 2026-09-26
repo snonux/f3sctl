@@ -99,7 +99,7 @@ func TestStatusMarksThePowerGroupOnHostEntities(t *testing.T) {
 			map[string]bool{"f0": true, "f1": false, "f2": true, "f3": true, "r0": false, "pi0": false}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sf := &Surface{Inv: tc.inv, Href: contract.Hrefs("")}
+			sf := testNew(tc.inv)
 			e, _, err := sf.handleStatus(context.Background(), contract.State{Hosts: snapshot}, contract.Request{})
 			if err != nil {
 				t.Fatalf("handleStatus: %v", err)
@@ -161,7 +161,7 @@ func TestGroupActionTitlesNameTheInventorysHosts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := map[string]string{}
-			for _, r := range New("test", contract.Hrefs(""), tc.inv, nil, nil, nil).Routes() {
+			for _, r := range testNew(tc.inv).Routes() {
 				if _, ok := tc.want[r.Name]; ok {
 					got[r.Name] = r.Title
 				}

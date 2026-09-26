@@ -118,7 +118,7 @@ func (rt *Router) Links() []contract.Link {
 // Actions that are not possible are omitted entirely rather than marked
 // disabled. That is the core of the contract: a client renders what it is
 // given, and never needs to encode a rule about when something is allowed.
-func (rt *Router) actions(state contract.State) []contract.Action {
+func (rt *Router) Actions(state contract.State) []contract.Action {
 	var out []contract.Action
 	for _, r := range rt.routes {
 		if !r.Action || !r.IsAvailable(state) {
@@ -131,7 +131,7 @@ func (rt *Router) actions(state contract.State) []contract.Action {
 
 // ActionsFor is Actions narrowed to the named routes, for resources that
 // should only advertise their own controls.
-func (rt *Router) actionsFor(state contract.State, names ...string) []contract.Action {
+func (rt *Router) ActionsFor(state contract.State, names ...string) []contract.Action {
 	var out []contract.Action
 	for _, r := range rt.routes {
 		if !r.Action || !r.IsAvailable(state) || !slices.Contains(names, r.Name) {
@@ -160,10 +160,11 @@ func (rt *Router) SectionActions(state contract.State, section string) []contrac
 	return out
 }
 
-// actions and actionsFor are injected into both domain surfaces (see
-// powerapi.Surface and gogiosapi.Surface), so resources rendered inside a
-// surface handler advertise exactly the actions the route table says are
-// possible right now.
+// Router is the contract.ActionRenderer both domain surfaces render through
+// (reached lazily via Server.actionRenderer, see actions.go), so resources
+// rendered inside a surface handler advertise exactly the actions the route
+// table says are possible right now.
+var _ contract.ActionRenderer = (*Router)(nil)
 
 func (rt *Router) action(r contract.Route, state contract.State) contract.Action {
 	a := contract.Action{

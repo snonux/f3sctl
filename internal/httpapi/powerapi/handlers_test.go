@@ -89,7 +89,7 @@ func testSurface(t *testing.T, plug *fakePlug, confirm func(context.Context) pow
 	// switching (jobStartedMeanwhile), and a nil here would panic -- which is
 	// the point, since production always wires both.
 	jobs := coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0)
-	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, jobs, coordination.NewPeerSet(nil, ""))
+	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, jobs, coordination.NewPeerSet(nil, ""), echoActions{})
 	sf.RackConfirm = confirm
 	sf.ACConfirm = confirm
 	return sf
@@ -431,12 +431,9 @@ const peerRunningJobBody = `{"properties":{"id":"peer-job","state":"running","no
 // with no engine at all (nothing they exercise reads one).
 func testSurfaceWithPeer(t *testing.T, peer *httptest.Server) *Surface {
 	t.Helper()
-	return &Surface{
-		Node:  "test",
-		Href:  contract.Hrefs(""),
-		Jobs:  coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
-		Peers: &coordination.PeerSet{Nodes: []string{peer.Listener.Addr().String()}, JobPath: "/job"},
-	}
+	jobs := coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default()))
+	peers := &coordination.PeerSet{Nodes: []string{peer.Listener.Addr().String()}, JobPath: "/job"}
+	return New("test", contract.Hrefs(""), inventory.Inventory{}, nil, jobs, peers, echoActions{})
 }
 
 // TestHandleJobMergesLocalAndPeerJobs pins currentJob's purpose end to end:

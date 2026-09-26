@@ -48,7 +48,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 	}
 
 	pc := &probeCounter{}
-	srv := (&Server{
+	srv := &Server{
 		cfg:   config.Default(),
 		jobs:  coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -67,7 +67,8 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 			pc.acReads++
 			return power.ACState{}, nil
 		},
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+	}
+	srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()), "")
 	return srv, pc
 }
 
@@ -245,7 +246,7 @@ func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
 		t.Fatalf("writing the API key file: %v", err)
 	}
 
-	srv := (&Server{
+	srv := &Server{
 		cfg:   config.Default(),
 		jobs:  coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -263,7 +264,8 @@ func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: true}, nil
 		},
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+	}
+	srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()), "")
 
 	var out bytes.Buffer
 	if err := srv.serve(&out, getRequest("/fans")); err != nil {
@@ -518,7 +520,7 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
 	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	cfg.GogiosCacheTTL = config.Duration(time.Minute)
-	return (&Server{
+	srv := &Server{
 		cfg:   cfg,
 		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -538,7 +540,8 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		// The Gogios surface carries this cfg rather than config.Default(), so
 		// the report cache it reads -- and gogios-cache-clear removes -- lives
 		// in the temp StateDir above, never the real /var/db/f3sctl.
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), gogiosapi.New("test", contract.Hrefs(""), cfg, nil), "")
+	}
+	return srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), gogiosapi.New("test", contract.Hrefs(""), cfg, nil, srv.actionRenderer()), "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:
