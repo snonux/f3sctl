@@ -46,10 +46,10 @@ func testSurface() *Surface {
 // one unhandled CRITICAL, one stale WARNING (its lifecycle is stale, but its
 // own severity stays WARNING), a suppressed UNKNOWN and a suppressed
 // CRITICAL, and two OK checks. The summary counts leave the suppressed checks
-// out, exactly as Gogios's countBy does. The unhandled CRITICAL and one OK changed since the last notification, so -- exactly
-// as Gogios writes it -- each is also listed in StatusChanged with its
-// PrevStatus. Mirrors the shape internal/gogios/gogios_test.go's own fixture
-// describes.
+// out, exactly as Gogios's countBy does. The unhandled CRITICAL and one OK
+// changed since the last notification, so -- exactly as Gogios writes it --
+// each is also listed in StatusChanged with its PrevStatus. Mirrors the shape
+// internal/gogios/gogios_test.go's own fixture describes.
 func gogiosSample() *gogios.Report {
 	return &gogios.Report{
 		LastUpdated: "2026-08-27T08:58:18+02:00",
@@ -135,9 +135,10 @@ func TestHandleGogiosReportsAFetchErrorAsAProperty(t *testing.T) {
 }
 
 // TestHandleGogiosStatusFiltersBySeverity pins the four severity categories:
-// each is the union, across every lifecycle section, of checks with that
-// Status -- see checksForStatus. A check also listed in StatusChanged must
-// appear once, not twice, and a suppressed check not at all.
+// each is the union, across Unhandled, Stale and Ok (the sections behind
+// Gogios's summary counts), of checks with that Status -- see
+// checksForStatus. A check also listed in StatusChanged must appear once, not
+// twice, and a suppressed check not at all.
 func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 	sf := testSurface()
 	state := contract.State{Gogios: gogiosSample()}
