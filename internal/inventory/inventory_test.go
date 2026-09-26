@@ -291,10 +291,11 @@ func TestUnmarshalRejectsInvalidHostLists(t *testing.T) {
 }
 
 // TestReservedHostNamesAreRejected pins every reserved word: each is already a
-// CLI word or route segment, so a host by that name would shadow it.
+// CLI word or route segment, or ("fans", "ac") would give a host the action
+// names of a plug, so a host by that name would shadow it.
 func TestReservedHostNamesAreRejected(t *testing.T) {
 	const f = `{"name":"f0","role":"f","standalone":false}`
-	for _, name := range []string{"all", "on", "off", "status", "cycle", "power"} {
+	for _, name := range []string{"all", "on", "off", "status", "cycle", "power", "fans", "ac"} {
 		inv := Default()
 		raw := `{"hosts":[` + f + `,{"name":"` + name + `","role":"f","standalone":false}]}`
 		err := json.Unmarshal([]byte(raw), &inv)

@@ -182,8 +182,11 @@ var hostNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 
 // reservedHostNames are the words a host must not be called: each is already
 // a CLI word or route segment (`power all on`, `/power/all/cycle`, `power
-// status`), so a host by that name would shadow it or be shadowed by it.
-var reservedHostNames = []string{"all", "on", "off", "status", "cycle", "power"}
+// status`), or would make a host's <name>-on/<name>-off action collide with
+// a plug's (fans-off, ac-off), so a host by that name would shadow it or be
+// shadowed by it. httpapi.NewRouter refuses duplicate action names as the
+// structural backstop.
+var reservedHostNames = []string{"all", "on", "off", "status", "cycle", "power", "fans", "ac"}
 
 // validateHost rejects a host that would silently fall out of every group or
 // collide with the command and route vocabulary: no name, a name that is not

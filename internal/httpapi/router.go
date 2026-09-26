@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
 
@@ -30,8 +31,38 @@ type Router struct {
 
 // NewRouter returns a Router that builds hrefs under base and serves the
 // given route table.
+//
+// It panics if the table is ambiguous (see checkRoutes). Lookups take the
+// first match, so a duplicate would silently serve one route under another's
+// name -- a host called "fans" had its shutdown offered as "fans-off". Host
+// names are validated when the inventory is loaded (inventory.validateHost),
+// so reaching this is a programming error, and failing at startup is the
+// honest response.
 func NewRouter(base string, rs []contract.Route) *Router {
+	if err := checkRoutes(rs); err != nil {
+		panic("httpapi: " + err.Error())
+	}
 	return &Router{base: base, routes: rs}
+}
+
+// checkRoutes reports the first route that shares its name, or its method
+// and path, with an earlier one. Names are what actions are advertised and
+// looked up by; method and path are what requests are dispatched on.
+func checkRoutes(rs []contract.Route) error {
+	names := make(map[string]bool, len(rs))
+	endpoints := make(map[string]bool, len(rs))
+	for _, r := range rs {
+		if names[r.Name] {
+			return fmt.Errorf("duplicate route name %q", r.Name)
+		}
+		names[r.Name] = true
+		endpoint := r.Method + " " + r.Path
+		if endpoints[endpoint] {
+			return fmt.Errorf("duplicate route %s (%q)", endpoint, r.Name)
+		}
+		endpoints[endpoint] = true
+	}
+	return nil
 }
 
 // Href builds an absolute path for a route. The shape is contract.Href's, so
