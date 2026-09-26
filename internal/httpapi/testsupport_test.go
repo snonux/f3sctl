@@ -17,30 +17,42 @@ import (
 // powerapi/gogiosapi's own tests) or uses the fully-wired newServer / ServeCGI
 // paths.
 
-// testPowerSurface returns the power surface with inert collaborators,
-// rendering its actions through actions -- the actionRenderer of the Server
-// it is about to be assembled into, exactly as newServer wires it.
-func testPowerSurface(inv inventory.Inventory, actions contract.ActionRenderer) *powerapi.Surface {
-	return powerapi.New("test", contract.Hrefs(""), inv, nil, nil, nil, actions)
+// testPowerSurface returns a factory for the power surface with inert
+// collaborators, for Server.build (via assemble) to bind to its renderer.
+func testPowerSurface(inv inventory.Inventory) powerSurfaceFunc {
+	return func(actions contract.ActionRenderer) *powerapi.Surface {
+		return powerapi.New("test", contract.Hrefs(""), inv, nil, nil, nil, actions)
+	}
 }
 
-// testGogiosSurface returns the Gogios surface with inert collaborators,
-// rendering its actions through actions (see testPowerSurface).
-func testGogiosSurface(actions contract.ActionRenderer) *gogiosapi.Surface {
-	return gogiosapi.New("test", contract.Hrefs(""), config.Default(), nil, actions)
+// testGogiosSurface returns a factory for the Gogios surface with inert
+// collaborators (see testPowerSurface).
+func testGogiosSurface() gogiosSurfaceFunc {
+	return func(actions contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New("test", contract.Hrefs(""), config.Default(), nil, actions)
+	}
 }
 
 // testRoutes builds the same table newServer would, from the given inventory
 // and inert surfaces -- the pure-declaration subset of production wiring.
+//
+// The surfaces render through a Router over this very table, so any action a
+// route of it renders comes from the same table, as in production. That
+// Router is set directly rather than through build/NewRouter because some
+// inventories under test deliberately yield an ambiguous table (see
+// TestNewRouterRefusesAmbiguousTables), which NewRouter would refuse.
 func testRoutes(inv inventory.Inventory) []contract.Route {
-	srv := testServer()
-	return srv.buildRoutes(inv, testPowerSurface(inv, srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()))
+	srv := &Server{}
+	actions := srv.actionRenderer()
+	rs := srv.buildRoutes(inv, testPowerSurface(inv)(actions), testGogiosSurface()(actions))
+	srv.router = &Router{routes: rs}
+	return rs
 }
 
 // assemble is Server.build for tests, whose route tables are known to be
 // unambiguous: it panics instead of returning the error, so a Server literal
 // can be wired in one expression.
-func (s *Server) assemble(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) *Server {
+func (s *Server) assemble(inv inventory.Inventory, pw powerSurfaceFunc, gg gogiosSurfaceFunc, base string) *Server {
 	srv, err := s.build(inv, pw, gg, base)
 	if err != nil {
 		panic(err)
@@ -61,8 +73,7 @@ func mustRouter(base string, rs []contract.Route) *Router {
 // testServer returns a Server with no collaborators at all, for building the
 // route table (which needs a Server only to bind the root-resource handlers).
 func testServer() *Server {
-	srv := &Server{}
-	return srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()), "")
+	return (&Server{}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 }
 
 // routeByName finds a route by its stable client-facing name, the way the

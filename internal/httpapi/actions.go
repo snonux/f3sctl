@@ -1,8 +1,20 @@
 package httpapi
 
-import "github.com/snonux/f3sctl/internal/httpapi/contract"
+import (
+	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
+)
 
-// serverActions is the contract.ActionRenderer a Server hands both domain
+// powerSurfaceFunc and gogiosSurfaceFunc construct a domain surface bound to
+// the given action renderer. Server.build takes these rather than finished
+// surfaces so that it, not its caller, supplies the renderer -- see build.
+type (
+	powerSurfaceFunc  func(contract.ActionRenderer) *powerapi.Surface
+	gogiosSurfaceFunc func(contract.ActionRenderer) *gogiosapi.Surface
+)
+
+// serverActions is the contract.ActionRenderer Server.build hands both domain
 // surfaces at construction time, resolving the Server's Router lazily -- on
 // every render, not when the surface is built.
 //
@@ -12,13 +24,12 @@ import "github.com/snonux/f3sctl/internal/httpapi/contract"
 // Surface), so no Router can exist when a surface is constructed. Resolving
 // through the Server means a surface is complete the moment its constructor
 // returns -- there is no field to assign afterwards and forget -- and the one
-// remaining ordering rule (Server.build must run before anything is served)
+// remaining ordering rule (the Router must exist before anything renders)
 // fails loudly instead of rendering an empty actions list.
 type serverActions struct{ s *Server }
 
-// actionRenderer returns the contract.ActionRenderer this Server's surfaces
-// must be constructed with, so actions they render come from the Router
-// Server.build later hangs off s.
+// actionRenderer returns the contract.ActionRenderer that renders through the
+// Router Server.build hangs off s. Only build hands it out.
 func (s *Server) actionRenderer() contract.ActionRenderer { return serverActions{s: s} }
 
 // router returns the Server's Router, panicking if Server.build has not run.

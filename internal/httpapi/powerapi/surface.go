@@ -106,11 +106,10 @@ type Surface struct {
 	// whole API section's (contract.Route.Section) -- what a section folder
 	// offers (/power for host power, /ac-control for Shelly plugs), judged
 	// state by state, without the folder naming any action by hand. It is
-	// unexported and set only by New, which refuses a nil one, so a Surface
-	// built outside this package always renders its actions through the
-	// composition root's Router -- the single source of the Siren action
-	// shape (name, title, method, href, cliVerb, fields) -- and there is no
-	// path on which a served resource silently advertises nothing.
+	// unexported and set once, by New, which rejects a nil one; in production
+	// it is the composition root's Router (resolved lazily), the single
+	// source of the Siren action shape (name, title, method, href, cliVerb,
+	// fields).
 	actions contract.ActionRenderer
 }
 

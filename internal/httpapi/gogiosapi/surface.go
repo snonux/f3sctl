@@ -69,12 +69,10 @@ type Surface struct {
 	// it, because mute/unmute are the only engine powers this surface needs.
 	Monitor Monitor
 	// actions renders the actions list a resource advertises for the named
-	// routes, judged against the current state. It is unexported and set only
-	// by New, which refuses a nil one, so a Surface built outside this
-	// package always renders its actions through the composition root's
-	// Router -- the single source of the Siren action shape (name, title,
-	// method, href, cliVerb, fields) -- and there is no path on which a served
-	// resource silently advertises nothing.
+	// routes, judged against the current state. It is unexported and set
+	// once, by New, which rejects a nil one; in production it is the
+	// composition root's Router (resolved lazily), the single source of the
+	// Siren action shape (name, title, method, href, cliVerb, fields).
 	actions contract.ActionRenderer
 }
 

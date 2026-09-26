@@ -48,7 +48,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 	}
 
 	pc := &probeCounter{}
-	srv := &Server{
+	srv := (&Server{
 		cfg:   config.Default(),
 		jobs:  coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -67,8 +67,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 			pc.acReads++
 			return power.ACState{}, nil
 		},
-	}
-	srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()), "")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
 	return srv, pc
 }
 
@@ -232,21 +231,21 @@ func cgiEnvForJob(t *testing.T, apiKey string) {
 	t.Setenv("CONTENT_LENGTH", "")
 }
 
-// TestAssembleInjectsRouterActionRenderingIntoThePowerSurface pins the wiring
-// assemble exists for: a power-surface handler that renders a resource-scoped
-// actions list (powerapi's handleFans) gets it from the composition root's
-// Router, not
-// from anything local to the surface. Without this injection the fans
-// resource would render zero actions -- every client would then see a plug it
-// may read but never switch -- and no availability test would catch it, since
-// predicates live on the routes this wiring advertises.
-func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
+// TestBuildRendersPowerSurfaceActionsThroughItsRouter pins the wiring build
+// owns: a power-surface handler that renders a resource-scoped actions list
+// (powerapi's handleFans) gets it from the Router build hangs off this very
+// Server -- its route table, its base -- not from anything local to the
+// surface. Without it the fans resource would render zero actions -- every
+// client would then see a plug it may read but never switch -- and no
+// availability test would catch it, since predicates live on the routes this
+// wiring advertises.
+func TestBuildRendersPowerSurfaceActionsThroughItsRouter(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "apikey")
 	if err := os.WriteFile(keyFile, []byte("sekrit\n"), 0o600); err != nil {
 		t.Fatalf("writing the API key file: %v", err)
 	}
 
-	srv := &Server{
+	srv := (&Server{
 		cfg:   config.Default(),
 		jobs:  coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default())),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -264,8 +263,7 @@ func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: true}, nil
 		},
-	}
-	srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), testGogiosSurface(srv.actionRenderer()), "")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "/cgi-bin/f3sctl")
 
 	var out bytes.Buffer
 	if err := srv.serve(&out, getRequest("/fans")); err != nil {
@@ -281,6 +279,9 @@ func TestAssembleInjectsRouterActionRenderingIntoThePowerSurface(t *testing.T) {
 	}
 	if got.Actions[0].CLIVerb != "fans off" {
 		t.Errorf("fans-off cliVerb = %q, want \"fans off\" (rendered by the Router, from the route declaration)", got.Actions[0].CLIVerb)
+	}
+	if got.Actions[0].Href != "/cgi-bin/f3sctl/fans/off" {
+		t.Errorf("fans-off href = %q, want it built under this Server's Router base", got.Actions[0].Href)
 	}
 }
 
@@ -520,7 +521,7 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
 	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	cfg.GogiosCacheTTL = config.Duration(time.Minute)
-	srv := &Server{
+	return (&Server{
 		cfg:   cfg,
 		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -540,8 +541,9 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		// The Gogios surface carries this cfg rather than config.Default(), so
 		// the report cache it reads -- and gogios-cache-clear removes -- lives
 		// in the temp StateDir above, never the real /var/db/f3sctl.
-	}
-	return srv.assemble(inventory.Default(), testPowerSurface(inventory.Default(), srv.actionRenderer()), gogiosapi.New("test", contract.Hrefs(""), cfg, nil, srv.actionRenderer()), "")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), func(a contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New("test", contract.Hrefs(""), cfg, nil, a)
+	}, "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:

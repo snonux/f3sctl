@@ -105,7 +105,10 @@ func jobGateServer(t *testing.T, plugsOn bool, src jobSource) (*Server, *plugRec
 	jobs := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0)
 	eng := &plugRecorder{}
 	inv := inventory.Default()
-	srv := &Server{
+	surface := func(a contract.ActionRenderer) *powerapi.Surface {
+		return powerapi.New("test", contract.Hrefs(""), inv, eng, jobs, peers, a)
+	}
+	srv := (&Server{
 		cfg: cfg, jobs: jobs, peers: peers,
 		auth: NewAuthenticator(keyFile), siren: NewSirenRenderer(), node: "test",
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
@@ -115,9 +118,8 @@ func jobGateServer(t *testing.T, plugsOn bool, src jobSource) (*Server, *plugRec
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: plugsOn}, nil
 		},
-	}
-	surface := powerapi.New("test", contract.Hrefs(""), inv, eng, jobs, peers, srv.actionRenderer())
-	return srv.assemble(inv, surface, testGogiosSurface(srv.actionRenderer()), ""), eng
+	}).assemble(inv, surface, testGogiosSurface(), "")
+	return srv, eng
 }
 
 // writeJobFile records j as this node's job, the way a spawned child would.

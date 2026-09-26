@@ -193,7 +193,7 @@ func (e Entity) Action(name string) (Action, bool) {
 // withheld -- the two are indistinguishable here on purpose, since only
 // possible actions are ever advertised (the server renders them from its
 // route table, filtered by each route's Available predicate -- see
-// powerapi.Surface.Actions).
+// httpapi's Router.Actions, via contract.ActionRenderer).
 func (e Entity) ActionForVerb(verb string) (Action, bool) {
 	for _, a := range e.Actions {
 		if a.CLIVerb != "" && a.CLIVerb == verb {

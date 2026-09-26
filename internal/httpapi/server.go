@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal/config"
@@ -85,17 +86,38 @@ type Server struct {
 // ServeCGI answers a single CGI request read from the process environment and
 // stdin, writing the response to out.
 func ServeCGI(cfg config.Config, out io.Writer) error {
-	// SirenRenderer is stateless, so it is safe to use ahead of a Server --
-	// the two error paths below can fire before one exists at all (a
-	// malformed request, or a Server that failed to construct).
-	siren := NewSirenRenderer()
+	return serveCGI(cfg, os.Stdin, out, os.Stderr, newServer)
+}
 
-	req, err := parseCGIRequest(os.Stdin)
+// serveCGI is ServeCGI with its process-level dependencies passed in: the
+// request body, the log stream a panic is reported to, and the Server
+// constructor -- the seam that lets a test serve through a Server whose
+// handler panics.
+//
+// A panic anywhere below -- a violated invariant such as serverActions'
+// unbuilt Router, or a bug in a handler -- is recovered here: its value and
+// stack go to logw (the web server's error log, under CGI), and the client
+// gets a Siren 500 like any other server fault rather than a truncated or
+// empty response. The panic's text is deliberately not sent to the client.
+func serveCGI(cfg config.Config, stdin io.Reader, out, logw io.Writer, newSrv func(config.Config) (*Server, error)) (err error) {
+	// SirenRenderer is stateless, so it is safe to use ahead of a Server --
+	// the error paths below can fire before one exists at all (a malformed
+	// request, a Server that failed to construct, or a panic while
+	// constructing one).
+	siren := NewSirenRenderer()
+	defer func() {
+		if p := recover(); p != nil {
+			fmt.Fprintf(logw, "f3sctl: panic serving CGI request: %v\n%s", p, debug.Stack())
+			err = siren.WriteError(out, http.StatusInternalServerError, "internal server error")
+		}
+	}()
+
+	req, err := parseCGIRequest(stdin)
 	if err != nil {
 		return siren.WriteError(out, http.StatusBadRequest, err.Error())
 	}
 
-	srv, err := newServer(cfg)
+	srv, err := newSrv(cfg)
 	if err != nil {
 		// A misconfigured server (unreadable SSH key, say) is a server fault,
 		// not the client's. Report it as one so a client does not retry.
@@ -128,26 +150,33 @@ func newServer(cfg config.Config) (*Server, error) {
 	}
 
 	// The two domain surfaces, each bound to exactly the collaborators its
-	// handlers need. Both share this node's href builder and srv's action
-	// renderer -- the single Siren source -- which resolves the Router that
-	// build hangs off srv lazily, at render time (see serverActions).
-	actions := srv.actionRenderer()
-	pw := powerapi.New(node, href, cfg.Inventory, eng, jobs, peers, actions)
-	gg := gogiosapi.New(node, href, cfg, eng, actions)
-	return srv.build(cfg.Inventory, pw, gg, base)
+	// handlers need and sharing this node's href builder. build constructs
+	// them, handing both its own action renderer.
+	newPower := func(actions contract.ActionRenderer) *powerapi.Surface {
+		return powerapi.New(node, href, cfg.Inventory, eng, jobs, peers, actions)
+	}
+	newGogios := func(actions contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New(node, href, cfg, eng, actions)
+	}
+	return srv.build(cfg.Inventory, newPower, newGogios, base)
 }
 
-// build builds this Server's route table and hangs a Router (and the OpenAPI
-// builder over it) off the Server -- the wiring that makes the Server
-// servable. The surfaces must have been constructed with s.actionRenderer(),
-// which is what makes the actions they render come from this Router. It is
-// its own step so tests can construct a Server literal, build the surfaces
-// they want, and go through exactly the same route-table path production
-// takes (their assemble helper wraps this one).
+// build constructs both domain surfaces, builds this Server's route table
+// from them, and hangs a Router (and the OpenAPI builder over it) off the
+// Server -- the wiring that makes the Server servable.
+//
+// build owns the surfaces' construction, taking factories rather than
+// finished surfaces, so it alone decides which action renderer they get: this
+// Server's own (see serverActions), which resolves the Router built here.
+// A surface rendering some other Server's actions cannot be assembled. It is
+// its own step so tests can construct a Server literal, supply the surfaces
+// they want, and go through exactly the same path production takes (their
+// assemble helper wraps this one).
 //
 // It fails only on an ambiguous route table (see NewRouter).
-func (s *Server) build(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) (*Server, error) {
-	router, err := NewRouter(base, s.buildRoutes(inv, pw, gg))
+func (s *Server) build(inv inventory.Inventory, newPower powerSurfaceFunc, newGogios gogiosSurfaceFunc, base string) (*Server, error) {
+	actions := s.actionRenderer()
+	router, err := NewRouter(base, s.buildRoutes(inv, newPower(actions), newGogios(actions)))
 	if err != nil {
 		return nil, err
 	}

@@ -146,7 +146,13 @@ func docServer(t *testing.T, o docOpts) *Server {
 	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
 	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	inv := inventory.Default()
-	srv := &Server{
+	pw := func(a contract.ActionRenderer) *powerapi.Surface {
+		return powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, a)
+	}
+	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New("test", contract.Hrefs(""), cfg, o.monitor, a)
+	}
+	return (&Server{
 		cfg: cfg, jobs: coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0),
 		peers: coordination.NewPeerSet(nil, ""),
 		auth:  NewAuthenticator(keyFile), siren: NewSirenRenderer(), node: "test",
@@ -156,10 +162,7 @@ func docServer(t *testing.T, o docOpts) *Server {
 		monitorStatus: func(context.Context) []power.GatewayMute {
 			return []power.GatewayMute{{Name: "gw", Muted: o.muted}}
 		},
-	}
-	pw := powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, srv.actionRenderer())
-	gg := gogiosapi.New("test", contract.Hrefs(""), cfg, o.monitor, srv.actionRenderer())
-	return srv.assemble(inv, pw, gg, "")
+	}).assemble(inv, pw, gg, "")
 }
 
 // withDefaults fills every nil collaborator with its well-behaved fake.

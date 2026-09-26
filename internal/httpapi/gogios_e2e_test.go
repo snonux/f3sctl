@@ -134,7 +134,13 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 	// collaborators stay nil, since every route this suite serves is either a
 	// /gogios* route or never dereferences the engine.
 	href := contract.Hrefs("")
-	srv := &Server{
+	pw := func(a contract.ActionRenderer) *powerapi.Surface {
+		return powerapi.New("e2e", href, cfg.Inventory, nil, nil, nil, a)
+	}
+	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New("e2e", href, cfg, nil, a)
+	}
+	srv := (&Server{
 		cfg:   cfg,
 		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -152,10 +158,7 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 		monitorStatus: func(context.Context) []power.GatewayMute {
 			return nil
 		},
-	}
-	pw := powerapi.New("e2e", href, cfg.Inventory, nil, nil, nil, srv.actionRenderer())
-	gg := gogiosapi.New("e2e", href, cfg, nil, srv.actionRenderer())
-	srv.assemble(cfg.Inventory, pw, gg, "")
+	}).assemble(cfg.Inventory, pw, gg, "")
 
 	e2e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
