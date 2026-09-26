@@ -47,10 +47,13 @@ type fakeAPI struct {
 	// up on it -- an action still in flight when the operator hits Ctrl-C.
 	hangPost bool
 
-	// fansOn, when true, makes /fans also advertise fans-on (and POST
-	// /fans/on answer with the plug's new state), for tests of a
-	// synchronous success's follow-up. Off by default so every older test
-	// sees the fans-off-only advertisement it was written against.
+	// fansOn, when true, puts the fan plug in the off state: /fans then
+	// advertises only fans-on, never alongside fans-off (the real routes
+	// gate the two on opposite plug states -- see powerapi's fanRoutes), and
+	// POST /fans/on answers with the re-rendered /fans entity, as the real
+	// setFans does. It exists for tests of a synchronous success's
+	// follow-up; off by default, so every older test sees the plug on and
+	// the fans-off advertisement it was written against.
 	fansOn bool
 
 	// rootActions, powerActions and statusActions are what GET /, GET
@@ -107,7 +110,7 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/fans/off" && r.Method == http.MethodPost:
 		f.handleFansOff(w, r)
 	case r.URL.Path == "/fans/on" && r.Method == http.MethodPost && f.fansOn:
-		writeEntity(w, Entity{Properties: map[string]any{"on": true}})
+		f.handleFansOn(w)
 	case r.URL.Path == "/status" && r.Method == http.MethodGet:
 		// No hosts, no fan entity: enough for showStatus to render.
 		writeEntity(w, Entity{Class: []string{"status"}, Actions: f.statusActions})
@@ -139,12 +142,28 @@ func (f *fakeAPI) handleACControl(w http.ResponseWriter) {
 	})
 }
 
-// handleFans answers GET /fans, advertising fans-off with a required force
-// checkbox -- the same shape the power surface declares and the Router advertises
-// takes, which is what makes Client.Perform decide whether to fill the
-// field -- unless coldSnapshot is set, in which case the field is omitted
-// entirely, mirroring a cheap snapshot that read the rack as idle.
+// handleFans answers GET /fans. With the plug on (the default) it advertises
+// fans-off with a required force checkbox -- the same shape the power surface
+// declares and the Router advertises, which is what makes Client.Perform
+// decide whether to fill the field -- unless coldSnapshot is set, in which
+// case the field is omitted entirely, mirroring a cheap snapshot that read the
+// rack as idle. With fansOn set the plug is off and only fans-on is offered.
 func (f *fakeAPI) handleFans(w http.ResponseWriter) {
+	if f.fansOn {
+		writeEntity(w, fansEntity(false, Action{
+			Name:    "fans-on",
+			Title:   "Switch the rack fans on",
+			Method:  http.MethodPost,
+			Href:    "/fans/on",
+			CLIVerb: "fans on",
+		}))
+		return
+	}
+	writeEntity(w, fansEntity(true, f.fansOffAction()))
+}
+
+// fansOffAction is the fans-off advertisement: see handleFans.
+func (f *fakeAPI) fansOffAction() Action {
 	action := Action{
 		Name:    "fans-off",
 		Title:   "Switch the rack fans off",
@@ -157,13 +176,24 @@ func (f *fakeAPI) handleFans(w http.ResponseWriter) {
 			{Name: "force", Type: "checkbox", Title: "hosts may still be running", Required: true},
 		}
 	}
-	actions := []Action{action}
-	if f.fansOn {
-		actions = append(actions, Action{
-			Name: "fans-on", Method: http.MethodPost, Href: "/fans/on", CLIVerb: "fans on",
-		})
+	return action
+}
+
+// fansEntity is the /fans resource in the shape powerapi's handleFans
+// renders it: the plug's state plus the one action that state allows.
+func fansEntity(on bool, action Action) Entity {
+	return Entity{
+		Class:      []string{"fans"},
+		Properties: map[string]any{"on": on, "ip": "192.168.1.99"},
+		Links:      []Link{{Rel: []string{"self"}, Href: "/fans"}},
+		Actions:    []Action{action},
 	}
-	writeEntity(w, Entity{Class: []string{"fans"}, Actions: actions})
+}
+
+// handleFansOn answers POST /fans/on with the re-rendered /fans entity, now
+// on and offering fans-off -- what the real setFans returns.
+func (f *fakeAPI) handleFansOn(w http.ResponseWriter) {
+	writeEntity(w, fansEntity(true, f.fansOffAction()))
 }
 
 // handleFansOff answers POST /fans/off, recording the "force" form value the
