@@ -443,7 +443,15 @@ const fansLeftOn = "rack fans left ON"
 // RackActivity, which counts unknown as running and wants consecutive misses
 // before it accepts that a host is off.
 func (e *Engine) fansOffOnceTheRackIsIdle(ctx context.Context, log io.Writer) ([]string, error) {
-	if busy := e.RackActivity(ctx); busy.Busy() {
+	busy := e.RackActivity(ctx)
+	if err := ctx.Err(); err != nil {
+		// Checked before the busy judgement: probes the cancel cut short read
+		// as unknown, i.e. busy, and "fans left on" would then end an
+		// interrupted run as a success (exit 0, job done). The fans stay on
+		// either way; only the report changes.
+		return nil, shutdownInterrupted(nil, err)
+	}
+	if busy.Busy() {
 		e.reporter().Step(fansLeftOnReason(busy.Hosts()))
 		fmt.Fprintf(log, "%s: %s.\n", fansLeftOn, busy.Why())
 		return busy.Hosts(), nil

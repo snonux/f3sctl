@@ -1,6 +1,7 @@
 package power
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/powertest"
 )
 
 // TestShutdownWorstCaseAtDefaults pins ShutdownWorstCase's formula against the
@@ -75,5 +77,35 @@ func TestShutdownInterruptedWithNothingPending(t *testing.T) {
 	err := shutdownInterrupted(nil, context.Canceled)
 	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "every host was confirmed off") {
 		t.Errorf("err = %v, want every host confirmed off and a wrapped context.Canceled", err)
+	}
+}
+
+// TestFansOffInterruptedIsNotASuccess pins the end of a rack-wide shutdown
+// under Ctrl-C. The rack probe's pings, cut short by the cancel, read as
+// unknown -- i.e. busy -- so the run used to end "All hosts accepted
+// shutdown ... rack fans left ON" and exit 0, a job.json "done" for a run the
+// operator interrupted.
+func TestFansOffInterruptedIsNotASuccess(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	eng := testEngine(t, shelly)
+	eng.isUp = func(ctx context.Context, _ string) (bool, bool) {
+		if ctx.Err() != nil {
+			return false, false // a probe the cancel cut short
+		}
+		return false, true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var log bytes.Buffer
+	err := eng.fansOffAndReport(ctx, &log)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("err = %v, want a wrapped context.Canceled saying the shutdown was interrupted", err)
+	}
+	if strings.Contains(log.String(), "All hosts accepted shutdown") {
+		t.Errorf("log = %q, want no success line for an interrupted run", log.String())
+	}
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want the fans left alone", got)
 	}
 }

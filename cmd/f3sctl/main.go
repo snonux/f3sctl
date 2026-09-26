@@ -130,8 +130,10 @@ func signalContext(notice io.Writer) (context.Context, func()) {
 				// Cancel first: a blocked notice writer (a stalled
 				// terminal) must not delay the wind-down.
 				cancel()
-				fmt.Fprintf(notice, "f3sctl: %v received, winding down (an interrupted "+
-					"power cycle restores f-host AC first); please wait...\n", sig)
+				// Generic on purpose: a local cycle restores AC before it
+				// returns, but a run going through the API only stops
+				// waiting -- the client says so itself (client.waitForJob).
+				fmt.Fprintf(notice, "f3sctl: %v received; interrupted, winding down, please wait...\n", sig)
 			case <-pipes:
 				// Discarded: catching it is the whole point.
 			case <-done:

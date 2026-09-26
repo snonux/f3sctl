@@ -197,11 +197,15 @@ func TestWaitForJobGivesUpAtItsOwnDeadline(t *testing.T) {
 	api := newFakeJobAPI(t, jobEntity(map[string]any{"id": "other", "state": "running"}))
 	cfg := config.Default()
 	cfg.UnmuteTimeout = config.Duration(time.Millisecond)
-	c, _ := newJobClient(t, api, cfg, fastPoll(50*time.Millisecond))
+	c, out := newJobClient(t, api, cfg, fastPoll(50*time.Millisecond))
 
 	err := c.waitForJob(context.Background(), mustRoot(t, c), "mine", 0)
 	if !errors.Is(err, errJobWaitTimeout) {
 		t.Fatalf("waitForJob = %v, want errJobWaitTimeout", err)
+	}
+	// Giving up is not an interrupt: the error says so on its own.
+	if got := out.String(); strings.Contains(got, "Stopped waiting") {
+		t.Errorf("output %q reports an interrupt nobody made", got)
 	}
 }
 
@@ -225,6 +229,16 @@ func TestWaitForJobSurfacesTheCallersCancellation(t *testing.T) {
 	if got := out.String(); strings.Contains(got, "cannot read the job") {
 		t.Errorf("output %q reports the cancellation as a failed read", got)
 	}
+	// Ctrl-C stops only the wait: the job runs on in the API's detached
+	// child, and the operator must not be left thinking it was called off.
+	got := out.String()
+	for _, want := range []string{"keeps running on the API", "id mine", api.srv.URL + "/job",
+		"f3sctl --remote power status"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q, want it to contain %q", got, want)
+		}
+	}
+	out.Reset()
 
 	api.setOnJob(nil)
 	short, cancelShort := context.WithTimeout(context.Background(), 20*time.Millisecond)

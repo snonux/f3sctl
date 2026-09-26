@@ -85,8 +85,7 @@ func (e *Engine) cycleAC(ctx context.Context, log io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		// Checked first: probes cut short by the cancel read as "unknown",
 		// which Busy counts as running, and "refusing" would misreport it.
-		return fmt.Errorf("power cycle interrupted before AC was cut: AC left ON, the hosts "+
-			"left powered off; wake them with `f3sctl power all on`: %w", err)
+		return interruptedBeforeCut(err)
 	}
 	if busy.Busy() {
 		return fmt.Errorf("refusing to cut f-host AC: %s; AC left ON", busy.Why())
@@ -121,6 +120,11 @@ func (e *Engine) cycleAC(ctx context.Context, log io.Writer) error {
 func (e *Engine) cutAC(ctx context.Context, log io.Writer) error {
 	e.reporter().Step("cutting f-host mains AC")
 	fmt.Fprintln(log, "Cutting f-host mains AC...")
+	// Last chance to honour an interrupt without touching the plug: once the
+	// detached Set goes out, the cut happens whatever arrives meanwhile.
+	if err := ctx.Err(); err != nil {
+		return interruptedBeforeCut(err)
+	}
 	_, err := e.acBackend().Set(context.WithoutCancel(ctx), false)
 	if err == nil {
 		return nil
@@ -154,6 +158,13 @@ func (e *Engine) restoreAC(ctx context.Context, log io.Writer) error {
 	e.reporter().Step("f-host mains AC restored")
 	fmt.Fprintln(log, "Restored f-host mains AC.")
 	return nil
+}
+
+// interruptedBeforeCut is the error for a cycle cancelled after the shutdown
+// but before the plug was switched: AC untouched, hosts off.
+func interruptedBeforeCut(err error) error {
+	return fmt.Errorf("power cycle interrupted before AC was cut: AC left ON, the hosts "+
+		"left powered off; wake them with `f3sctl power all on`: %w", err)
 }
 
 // cycleInterrupted is the error for a cycle cancelled after AC was cut. By

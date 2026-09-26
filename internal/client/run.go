@@ -301,6 +301,7 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 			}
 			// The caller cancelled (Ctrl-C, or the request that drove this went
 			// home). Surface that rather than reporting a synthetic "gave up".
+			c.reportStillRunning(root, id)
 			return ctx.Err()
 		case <-time.After(poll.interval):
 		}
@@ -309,6 +310,27 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 			return c.showStatus(ctx)
 		}
 	}
+}
+
+// reportStillRunning tells an operator who interrupted the wait that only
+// the wait stopped. The job runs in the API's detached child, out of this
+// process's reach: a shutdown carries on, and a power cycle still cuts and
+// restores AC. Without this, the Ctrl-C reads as if it had called the
+// operation off.
+func (c *Client) reportStillRunning(root Entity, id string) {
+	if id == "" {
+		id = "unknown"
+	}
+	fmt.Fprintf(c.stdout, "\nStopped waiting, but the job (id %s) keeps running on the API: "+
+		"interrupting here does not stop it.\n", id)
+	if href, ok := root.Link("job"); ok {
+		if jobURL, err := c.resolve(href); err == nil {
+			fmt.Fprintf(c.stdout, "Follow it at %s, or check the rack with "+
+				"`f3sctl --remote power status`.\n", jobURL)
+			return
+		}
+	}
+	fmt.Fprintln(c.stdout, "Check the rack with `f3sctl --remote power status`.")
 }
 
 // jobDeadline returns how long waitForJob polls: jobWaitTimeout, raised to

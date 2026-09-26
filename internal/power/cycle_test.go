@@ -220,6 +220,18 @@ func TestCycleAllReportsTheRestoreBeforeSwitching(t *testing.T) {
 	steps := &recordingReporter{}
 	rig.eng.WithReporter(steps)
 	rig.ac.setErr = map[bool]error{true: errors.New("plug unreachable")}
+	// Checked at the moment of the switch: the final step list alone would
+	// also pass with the step recorded after the Set.
+	rig.ac.onSet = func(on bool) {
+		if !on {
+			return
+		}
+		steps.mu.Lock()
+		defer steps.mu.Unlock()
+		if indexOf(steps.steps, "restoring f-host mains AC") < 0 {
+			t.Errorf("AC switched on before \"restoring f-host mains AC\" was reported: %v", steps.steps)
+		}
+	}
 
 	if err := rig.eng.CycleAll(context.Background(), &rig.log); err == nil {
 		t.Fatal("cycle with a failing restore succeeded")
@@ -343,6 +355,42 @@ func TestCycleAllReportsACutAndRestoreFailure(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// hookReporter is a recordingReporter that also calls onStep for every step,
+// so a test can act at a precise point of the sequence.
+type hookReporter struct {
+	recordingReporter
+	onStep func(name string)
+}
+
+func (r *hookReporter) Step(name string) {
+	r.recordingReporter.Step(name)
+	if r.onStep != nil {
+		r.onStep(name)
+	}
+}
+
+// TestCutACHonoursACancelJustBeforeTheSwitch covers the last gap before the
+// detached cut: a Ctrl-C landing after the dark check, while the cut step is
+// being reported, must still leave the plug alone.
+func TestCutACHonoursACancelJustBeforeTheSwitch(t *testing.T) {
+	rig := newCycleRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.eng.WithReporter(&hookReporter{onStep: func(name string) {
+		if name == "cutting f-host mains AC" {
+			cancel()
+		}
+	}})
+
+	err := rig.eng.cycleAC(ctx, &rig.log)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "AC left ON") {
+		t.Fatalf("err = %v, want a wrapped context.Canceled saying AC was left on", err)
+	}
+	if steps := rig.seq.get(); len(steps) != 0 {
+		t.Errorf("plug touched after the run was cancelled: %v", steps)
 	}
 }
 
