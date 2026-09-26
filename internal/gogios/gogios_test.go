@@ -320,12 +320,11 @@ func TestFetchRespectsTheFetchTimeout(t *testing.T) {
 	}
 }
 
-// TestConcurrentFetchesDoNotCorruptTheCache pins writeCache's serialization:
-// several goroutines racing Fetch against a cold cache must not interleave
-// their writes to the shared path+".tmp" file. Before writeCacheMu was added,
-// concurrent os.WriteFile calls on that same tmp path could corrupt each
-// other's bytes ahead of either rename -- the same class of bug fixed in
-// internal/coordination.Manager for job.json.
+// TestConcurrentFetchesDoNotCorruptTheCache pins writeCache's concurrency
+// safety: several goroutines racing Fetch against a cold cache must leave a
+// valid cache and no stray temp files. There is no in-process lock; each
+// writer uses its own temp file, which is what also makes this safe across
+// the separate CGI processes the API runs as.
 func TestConcurrentFetchesDoNotCorruptTheCache(t *testing.T) {
 	srv, _ := countingServer(t, reportJSON, http.StatusOK)
 	cfg := testCfg(t, srv)
@@ -355,6 +354,132 @@ func TestConcurrentFetchesDoNotCorruptTheCache(t *testing.T) {
 	}
 	if _, err := parse(raw); err != nil {
 		t.Errorf("cache file corrupted by concurrent writers: %v", err)
+	}
+	assertNoTempFiles(t, cfg.StateDir)
+}
+
+// assertNoTempFiles fails the test if dir holds anything besides the cache
+// file itself: a leftover temp file means a writer did not clean up.
+func assertNoTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		if e.Name() != "gogios-report.json" {
+			t.Errorf("unexpected file %q left in the cache dir", e.Name())
+		}
+	}
+}
+
+// TestConcurrentWriteCacheDistinctBodies pins the "last rename wins, never a
+// mix" guarantee: writers racing with different bodies (as two CGI processes
+// fetching at slightly different times would) leave exactly one of the
+// bodies on disk, byte for byte, never an interleaving of them.
+func TestConcurrentWriteCacheDistinctBodies(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gogios-report.json")
+
+	const n = 16
+	bodies := make(map[string]bool, n)
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := range n {
+		// Large, distinct bodies make an interleaved write detectable.
+		body := strings.Repeat(fmt.Sprintf("%02d", i), 64<<10)
+		bodies[body] = true
+		wg.Add(1)
+		go func(i int, body string) {
+			defer wg.Done()
+			errs[i] = writeCache(path, []byte(body))
+		}(i, body)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("writer %d: %v", i, err)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the cache: %v", err)
+	}
+	if !bodies[string(got)] {
+		t.Errorf("cache holds %d bytes matching none of the written bodies (interleaved write)", len(got))
+	}
+	assertNoTempFiles(t, dir)
+}
+
+// TestWriteCacheErrorsWhenTheDirIsUnusable pins the failure path: when the
+// cache directory cannot be created (a regular file sits where it should be),
+// writeCache returns a wrapped error rather than panicking or succeeding.
+func TestWriteCacheErrorsWhenTheDirIsUnusable(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatalf("seeding the blocker file: %v", err)
+	}
+
+	err := writeCache(filepath.Join(blocker, "gogios-report.json"), []byte(reportJSON))
+	if err == nil {
+		t.Fatal("writeCache under a regular file succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "Gogios cache dir") {
+		t.Errorf("error = %v, want it to name the cache dir", err)
+	}
+}
+
+// TestWriteCacheCleansUpWhenTheRenameFails pins the temp-file cleanup: if the
+// final rename fails (here: a directory occupies the cache path), the temp
+// file must be removed rather than accumulating in the state dir.
+func TestWriteCacheCleansUpWhenTheRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gogios-report.json")
+	// A non-empty directory at the target path makes rename(2) fail.
+	if err := os.MkdirAll(filepath.Join(path, "occupied"), 0o700); err != nil {
+		t.Fatalf("seeding the blocking dir: %v", err)
+	}
+
+	err := writeCache(path, []byte(reportJSON))
+	if err == nil {
+		t.Fatal("writeCache over a non-empty directory succeeded, want an error")
+	}
+	if !strings.Contains(err.Error(), "renaming the Gogios cache") {
+		t.Errorf("error = %v, want it to be the rename failure", err)
+	}
+	assertNoTempFiles(t, dir)
+}
+
+// TestFetchErrorsOnAnOversizedBody pins the size cap: a body larger than
+// maxReportBytes is an explicit ErrReportTooLarge, not a silently truncated
+// body surfacing as a baffling JSON parse error, and it is not cached.
+func TestFetchErrorsOnAnOversizedBody(t *testing.T) {
+	// Valid JSON prefix padded past the limit: truncation would parse-fail,
+	// the explicit check must fire first.
+	body := `{"subject":"` + strings.Repeat("x", maxReportBytes) + `"}`
+	srv, _ := countingServer(t, body, http.StatusOK)
+	cfg := testCfg(t, srv)
+
+	_, err := Fetch(context.Background(), cfg)
+	if !errors.Is(err, ErrReportTooLarge) {
+		t.Fatalf("Fetch on an oversized body: err = %v, want ErrReportTooLarge", err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, "gogios-report.json")); err == nil {
+		t.Error("an oversized body left a cache file behind")
+	}
+}
+
+// TestReadBodyBoundary pins readBody's off-by-one handling: a body of exactly
+// the limit is accepted whole, one byte more is ErrReportTooLarge.
+func TestReadBodyBoundary(t *testing.T) {
+	const limit = 8
+	got, err := readBody(strings.NewReader(strings.Repeat("a", limit)), limit)
+	if err != nil || len(got) != limit {
+		t.Errorf("readBody(exactly limit) = %d bytes, err %v; want %d bytes, nil", len(got), err, limit)
+	}
+	if _, err := readBody(strings.NewReader(strings.Repeat("a", limit+1)), limit); !errors.Is(err, ErrReportTooLarge) {
+		t.Errorf("readBody(limit+1) err = %v, want ErrReportTooLarge", err)
 	}
 }
 

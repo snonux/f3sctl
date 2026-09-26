@@ -25,11 +25,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 )
+
+// maxReportBytes caps how much of the Gogios response body is read. The
+// federated report is a few tens of KiB; anything past this is a
+// misconfigured or hostile endpoint, not a report.
+const maxReportBytes = 1 << 20
+
+// ErrReportTooLarge is returned by Fetch when the Gogios response body
+// exceeds maxReportBytes. It is reported explicitly rather than silently
+// truncating the body into a confusing JSON parse error.
+var ErrReportTooLarge = errors.New("gogios report exceeds the size limit")
 
 // Report is the Gogios JSON report, mirroring the shape
 // ~/git/gogios/internal/json_report.go persists. Fields are decoded
@@ -184,7 +193,21 @@ func fetch(ctx context.Context, cfg config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected status from Gogios at %s: %s", cfg.GogiosURL, resp.Status)
 	}
 
-	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return readBody(resp.Body, maxReportBytes)
+}
+
+// readBody reads at most limit bytes from r. It reads one byte past limit so
+// a body of exactly limit bytes is accepted while a larger one is reported as
+// ErrReportTooLarge instead of being truncated.
+func readBody(r io.Reader, limit int64) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("reading the Gogios report: %w", err)
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("%w (%d bytes)", ErrReportTooLarge, limit)
+	}
+	return raw, nil
 }
 
 // readCache returns the parsed cached report when the cache file exists and is
@@ -206,31 +229,41 @@ func readCache(path string, ttl time.Duration) (*Report, bool) {
 	return r, true
 }
 
-// writeCacheMu serializes writeCache calls within this process. Two
-// concurrent Fetch calls racing on a cold cache would otherwise both write to
-// the same path+".tmp" file -- not just a "last rename wins" race, but two
-// unsynchronized os.WriteFile calls able to interleave and corrupt the tmp
-// file's bytes before either rename runs. internal/coordination.Manager hit
-// this exact bug (fixed by a mutex around its own write-then-rename); this
-// mirrors that fix.
-var writeCacheMu sync.Mutex
-
-// writeCache writes the report body atomically (write-then-rename), so a
-// concurrent reader never sees a half-written cache. It mirrors the pattern
-// internal/coordination.Manager uses for job.json, including serializing
-// writers -- see writeCacheMu.
-func writeCache(path string, raw []byte) error {
-	writeCacheMu.Lock()
-	defer writeCacheMu.Unlock()
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+// writeCache writes the report body atomically: it writes a uniquely named
+// temp file in the cache's directory and renames it over the cache. Each
+// writer gets its own temp file, so concurrent writers -- goroutines in one
+// process or, as in production, separate CGI processes -- never share bytes;
+// the last rename wins and a reader only ever sees a complete file.
+func writeCache(path string, raw []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating the Gogios cache dir: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
+	// os.CreateTemp creates the file with mode 0600.
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating the Gogios cache temp file: %w", err)
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	// Remove the temp file on any failure; after a successful rename it no
+	// longer exists under this name.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("writing the Gogios cache temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing the Gogios cache temp file: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("renaming the Gogios cache into place: %w", err)
+	}
+	return nil
 }
 
 func parse(raw []byte) (*Report, error) {
