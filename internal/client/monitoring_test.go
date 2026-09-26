@@ -182,3 +182,37 @@ func TestSetMuteReportsAPartialSuccess(t *testing.T) {
 		t.Errorf("states = %+v, want blowfish alerting and fishfinger still muted", states)
 	}
 }
+
+// TestRunMonitoringStatusListsTheAvailableActions drives showMonitoring end
+// to end: the line lists the mute half the server currently offers, by CLI
+// verb, and is left out entirely when the server offers neither (the fake
+// withholds mute while a gateway is unreadable, as the real server does).
+func TestRunMonitoringStatusListsTheAvailableActions(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*fakeMonitoringAPI)
+		want  string // "" means no available-now line at all
+	}{
+		{"nothing muted", func(*fakeMonitoringAPI) {}, "available now: monitoring mute\n"},
+		{"a gateway muted", func(f *fakeMonitoringAPI) { f.muted["blowfish"] = true }, "available now: monitoring unmute\n"},
+		{"no actions", func(f *fakeMonitoringAPI) { f.gwErr["fishfinger"] = "ssh: timeout" }, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeMonitoringAPI(t)
+			tc.setup(api)
+			c, out := newCapturingClient(t, api.srv.URL, "k")
+
+			if err := Run(context.Background(), c, []string{"monitoring", "status"}, false); err != nil {
+				t.Fatalf("Run(monitoring status): %v", err)
+			}
+			got := out.String()
+			if tc.want == "" && strings.Contains(got, "available now") {
+				t.Errorf("output = %q, want no available-now line", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("output = %q, want it to contain %q", got, tc.want)
+			}
+		})
+	}
+}

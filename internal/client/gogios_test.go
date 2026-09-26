@@ -112,10 +112,6 @@ type fakeGogiosAPI struct {
 	// route has no Available predicate, so a failed report still offers it.
 	broken bool
 
-	// noActions, when true, makes GET /gogios advertise no actions at all --
-	// the case of every action being withheld.
-	noActions bool
-
 	mu          sync.Mutex
 	cacheClears int
 }
@@ -161,9 +157,10 @@ func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleOverview answers GET /gogios: the report (or, when broken, the error
-// property in its place), the drill-down links and, unless noActions, the
-// cache-clear action.
+// handleOverview answers GET /gogios the way the real section folder does:
+// the report (or, when broken, the error property in its place), the
+// drill-down links, and the folder's actions in the server's route order --
+// monitoring mute (nothing is muted here) before gogios cache clear.
 func (f *fakeGogiosAPI) handleOverview(w http.ResponseWriter) {
 	f.mu.Lock()
 	cleared := f.cacheClears
@@ -178,15 +175,14 @@ func (f *fakeGogiosAPI) handleOverview(w http.ResponseWriter) {
 	if f.broken {
 		props = map[string]any{"error": "gogios at https://gogios.buetow.org/index.json returned 502 Bad Gateway"}
 	}
-	var actions []Action
-	if !f.noActions {
-		actions = []Action{{
-			Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
-			Method: http.MethodPost, Href: "/gogios/cache/clear", CLIVerb: "gogios cache clear",
-		}}
+	actions := []Action{
+		{Name: "monitoring-mute", Title: "Suppress Gogios alerting",
+			Method: http.MethodPost, Href: "/monitoring/mute", CLIVerb: "monitoring mute"},
+		{Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
+			Method: http.MethodPost, Href: "/gogios/cache/clear", CLIVerb: "gogios cache clear"},
 	}
 	writeEntity(w, Entity{
-		Class:      []string{"gogios"},
+		Class:      []string{"gogios", "section"},
 		Properties: props,
 		Links: []Link{
 			{Rel: []string{"critical"}, Href: "/gogios/critical"},
@@ -340,8 +336,9 @@ func TestRunGogiosRejectsAnUnknownCommand(t *testing.T) {
 }
 
 // TestRunGogiosOverviewListsTheAvailableActions pins that the overview ends
-// with what the gogios entity offers right now, by CLI verb -- the real
-// /gogios renders cache clear and the monitoring mute pair there.
+// with what the gogios section folder offers right now, by CLI verb and in
+// the order the server renders them -- the real /gogios advertises the
+// monitoring mute pair (whichever half is possible) and cache clear.
 func TestRunGogiosOverviewListsTheAvailableActions(t *testing.T) {
 	api := newFakeGogiosAPI(t)
 	c := newTestClient(t, api.srv.URL, "k")
@@ -351,16 +348,16 @@ func TestRunGogiosOverviewListsTheAvailableActions(t *testing.T) {
 	if err := c.runGogios(context.Background(), nil, false); err != nil {
 		t.Fatalf("runGogios(nil): %v", err)
 	}
-	if want := "available now: gogios cache clear\n"; !strings.Contains(out.String(), want) {
+	if want := "available now: monitoring mute, gogios cache clear\n"; !strings.Contains(out.String(), want) {
 		t.Errorf("output = %q, want it to contain %q", out.String(), want)
 	}
 }
 
-// TestRunGogiosBrokenReportStillListsCacheClear pins the unreachable-report
+// TestRunGogiosBrokenReportStillListsItsActions pins the unreachable-report
 // case as the real server renders it: the error is shown in place of the
-// report, and cache clear -- which carries no Available predicate, so it is
-// offered even then -- is still listed as available.
-func TestRunGogiosBrokenReportStillListsCacheClear(t *testing.T) {
+// report, and the folder's actions -- cache clear carries no Available
+// predicate, so it is offered even then -- are still listed as available.
+func TestRunGogiosBrokenReportStillListsItsActions(t *testing.T) {
 	api := newFakeGogiosAPI(t)
 	api.broken = true
 	c := newTestClient(t, api.srv.URL, "k")
@@ -370,27 +367,9 @@ func TestRunGogiosBrokenReportStillListsCacheClear(t *testing.T) {
 	if err := c.runGogios(context.Background(), nil, false); err != nil {
 		t.Fatalf("runGogios(nil): %v", err)
 	}
-	for _, want := range []string{"gogios: unknown (", "available now: gogios cache clear\n"} {
+	for _, want := range []string{"gogios: unknown (", "available now: monitoring mute, gogios cache clear\n"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output = %q, want it to contain %q", out.String(), want)
 		}
-	}
-}
-
-// TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine is the negative
-// case: a /gogios advertising no actions (every one withheld) must print no
-// "available now" line at all, not an empty one.
-func TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine(t *testing.T) {
-	api := newFakeGogiosAPI(t)
-	api.noActions = true
-	c := newTestClient(t, api.srv.URL, "k")
-	var out bytes.Buffer
-	c.stdout = &out
-
-	if err := c.runGogios(context.Background(), nil, false); err != nil {
-		t.Fatalf("runGogios(nil): %v", err)
-	}
-	if strings.Contains(out.String(), "available now") {
-		t.Errorf("output = %q, want no available-now line when /gogios advertises nothing", out.String())
 	}
 }
