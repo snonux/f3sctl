@@ -67,7 +67,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 			pc.acReads++
 			return power.ACState{}, nil
 		},
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 	return srv, pc
 }
 
@@ -263,7 +263,7 @@ func TestBuildRendersPowerSurfaceActionsThroughItsRouter(t *testing.T) {
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: true}, nil
 		},
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "/cgi-bin/f3sctl")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), "/cgi-bin/f3sctl"), testGogiosSurface("/cgi-bin/f3sctl"), "/cgi-bin/f3sctl")
 
 	var out bytes.Buffer
 	if err := srv.serve(&out, getRequest("/fans")); err != nil {
@@ -541,7 +541,7 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		// The Gogios surface carries this cfg rather than config.Default(), so
 		// the report cache it reads -- and gogios-cache-clear removes -- lives
 		// in the temp StateDir above, never the real /var/db/f3sctl.
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), func(a contract.ActionRenderer) *gogiosapi.Surface {
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), func(a contract.ActionRenderer) *gogiosapi.Surface {
 		return gogiosapi.New("test", contract.Hrefs(""), cfg, nil, a)
 	}, "")
 }

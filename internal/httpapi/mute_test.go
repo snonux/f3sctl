@@ -87,7 +87,7 @@ func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 		siren:         NewSirenRenderer(),
 		node:          "test",
 		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, testPowerSurface(inv), func(a contract.ActionRenderer) *gogiosapi.Surface {
+	}).assemble(inv, testPowerSurface(inv, ""), func(a contract.ActionRenderer) *gogiosapi.Surface {
 		return gogiosapi.New("test", contract.Hrefs(""), cfg, gw, a)
 	}, "")
 }

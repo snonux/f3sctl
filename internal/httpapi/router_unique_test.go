@@ -25,7 +25,7 @@ func TestRouteTablesAreUnambiguous(t *testing.T) {
 		{Name: "q0", Role: inventory.RoleCluster},
 	}}
 	for name, inv := range map[string]inventory.Inventory{"default": inventory.Default(), "renamed": renamed} {
-		if err := checkRoutes(testRoutes(inv)); err != nil {
+		if err := checkRoutes(declaredRoutes(inv)); err != nil {
 			t.Errorf("%s inventory: %v", name, err)
 		}
 	}

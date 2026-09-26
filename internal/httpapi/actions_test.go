@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
 	"net/url"
 	"strings"
 	"testing"
@@ -119,4 +120,50 @@ func runEveryHandler(t *testing.T, actions contract.ActionRenderer) {
 			_, _, _ = r.Handle(context.Background(), state, req)
 		}()
 	}
+}
+
+// TestTestRouterSharesItsBaseWithTheSurfaces pins the helper the router tests
+// lean on: a testRouter mounted at a non-empty base serves resources from
+// both surfaces whose self links and advertised action hrefs are all built
+// under that same base -- as newServer builds them -- so a test never mixes
+// hrefs from two different mounts.
+func TestTestRouterSharesItsBaseWithTheSurfaces(t *testing.T) {
+	const base = "/cgi-bin/f3sctl"
+	rt := testRouter(inventory.Default(), base)
+	state := contract.State{
+		Fans:       power.FansState{On: true},
+		Monitoring: []power.GatewayMute{{Name: "gw", Muted: true}},
+	}
+
+	for _, path := range []string{"/fans", "/monitoring"} {
+		r, ok := rt.Lookup(http.MethodGet, path)
+		if !ok {
+			t.Fatalf("no GET %s route", path)
+		}
+		e, _, err := r.Handle(context.Background(), state, contract.Request{})
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		if len(e.Actions) == 0 {
+			t.Errorf("GET %s advertises no actions; want at least one to check", path)
+		}
+		if self := selfHref(e); self != base+path {
+			t.Errorf("GET %s self link = %q, want %q", path, self, base+path)
+		}
+		for _, a := range e.Actions {
+			if !strings.HasPrefix(a.Href, base+"/") {
+				t.Errorf("GET %s action %s href = %q, want it under %q", path, a.Name, a.Href, base)
+			}
+		}
+	}
+}
+
+// selfHref returns the href of e's self link, or "" if it has none.
+func selfHref(e contract.Entity) string {
+	for _, l := range e.Links {
+		if len(l.Rel) > 0 && l.Rel[0] == "self" {
+			return l.Href
+		}
+	}
+	return ""
 }

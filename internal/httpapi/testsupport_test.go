@@ -18,27 +18,30 @@ import (
 // paths.
 
 // testPowerSurface returns a factory for the power surface with inert
-// collaborators, for Server.build (via assemble) to bind to its renderer.
-func testPowerSurface(inv inventory.Inventory) powerSurfaceFunc {
+// collaborators, building its links under base, for Server.build (via
+// assemble) to bind to its renderer. base must be the one the Server is
+// assembled with, as newServer shares one base between the two.
+func testPowerSurface(inv inventory.Inventory, base string) powerSurfaceFunc {
 	return func(actions contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", contract.Hrefs(""), inv, nil, nil, nil, actions)
+		return powerapi.New("test", contract.Hrefs(base), inv, nil, nil, nil, actions)
 	}
 }
 
 // testGogiosSurface returns a factory for the Gogios surface with inert
 // collaborators (see testPowerSurface).
-func testGogiosSurface() gogiosSurfaceFunc {
+func testGogiosSurface(base string) gogiosSurfaceFunc {
 	return func(actions contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), config.Default(), nil, actions)
+		return gogiosapi.New("test", contract.Hrefs(base), config.Default(), nil, actions)
 	}
 }
 
 // testRouter builds a Server for inv mounted at base, through Server.build
 // exactly as newServer does, and returns its Router -- the very Router the
 // table's handlers render their actions through, so hrefs a test builds with
-// it and hrefs a handler renders always share one base and one table.
+// it and hrefs a handler renders -- links and actions alike -- always share
+// one base and one table.
 func testRouter(inv inventory.Inventory, base string) *Router {
-	return (&Server{}).assemble(inv, testPowerSurface(inv), testGogiosSurface(), base).router
+	return (&Server{}).assemble(inv, testPowerSurface(inv, base), testGogiosSurface(base), base).router
 }
 
 // testRoutes is the route table of testRouter(inv, "") -- the same table
@@ -50,13 +53,14 @@ func testRoutes(inv inventory.Inventory) []contract.Route {
 }
 
 // declaredRoutes builds inv's route table without a Router at all, for the
-// one test that needs a table NewRouter would refuse (an ambiguous one). Its
-// handlers render through a Server that is never built, so serving any of
-// them panics rather than rendering some other Router's actions.
+// tests that check a table's ambiguity themselves -- where NewRouter, which
+// refuses an ambiguous table, must not get there first. Its handlers render
+// through a Server that is never built, so serving any of them panics rather
+// than rendering some other Router's actions.
 func declaredRoutes(inv inventory.Inventory) []contract.Route {
 	srv := &Server{}
 	actions := srv.actionRenderer()
-	return srv.buildRoutes(inv, testPowerSurface(inv)(actions), testGogiosSurface()(actions))
+	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions), testGogiosSurface("")(actions))
 }
 
 // assemble is Server.build for tests, whose route tables are known to be
@@ -73,7 +77,7 @@ func (s *Server) assemble(inv inventory.Inventory, pw powerSurfaceFunc, gg gogio
 // testServer returns a Server with no collaborators at all, for building the
 // route table (which needs a Server only to bind the root-resource handlers).
 func testServer() *Server {
-	return (&Server{}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+	return (&Server{}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 }
 
 // routeByName finds a route by its stable client-facing name, the way the
