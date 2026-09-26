@@ -66,6 +66,9 @@ func (c *Client) jobWaitTimeout() time.Duration {
 // cancelled HTTP call stops the in-flight request rather than running the
 // client's own 60s timeout out first.
 func Run(ctx context.Context, c *Client, args []string, force bool) error {
+	if len(args) == 0 {
+		return errNoCommand
+	}
 	cmd := strings.Join(args, " ")
 
 	if cmd == "power status" || cmd == "fans status" || cmd == "ac status" {
@@ -74,7 +77,7 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 	if cmd == "monitoring status" {
 		return c.showMonitoring(ctx)
 	}
-	if len(args) > 0 && args[0] == "gogios" {
+	if args[0] == "gogios" {
 		return c.runGogios(ctx, args[1:], force)
 	}
 
@@ -83,6 +86,10 @@ func Run(ctx context.Context, c *Client, args []string, force bool) error {
 	// advertised -- see runAction.
 	return c.runAction(ctx, cmd, args[0], force)
 }
+
+// errNoCommand is Run's error for an empty argument list: there is no noun
+// to route on, so nothing to discover or perform.
+var errNoCommand = errors.New("no command given")
 
 // runAction performs the action whose declared CLI verb is cmd, looking for
 // it on the resource named by holderRel and falling back to the root.
@@ -110,60 +117,66 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 	if err != nil {
 		return err
 	}
-
 	holder, err := c.resolveHolder(ctx, root, holderRel)
 	if err != nil {
 		return err
 	}
 
+	follow := followUpFor(holderRel)
 	action, ok := holder.ActionForVerb(cmd)
 	if !ok {
-		// Either cmd names nothing the server has ever heard of, or it names
-		// something currently withheld -- the two look identical from here,
-		// since only possible actions are advertised (the server renders
-		// them from its route table, filtered by each route's Available
-		// predicate -- see httpapi's Router). Either way, showing
-		// the state it was judged against is more useful than a bare error.
-		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
-		switch holderRel {
-		case "monitoring":
-			return c.showMonitoring(ctx)
-		case "gogios":
-			return c.showGogios(ctx)
-		}
-		return c.showStatus(ctx)
+		return c.reportUnavailable(ctx, cmd, follow)
 	}
 
+	result, err := c.invoke(ctx, action, holderRel, force)
+	if err != nil {
+		return err
+	}
+	return c.renderOutcome(ctx, root, action, result, follow)
+}
+
+// reportUnavailable is runAction's answer to a verb its holder does not
+// advertise. Either cmd names nothing the server has ever heard of, or it
+// names something currently withheld -- the two look identical from here,
+// since only possible actions are advertised (the server renders them from
+// its route table, filtered by each route's Available predicate -- see
+// httpapi's Router). Either way, showing the state it was judged against is
+// more useful than a bare error.
+func (c *Client) reportUnavailable(ctx context.Context, cmd string, follow followUp) error {
+	fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
+	return c.show(ctx, follow.view)
+}
+
+// invoke performs action, turning a failure caused by the caller's ctx going
+// away mid-request into interruptedInFlight's report rather than a transport
+// error.
+func (c *Client) invoke(ctx context.Context, action Action, holderRel string, force bool) (Entity, error) {
 	result, err := c.Perform(ctx, action, force)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return c.interruptedInFlight(action.Name, holderRel, ctxErr)
+			return Entity{}, c.interruptedInFlight(action.Name, holderRel, ctxErr)
 		}
-		return err
+		return Entity{}, err
 	}
+	return result, nil
+}
 
-	// A synchronous action (the fan plug) comes back with its new state; an
-	// asynchronous one comes back as a running job to follow.
+// renderOutcome shows what a performed action led to. An asynchronous
+// action (power on/off/cycle) comes back as a running job to follow; a
+// synchronous one (a plug, the mute pair, the cache clear) comes back with
+// its new state, which is re-fetched through the noun's follow-up view --
+// the same "mutate, then re-follow" shape for every action, even where the
+// response already carries the fresh state (the gogios cache clear's does).
+func (c *Client) renderOutcome(ctx context.Context, root Entity, action Action, result Entity, follow followUp) error {
 	if state, _ := result.Properties["state"].(string); state == "running" {
 		id, _ := result.Properties["id"].(string)
 		fmt.Fprintf(c.stdout, "%s accepted; waiting for it to finish...\n", action.Name)
 		return c.waitForJob(ctx, root, id, serverStaleCeiling(result))
 	}
-
-	if action.Name == "gogios-cache-clear" {
-		// The action's own response already carries the fresh overview
-		// (the Gogios surface's handleClearCache re-renders it server-side), but showGogios
-		// re-fetches rather than rendering result directly, the same
-		// "mutate, then re-follow" shape the monitoring-* branch below uses
-		// for consistency across every action in this function.
-		return c.showGogios(ctx)
+	if follow.sayDone {
+		fmt.Fprintf(c.stdout, "%s: done\n", action.Name)
 	}
-	if strings.HasPrefix(action.Name, "monitoring-") {
-		return c.showMonitoring(ctx)
-	}
-
-	fmt.Fprintf(c.stdout, "%s: done\n", action.Name)
-	return c.showStatus(ctx)
+	return c.show(ctx, follow.view)
 }
 
 // nounHolderPath is the rel chain from the root to the entity whose actions
@@ -181,6 +194,64 @@ var nounHolderPath = map[string][]string{
 	"ac":         {"ac-control", "ac"},
 	"monitoring": {"gogios", "monitoring"},
 	"gogios":     {"gogios"},
+}
+
+// followUpView names the rendering runAction shows after (or instead of) an
+// action: the rack status, the gateway mute, or the Gogios overview.
+type followUpView int
+
+const (
+	viewRack followUpView = iota
+	viewMonitoring
+	viewGogios
+)
+
+// followUp is how runAction reports on one noun's actions: which view shows
+// the state they change, whether a synchronous success is announced with an
+// "<action>: done" line first, and which hint interruptedInFlight gives for
+// checking that state after a Ctrl-C.
+type followUp struct {
+	view      followUpView
+	sayDone   bool
+	checkHint string
+}
+
+// rackFollowUp is the follow-up for every noun that changes the rack (and
+// for a noun the table does not know): the status table, which is also
+// where power, fans and AC state all show.
+var rackFollowUp = followUp{view: viewRack, sayDone: true, checkHint: checkRackHint}
+
+// nounFollowUp is the per-noun follow-up table, keyed like nounHolderPath.
+// It exists so runAction never keys its rendering on literal action names
+// (the server owns those): a noun's actions change the state its own view
+// shows, so the noun the operator typed is enough to pick the view.
+var nounFollowUp = map[string]followUp{
+	"power":      rackFollowUp,
+	"fans":       rackFollowUp,
+	"ac":         rackFollowUp,
+	"monitoring": {view: viewMonitoring, checkHint: checkMonitoringHint},
+	"gogios":     {view: viewGogios, checkHint: checkMonitoringHint},
+}
+
+// followUpFor returns noun's follow-up, the rack's for a noun the table
+// does not list -- the same fallback resolveHolder's root makes.
+func followUpFor(noun string) followUp {
+	if f, ok := nounFollowUp[noun]; ok {
+		return f
+	}
+	return rackFollowUp
+}
+
+// show renders one follow-up view.
+func (c *Client) show(ctx context.Context, view followUpView) error {
+	switch view {
+	case viewMonitoring:
+		return c.showMonitoring(ctx)
+	case viewGogios:
+		return c.showGogios(ctx)
+	default:
+		return c.showStatus(ctx)
+	}
 }
 
 // resolveHolder walks a noun's rel chain from the root and returns the
@@ -341,16 +412,12 @@ func (c *Client) reportStillRunning(id string) {
 // request was on the wire. The server may have received it and acted -- for
 // a power action, started a job that now runs regardless -- so "cannot reach
 // the API" would be wrong, and so would "nothing happened". The hint follows
-// holderRel: a monitoring or Gogios action is checked where its state shows.
+// holderRel through nounFollowUp: a monitoring or Gogios action is checked
+// where its state shows.
 func (c *Client) interruptedInFlight(action, holderRel string, err error) error {
 	fmt.Fprintf(c.stdout, "\nInterrupted while the %s request was in flight: the API may "+
 		"already have acted on it, and a job it started runs on regardless.\n", action)
-	switch holderRel {
-	case "monitoring", "gogios":
-		fmt.Fprintln(c.stdout, checkMonitoringHint)
-	default:
-		fmt.Fprintln(c.stdout, checkRackHint)
-	}
+	fmt.Fprintln(c.stdout, followUpFor(holderRel).checkHint)
 	return fmt.Errorf("%s interrupted in flight: %w", action, err)
 }
 

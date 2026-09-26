@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"slices"
 	"strings"
@@ -227,5 +228,106 @@ func TestPrintAvailableFallsBackToTheActionName(t *testing.T) {
 	})
 	if got, want := out.String(), "\navailable now: power on, fans-off\n"; got != want {
 		t.Errorf("printAvailable = %q, want %q", got, want)
+	}
+}
+
+// TestRunWithNoArgsIsAnError is the negative case for Run's routing: with no
+// noun to route on it must return errNoCommand rather than index args[0]
+// (a panic) or reach the network. The client has no API behind it, so any
+// request it attempted would fail differently.
+func TestRunWithNoArgsIsAnError(t *testing.T) {
+	for _, args := range [][]string{nil, {}} {
+		var out bytes.Buffer
+		c := &Client{stdout: &out}
+
+		err := Run(context.Background(), c, args, false)
+		if !errors.Is(err, errNoCommand) {
+			t.Errorf("Run(%#v) = %v, want errNoCommand", args, err)
+		}
+		if out.Len() != 0 {
+			t.Errorf("Run(%#v) printed %q, want nothing", args, out.String())
+		}
+	}
+}
+
+// TestRunUnknownNounFallsBackToTheRackFollowUp is the negative case for the
+// follow-up table: a noun neither nounHolderPath nor nounFollowUp lists is
+// looked up on the root, reported unavailable, and followed by the rack
+// status -- the table's default -- with nothing performed.
+func TestRunUnknownNounFallsBackToTheRackFollowUp(t *testing.T) {
+	api := newFakeAPI(t, "key")
+	api.statusActions = statusFixtureActions
+	c, out := newCapturingClient(t, api.srv.URL, "key")
+
+	if err := Run(context.Background(), c, []string{"bogus", "zap"}, false); err != nil {
+		t.Fatalf("Run(bogus zap): %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `"bogus zap" is not available right now.`) {
+		t.Errorf("output = %q, want the refusal", got)
+	}
+	if !strings.Contains(got, "available now: power on, fans off\n") {
+		t.Errorf("output = %q, want the rack status's actions", got)
+	}
+	if !slices.Contains(api.getPaths(), "/status") {
+		t.Errorf("GETs = %v, want /status rendered as the follow-up", api.getPaths())
+	}
+}
+
+// TestNounFollowUpTable pins the follow-up each noun's actions get: which
+// view re-renders the state they changed, whether a synchronous success is
+// announced as "<action>: done", and the hint an interrupted request gives.
+// An unknown noun gets the rack's, the same fallback resolveHolder makes.
+func TestNounFollowUpTable(t *testing.T) {
+	tests := []struct {
+		noun string
+		want followUp
+	}{
+		{"power", followUp{view: viewRack, sayDone: true, checkHint: checkRackHint}},
+		{"fans", followUp{view: viewRack, sayDone: true, checkHint: checkRackHint}},
+		{"ac", followUp{view: viewRack, sayDone: true, checkHint: checkRackHint}},
+		{"monitoring", followUp{view: viewMonitoring, sayDone: false, checkHint: checkMonitoringHint}},
+		{"gogios", followUp{view: viewGogios, sayDone: false, checkHint: checkMonitoringHint}},
+		{"bogus", followUp{view: viewRack, sayDone: true, checkHint: checkRackHint}},
+		{"", followUp{view: viewRack, sayDone: true, checkHint: checkRackHint}},
+	}
+	for _, tc := range tests {
+		if got := followUpFor(tc.noun); got != tc.want {
+			t.Errorf("followUpFor(%q) = %+v, want %+v", tc.noun, got, tc.want)
+		}
+	}
+}
+
+// TestNounFollowUpCoversEveryHolderNoun keeps the two per-noun tables in
+// step: a noun that gains a holder path must also say how its actions are
+// followed up, rather than silently getting the rack's default.
+func TestNounFollowUpCoversEveryHolderNoun(t *testing.T) {
+	for noun := range nounHolderPath {
+		if _, ok := nounFollowUp[noun]; !ok {
+			t.Errorf("nounHolderPath lists %q but nounFollowUp does not", noun)
+		}
+	}
+	for noun := range nounFollowUp {
+		if _, ok := nounHolderPath[noun]; !ok {
+			t.Errorf("nounFollowUp lists %q but nounHolderPath does not", noun)
+		}
+	}
+}
+
+// TestInterruptedInFlightHintFollowsTheTable pins interruptedInFlight to
+// nounFollowUp: the hint it prints for each noun is that noun's checkHint,
+// so the Ctrl-C advice and the rendered follow-up cannot disagree.
+func TestInterruptedInFlightHintFollowsTheTable(t *testing.T) {
+	for _, noun := range []string{"power", "fans", "ac", "monitoring", "gogios", "bogus"} {
+		var out bytes.Buffer
+		c := &Client{stdout: &out}
+
+		err := c.interruptedInFlight("some-action", noun, context.Canceled)
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("%s: interruptedInFlight = %v, want a wrapped context.Canceled", noun, err)
+		}
+		if want := followUpFor(noun).checkHint + "\n"; !strings.HasSuffix(out.String(), want) {
+			t.Errorf("%s: output = %q, want it to end with %q", noun, out.String(), want)
+		}
 	}
 }

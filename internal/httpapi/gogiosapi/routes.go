@@ -102,21 +102,33 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 // overview menu two folders and the read-only resources instead of six
 // drill-down entries (see contract.Route.NoRootLink).
 func (sf *Surface) reportRoutes() []contract.Route {
-	out := []contract.Route{
-		{
-			Name: "gogios", Title: "Gogios status and alerting",
-			Method: http.MethodGet, Path: "/gogios",
-			// handleOverview and every /gogios* handler below read only
-			// state.Gogios/state.GogiosErr (NeedReport), never
-			// state.Hosts/state.Fans. The folder also advertises the mute
-			// pair, judged on the gateway mute -- hence NeedMonitoring too.
-			SkipsProbe: true,
-			Needs:      contract.NeedReport | contract.NeedMonitoring,
-			Handle:     sf.handleOverview,
-		},
-	}
+	out := []contract.Route{sf.overviewRoute()}
+	out = append(out, sf.drillDownRoutes()...)
+	return append(out, sf.checkRoute(), sf.cacheClearRoute())
+}
 
-	for _, status := range gogios.Statuses() {
+// overviewRoute is the /gogios folder itself: the report overview, which
+// links every drill-down and carries the mute pair alongside the cache clear.
+func (sf *Surface) overviewRoute() contract.Route {
+	return contract.Route{
+		Name: "gogios", Title: "Gogios status and alerting",
+		Method: http.MethodGet, Path: "/gogios",
+		// handleOverview and every /gogios* handler below read only
+		// state.Gogios/state.GogiosErr (NeedReport), never
+		// state.Hosts/state.Fans. The folder also advertises the mute
+		// pair, judged on the gateway mute -- hence NeedMonitoring too.
+		SkipsProbe: true,
+		Needs:      contract.NeedReport | contract.NeedMonitoring,
+		Handle:     sf.handleOverview,
+	}
+}
+
+// drillDownRoutes is one read-only route per gogios.Statuses category, in
+// that list's order.
+func (sf *Surface) drillDownRoutes() []contract.Route {
+	statuses := gogios.Statuses()
+	out := make([]contract.Route, 0, len(statuses))
+	for _, status := range statuses {
 		out = append(out, contract.Route{
 			Name: "gogios-" + status, Title: "Gogios " + strings.ToUpper(status) + " checks",
 			Method: http.MethodGet, Path: "/gogios/" + status,
@@ -128,48 +140,54 @@ func (sf *Surface) reportRoutes() []contract.Route {
 			Handle:     sf.statusHandle(status),
 		})
 	}
-
-	out = append(out,
-		contract.Route{
-			Name: "gogios-check", Title: "One Gogios check's detail",
-			Method: http.MethodGet, Path: "/gogios/check",
-			Query: []contract.QueryParam{{
-				Name: "name", Required: true,
-				Description: "The check's exact name, as in its entity's \"name\" property.",
-			}},
-			Errors: []contract.ErrorResponse{
-				{Status: http.StatusNotFound, Description: "no check has that name"},
-				{Status: http.StatusBadGateway, Description: "the Gogios report could not be fetched"},
-			},
-			// Not linked from root: its href is meaningless without ?name=,
-			// which Router.Links() has no way to fill in. A client reaches it
-			// through each check entity's own self link instead (see
-			// checkEntity, handlers.go) -- handleOverview deliberately never
-			// links to the bare route either.
-			NoRootLink: true,
-			SkipsProbe: true,
-			Needs:      contract.NeedReport,
-			Handle:     sf.handleCheck,
-		},
-		contract.Route{
-			Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
-			Method: http.MethodPost, Path: "/gogios/cache/clear", Action: true,
-			CLIVerb: "gogios cache clear",
-			Errors: []contract.ErrorResponse{{
-				Status: http.StatusInternalServerError, Description: "the on-disk report cache could not be cleared",
-			}},
-			// Always advertised: unlike the power/fan/monitoring actions, there
-			// is no state in which clearing the cache would fail to make sense.
-			SkipsProbe: true,
-			// NeedMonitoring: the response is the re-rendered /gogios folder,
-			// mute pair included (see handleClearCache). Not NeedReport: the
-			// handler re-reads the report after clearing it, so a report
-			// fetched before the clear would only be thrown away.
-			Needs:  contract.NeedMonitoring,
-			Handle: sf.handleClearCache,
-		},
-	)
 	return out
+}
+
+// checkRoute is the per-check lookup, addressed by ?name= (see reportRoutes).
+func (sf *Surface) checkRoute() contract.Route {
+	return contract.Route{
+		Name: "gogios-check", Title: "One Gogios check's detail",
+		Method: http.MethodGet, Path: "/gogios/check",
+		Query: []contract.QueryParam{{
+			Name: "name", Required: true,
+			Description: "The check's exact name, as in its entity's \"name\" property.",
+		}},
+		Errors: []contract.ErrorResponse{
+			{Status: http.StatusNotFound, Description: "no check has that name"},
+			{Status: http.StatusBadGateway, Description: "the Gogios report could not be fetched"},
+		},
+		// Not linked from root: its href is meaningless without ?name=,
+		// which Router.Links() has no way to fill in. A client reaches it
+		// through each check entity's own self link instead (see
+		// checkEntity, handlers.go) -- handleOverview deliberately never
+		// links to the bare route either.
+		NoRootLink: true,
+		SkipsProbe: true,
+		Needs:      contract.NeedReport,
+		Handle:     sf.handleCheck,
+	}
+}
+
+// cacheClearRoute is the one write in the report family: dropping the
+// cached Gogios report so the next read fetches it afresh.
+func (sf *Surface) cacheClearRoute() contract.Route {
+	return contract.Route{
+		Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
+		Method: http.MethodPost, Path: "/gogios/cache/clear", Action: true,
+		CLIVerb: "gogios cache clear",
+		Errors: []contract.ErrorResponse{{
+			Status: http.StatusInternalServerError, Description: "the on-disk report cache could not be cleared",
+		}},
+		// Always advertised: unlike the power/fan/monitoring actions, there
+		// is no state in which clearing the cache would fail to make sense.
+		SkipsProbe: true,
+		// NeedMonitoring: the response is the re-rendered /gogios folder,
+		// mute pair included (see handleClearCache). Not NeedReport: the
+		// handler re-reads the report after clearing it, so a report
+		// fetched before the clear would only be thrown away.
+		Needs:  contract.NeedMonitoring,
+		Handle: sf.handleClearCache,
+	}
 }
 
 // gatewayWriteFailed is the 502 the mute pair answers when changing the
