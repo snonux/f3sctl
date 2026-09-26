@@ -264,6 +264,11 @@ func (sf *Surface) handleCheck(_ context.Context, state contract.State, req cont
 // the very next read anywhere in the API sees a fresh fetch rather than
 // waiting out cfg.GogiosCacheTTL. Mirrors setMute's shape: mutate, then
 // re-populate state and re-render the overview, rather than assuming success.
+//
+// Only the report is re-read: clearing it does not touch the gateway mute, so
+// state.Monitoring -- fetched by enrichState because IsFolderPath covers this
+// path -- is passed through as-is, and the re-rendered folder advertises the
+// mute pair exactly as GET /gogios does.
 func (sf *Surface) handleClearCache(ctx context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
 	if err := gogios.ClearCache(sf.Config); err != nil {
 		return contract.Entity{}, http.StatusInternalServerError, err

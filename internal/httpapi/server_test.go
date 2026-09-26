@@ -8,12 +8,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
@@ -412,8 +414,24 @@ type servedEntity struct {
 // and decodes the Siren body (serve writes CGI headers first -- split them).
 func getEntity(t *testing.T, srv *Server, path string) servedEntity {
 	t.Helper()
+	return serveEntity(t, srv, getRequest(path))
+}
+
+// postEntity is getEntity for an action: the same authenticated request,
+// POSTed, through the same real pipeline.
+func postEntity(t *testing.T, srv *Server, path string) servedEntity {
+	t.Helper()
+	req := getRequest(path)
+	req.Method = http.MethodPost
+	return serveEntity(t, srv, req)
+}
+
+// serveEntity serves req through the real pipeline and decodes the Siren body.
+func serveEntity(t *testing.T, srv *Server, req contract.Request) servedEntity {
+	t.Helper()
+	path := req.Method + " " + req.Path
 	var out bytes.Buffer
-	if err := srv.serve(&out, getRequest(path)); err != nil {
+	if err := srv.serve(&out, req); err != nil {
 		t.Fatalf("serve(%s): %v", path, err)
 	}
 	headers, body, ok := bytes.Cut(out.Bytes(), []byte("\r\n\r\n"))
@@ -496,6 +514,7 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		t.Fatalf("writing the API key file: %v", err)
 	}
 	cfg := config.Default()
+	cfg.StateDir = t.TempDir()           // the Gogios report cache, cleared by gogios-cache-clear
 	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
 	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	cfg.GogiosCacheTTL = config.Duration(time.Minute)
@@ -516,7 +535,10 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 			return power.ACState{On: true}, nil
 		},
 		monitorStatus: monitor,
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), testGogiosSurface(), "")
+		// The Gogios surface carries this cfg rather than config.Default(), so
+		// the report cache it reads -- and gogios-cache-clear removes -- lives
+		// in the temp StateDir above, never the real /var/db/f3sctl.
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default()), gogiosapi.New("test", contract.Hrefs(""), cfg, nil), "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:
@@ -612,6 +634,63 @@ func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 			}
 			if !hasAction(e, "gogios-cache-clear") {
 				t.Errorf("gogios folder actions = %v, want gogios-cache-clear offered (always available)", actionNames(e))
+			}
+		})
+	}
+}
+
+// TestGogiosCacheClearCarriesTheMutePairLikeTheFolder pins that POST
+// /gogios/cache/clear, whose response is the re-rendered /gogios folder,
+// advertises exactly the actions GET /gogios does -- including the mute pair,
+// judged on the same gateway mute read. It once rendered the folder with
+// state.Monitoring nil (enrichState fetched the mute only for GET /gogios), so
+// a stranded mute's monitoring-unmute silently vanished after a cache clear.
+// The "unreadable" case is the negative one: with no mute state at all, both
+// responses must withhold both mute actions rather than guess.
+func TestGogiosCacheClearCarriesTheMutePairLikeTheFolder(t *testing.T) {
+	tests := []struct {
+		name     string
+		mute     []power.GatewayMute
+		offered  []string
+		withheld []string
+	}{
+		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}},
+			[]string{"monitoring-unmute"}, []string{"monitoring-mute"}},
+		{"alerting", []power.GatewayMute{{Name: "blowfish", Muted: false}},
+			[]string{"monitoring-mute"}, []string{"monitoring-unmute"}},
+		{"unreadable", nil,
+			nil, []string{"monitoring-mute", "monitoring-unmute"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reads int
+			srv := folderServer(t, nil, func(context.Context) []power.GatewayMute {
+				reads++
+				return tt.mute
+			})
+
+			folder := getEntity(t, srv, "/gogios")
+			cleared := postEntity(t, srv, "/gogios/cache/clear")
+
+			if reads != 2 {
+				t.Errorf("gateway mute reads = %d, want 2 (one each for GET /gogios and POST /gogios/cache/clear)", reads)
+			}
+			if got, want := actionNames(cleared), actionNames(folder); !slices.Equal(got, want) {
+				t.Errorf("cache-clear actions = %v, want %v (the same as GET /gogios)", got, want)
+			}
+			if !slices.Contains(cleared.Class, "gogios") {
+				t.Errorf("cache-clear class = %v, want the gogios folder re-rendered", cleared.Class)
+			}
+			for _, name := range append([]string{"gogios-cache-clear"}, tt.offered...) {
+				if !hasAction(cleared, name) {
+					t.Errorf("cache-clear actions = %v, want %s offered while %s", actionNames(cleared), name, tt.name)
+				}
+			}
+			for _, name := range tt.withheld {
+				if hasAction(cleared, name) {
+					t.Errorf("cache-clear actions = %v, want %s withheld while %s", actionNames(cleared), name, tt.name)
+				}
 			}
 		})
 	}
