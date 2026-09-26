@@ -1,6 +1,10 @@
 package client
 
 import (
+	"bytes"
+	"context"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,5 +121,84 @@ func TestServerStaleCeilingReadsTheJobProperty(t *testing.T) {
 	}
 	if got := serverStaleCeiling(Entity{}); got != 0 {
 		t.Errorf("serverStaleCeiling without the property = %s, want 0", got)
+	}
+}
+
+// newCapturingClient is newTestClient with stdout captured, for tests that
+// assert on what the remote path prints.
+func newCapturingClient(t *testing.T, base, key string) (*Client, *bytes.Buffer) {
+	t.Helper()
+	var out bytes.Buffer
+	c, err := New(base, key, config.Default(), &out)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	return c, &out
+}
+
+// statusFixtureActions is what the fake /status advertises: two actions
+// possible right now, in the order the line must list them.
+var statusFixtureActions = []Action{
+	{Name: "power-on", Method: http.MethodPost, Href: "/power/on", CLIVerb: "power on"},
+	{Name: "fans-off", Method: http.MethodPost, Href: "/fans/off", CLIVerb: "fans off"},
+}
+
+// TestRunStatusListsTheStatusEntitysActions is the regression test for ma:
+// since the section folders the root renders no actions, so a showStatus
+// reading root.Actions never printed the "available now" line. The fake root
+// carries a decoy action to pin that the line comes from /status, not root.
+func TestRunStatusListsTheStatusEntitysActions(t *testing.T) {
+	for _, cmd := range [][]string{{"power", "status"}, {"fans", "status"}, {"ac", "status"}} {
+		t.Run(strings.Join(cmd, " "), func(t *testing.T) {
+			api := newFakeAPI(t, "key")
+			api.rootActions = []Action{{Name: "root-decoy", Method: http.MethodPost, Href: "/decoy"}}
+			api.statusActions = statusFixtureActions
+			c, out := newCapturingClient(t, api.srv.URL, "key")
+
+			if err := Run(context.Background(), c, cmd, false); err != nil {
+				t.Fatalf("Run(%v): %v", cmd, err)
+			}
+			if want := "available now: power-on, fans-off\n"; !strings.Contains(out.String(), want) {
+				t.Errorf("output = %q, want it to contain %q", out.String(), want)
+			}
+			if strings.Contains(out.String(), "root-decoy") {
+				t.Errorf("output = %q lists the root's action; the line must come from /status", out.String())
+			}
+		})
+	}
+}
+
+// TestRunRefusedActionListsWhatIsAvailable pins the refused-action path of
+// runAction: a verb nothing advertises is reported as unavailable, and the
+// status it was judged against -- including what IS possible -- follows.
+func TestRunRefusedActionListsWhatIsAvailable(t *testing.T) {
+	api := newFakeAPI(t, "key")
+	api.statusActions = statusFixtureActions
+	c, out := newCapturingClient(t, api.srv.URL, "key")
+
+	if err := Run(context.Background(), c, []string{"power", "off"}, false); err != nil {
+		t.Fatalf("Run(power off): %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `"power off" is not available right now.`) {
+		t.Errorf("output = %q, want the refusal", got)
+	}
+	if !strings.Contains(got, "available now: power-on, fans-off\n") {
+		t.Errorf("output = %q, want the actions /status advertises", got)
+	}
+}
+
+// TestRunStatusWithNoActionsPrintsNoAvailableLine is the negative case: a
+// status entity advertising nothing (everything withheld) must print no
+// "available now" line at all, not an empty one.
+func TestRunStatusWithNoActionsPrintsNoAvailableLine(t *testing.T) {
+	api := newFakeAPI(t, "key")
+	c, out := newCapturingClient(t, api.srv.URL, "key")
+
+	if err := Run(context.Background(), c, []string{"power", "status"}, false); err != nil {
+		t.Fatalf("Run(power status): %v", err)
+	}
+	if strings.Contains(out.String(), "available now") {
+		t.Errorf("output = %q, want no available-now line when /status advertises nothing", out.String())
 	}
 }

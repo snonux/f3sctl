@@ -41,6 +41,13 @@ type fakeAPI struct {
 	// advertised and never enforced without being offered first.
 	coldSnapshot bool
 
+	// rootActions and statusActions are what GET / and GET /status
+	// advertise. Both are empty unless a test sets them: the real root
+	// renders no actions since the section folders, while the real /status
+	// renders every action possible right now -- see TestRunStatusLists*.
+	rootActions   []Action
+	statusActions []Action
+
 	mu        sync.Mutex
 	forceSent []string // the "force" form value on every POST /fans/off, in order
 }
@@ -76,7 +83,8 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/fans/off" && r.Method == http.MethodPost:
 		f.handleFansOff(w, r)
 	case r.URL.Path == "/status" && r.Method == http.MethodGet:
-		writeEntity(w, Entity{}) // no hosts, no fan entity: enough for showStatus to render
+		// No hosts, no fan entity: enough for showStatus to render.
+		writeEntity(w, Entity{Class: []string{"status"}, Actions: f.statusActions})
 	default:
 		http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 	}
@@ -91,6 +99,7 @@ func (f *fakeAPI) handleRoot(w http.ResponseWriter) {
 			{Rel: []string{"ac-control"}, Href: "/ac-control"},
 			{Rel: []string{"status"}, Href: "/status"},
 		},
+		Actions: f.rootActions,
 	})
 }
 

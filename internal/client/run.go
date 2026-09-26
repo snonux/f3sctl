@@ -232,14 +232,24 @@ func (c *Client) showMonitoring(ctx context.Context) error {
 		fmt.Fprintln(c.stdout, "\nGogios alerting is suppressed. "+
 			"Clear it with: f3sctl monitoring unmute")
 	}
-	if len(mon.Actions) > 0 {
-		var names []string
-		for _, a := range mon.Actions {
-			names = append(names, a.Name)
-		}
-		fmt.Fprintf(c.stdout, "\navailable now: %s\n", strings.Join(names, ", "))
-	}
+	c.printAvailable(mon.Actions)
 	return nil
+}
+
+// printAvailable lists the actions an entity advertises as possible right
+// now, or prints nothing when it advertises none. Showing what can be done
+// next is the point of a hypermedia client: this list is the server's, not a
+// guess -- only possible actions are ever advertised (see
+// httpapi.Router.Actions).
+func (c *Client) printAvailable(actions []Action) {
+	if len(actions) == 0 {
+		return
+	}
+	names := make([]string, 0, len(actions))
+	for _, a := range actions {
+		names = append(names, a.Name)
+	}
+	fmt.Fprintf(c.stdout, "\navailable now: %s\n", strings.Join(names, ", "))
 }
 
 // waitForJob polls the job resource until the job with the given id stops
@@ -458,15 +468,11 @@ func (c *Client) showStatus(ctx context.Context) error {
 		return err
 	}
 
-	// Showing what can be done next is the point of a hypermedia client: this
-	// list is the server's, not a guess.
-	if len(root.Actions) > 0 {
-		var names []string
-		for _, a := range root.Actions {
-			names = append(names, a.Name)
-		}
-		fmt.Fprintf(c.stdout, "\navailable now: %s\n", strings.Join(names, ", "))
-	}
+	// The actions come off the status entity, not the root: since the
+	// section folders the root is a folder index that renders no actions of
+	// its own (see httpapi's handleRoot), while /status renders every action
+	// possible right now -- so reading the root here printed nothing at all.
+	c.printAvailable(statusEntity.Actions)
 	return nil
 }
 
