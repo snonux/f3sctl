@@ -384,3 +384,22 @@ func TestWaitForJobServerCeilingExtendsTheWait(t *testing.T) {
 		t.Errorf("waitForJob without a server ceiling = %v, want errJobWaitTimeout", err)
 	}
 }
+
+// TestReportPollIsQuietWhenCancelled is the deterministic version of the
+// cancel-output check above: with the ctx already cancelled every read fails
+// because of the cancellation, and reportPoll must report "not finished"
+// without blaming the network -- waitForJob's select says why it stopped.
+func TestReportPollIsQuietWhenCancelled(t *testing.T) {
+	api := newFakeJobAPI(t, jobEntity(map[string]any{"id": "mine", "state": "done"}))
+	c, out := newJobClient(t, api, config.Default(), fastPoll(0))
+	root := mustRoot(t, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if c.reportPoll(ctx, root, "mine") {
+		t.Error("reportPoll with a cancelled ctx reported the job finished")
+	}
+	if got := out.String(); got != "" {
+		t.Errorf("reportPoll with a cancelled ctx printed %q, want nothing", got)
+	}
+}

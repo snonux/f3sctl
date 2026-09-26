@@ -26,7 +26,9 @@ import (
 // finishes.
 const jobWaitBuffer = 5 * time.Minute
 
-// jobWaitTimeout returns how long waitForJob polls before giving up.
+// jobWaitTimeout returns the wake-only budget jobDeadline starts from: how
+// long waitForJob polls before giving up unless the server advertised a
+// longer staleness ceiling for the job.
 //
 // It must exceed the server's worst-case job runtime, or the client can (and
 // on 2026-08-09 did) give up seconds before a job that was about to succeed.
@@ -264,7 +266,7 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 	// Bound the wait by BOTH the caller's ctx and the server's worst-case
 	// runtime: a Ctrl-C (runRemote wires signal.NotifyContext) cancels ctx, and
 	// a caller that handed over an unbounded context still gives up after
-	// jobWaitTimeout rather than looping forever. Whichever fires first wins.
+	// jobDeadline(serverCeiling) rather than looping forever. Whichever fires first wins.
 	// The cause tells the two apart below: a deadline the caller's own ctx
 	// carried is the caller's, not this function's "gave up".
 	ctx, cancel := context.WithTimeoutCause(ctx, timeout, errJobWaitTimeout)
