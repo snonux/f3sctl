@@ -645,6 +645,53 @@ func TestOnFailsAndUnmutesWhenANodeNeverComesBack(t *testing.T) {
 	}
 }
 
+// TestOnInterruptedWhileWaitingForTheCluster pins a Ctrl-C during the wake's
+// cluster wait: the error must say the wake was interrupted and Gogios left
+// muted -- not "woke, but Gogios is not fully un-muted" -- and nothing may be
+// un-muted.
+func TestOnInterruptedWhileWaitingForTheCluster(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, false)
+	eng := testEngine(t, shelly)
+	eng.fans = &fakeFans{}
+	eng.power = &fakePower{}
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	eng.monitor = newTestMonitor(t, verb, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
+	eng.monitor.poll = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(50*time.Millisecond, cancel)
+
+	err := eng.On(ctx, &bytes.Buffer{})
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "woke") {
+		t.Fatalf("On err = %v, want a wrapped context.Canceled that does not claim a wake", err)
+	}
+	if !strings.Contains(err.Error(), "f3sctl monitoring unmute") {
+		t.Errorf("On err = %v, want it to name `f3sctl monitoring unmute`", err)
+	}
+	if got := verb.callsList(); len(got) != 0 {
+		t.Errorf("gateway calls = %v, want Gogios left muted", got)
+	}
+}
+
+// TestOnInterruptedBeforeTheFansIsNotARefusal: a cancel that stops the fan
+// plug's request is an interruption, not "refusing to wake with the fans off".
+func TestOnInterruptedBeforeTheFansIsNotARefusal(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, false)
+	eng := testEngine(t, shelly)
+	power := &fakePower{}
+	eng.power = power
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := eng.On(ctx, &bytes.Buffer{})
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("On err = %v, want a wrapped context.Canceled, not a refusal", err)
+	}
+	if got := power.wakeCalls(); len(got) != 0 {
+		t.Errorf("Wake calls = %v, want none", got)
+	}
+}
+
 // TestOnResendsMagicPacketsWhileTheClusterIsDown pins the rewake wiring in
 // on(): while a node stays down the woken hosts get their packets again, so
 // Wake is called more than once per host before the cluster answers.

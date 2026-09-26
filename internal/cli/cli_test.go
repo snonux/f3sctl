@@ -132,6 +132,33 @@ func TestRunHonoursTheCallersContext(t *testing.T) {
 	}
 }
 
+// TestPlugOffGuardInterruptedIsNotARefusal: a Ctrl-C during fans off's or
+// ac off's liveness probe makes its pings read as unknown -- i.e. running --
+// which used to come back as "may still be running ... use --force". The
+// guard must report the interruption instead, and switch nothing.
+func TestPlugOffGuardInterruptedIsNotARefusal(t *testing.T) {
+	for _, noun := range []string{"fans", "ac"} {
+		t.Run(noun, func(t *testing.T) {
+			shelly := powertest.NewFakeShelly(t, true)
+			cfg := testConfig(t, shelly)
+			ctx, cancel := context.WithCancel(context.Background())
+			// The probe is where the signal lands; what it reports then is
+			// what cancelled pings look like: everything "may be running".
+			live := &fakeLiveness{up: []string{"f0"}}
+			probe := func(c context.Context) []string { cancel(); return live.hosts(c) }
+
+			var outBuf, errBuf bytes.Buffer
+			err := run(ctx, cfg, []string{noun, "off"}, &outBuf, &errBuf, nil, false, probe)
+			if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "--force") {
+				t.Fatalf("err = %v, want a wrapped context.Canceled, not a refusal", err)
+			}
+			if got := shelly.SetCalls(); len(got) != 0 {
+				t.Errorf("Switch.Set calls = %v, want none", got)
+			}
+		})
+	}
+}
+
 // TestGogiosLocalHonoursTheCallersContext is the same pin for runGogios: a
 // cancelled context must stop the fetch before it reaches the server.
 func TestGogiosLocalHonoursTheCallersContext(t *testing.T) {

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 )
@@ -40,6 +42,10 @@ type fakeAPI struct {
 	// zero value, used by every test predating gz0), the field is always
 	// advertised and never enforced without being offered first.
 	coldSnapshot bool
+
+	// hangPost makes POST /fans/off hold the request until the client gives
+	// up on it -- an action still in flight when the operator hits Ctrl-C.
+	hangPost bool
 
 	// rootActions, powerActions and statusActions are what GET /, GET
 	// /power and GET /status advertise. All are empty unless a test sets
@@ -163,6 +169,10 @@ func (f *fakeAPI) handleFansOff(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.forceSent = append(f.forceSent, force)
 	f.mu.Unlock()
+	if f.hangPost {
+		<-r.Context().Done()
+		return
+	}
 
 	if f.coldSnapshot && force != "true" {
 		w.WriteHeader(http.StatusConflict)
@@ -357,5 +367,32 @@ func TestRunReportsAnUnreachableServer(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cannot reach the f3sctl API") {
 		t.Errorf("error = %v, want it to say the API could not be reached", err)
+	}
+}
+
+// TestRunInterruptedWhileTheActionIsInFlight pins what a Ctrl-C during the
+// action's POST reports. The server may already have acted -- for a power
+// action, started a job that runs on regardless -- so it must not read as
+// "cannot reach the API", and it must say how to check.
+func TestRunInterruptedWhileTheActionIsInFlight(t *testing.T) {
+	api := newFakeAPI(t, "secret")
+	api.hangPost = true
+	c, out := newCapturingClient(t, api.srv.URL, "secret")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	err := Run(ctx, c, []string{"fans", "off"}, true)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "cannot reach") {
+		t.Fatalf("Run = %v, want a wrapped context.Canceled, not an unreachable API", err)
+	}
+	if got := api.forceValues(); len(got) != 1 {
+		t.Fatalf("POST /fans/off calls = %v, want the one request the cancel interrupted", got)
+	}
+	got := out.String()
+	for _, want := range []string{"in flight", "may already have acted", "f3sctl --remote power status"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q, want it to contain %q", got, want)
+		}
 	}
 }

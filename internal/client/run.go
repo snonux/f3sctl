@@ -136,6 +136,9 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 
 	result, err := c.Perform(ctx, action, force)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return c.interruptedInFlight(action.Name, ctxErr)
+		}
 		return err
 	}
 
@@ -301,13 +304,19 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 			}
 			// The caller cancelled (Ctrl-C, or the request that drove this went
 			// home). Surface that rather than reporting a synthetic "gave up".
-			c.reportStillRunning(root, id)
+			c.reportStillRunning(id)
 			return ctx.Err()
 		case <-time.After(poll.interval):
 		}
 
-		if c.reportPoll(ctx, root, id) {
-			return c.showStatus(ctx)
+		if finished, jobErr := c.reportPoll(ctx, root, id); finished {
+			// The job's own outcome decides the exit status: a failed
+			// shutdown must not exit 0 just because the rack's status
+			// rendered fine afterwards.
+			if statusErr := c.showStatus(ctx); jobErr == nil {
+				return statusErr
+			}
+			return jobErr
 		}
 	}
 }
@@ -316,22 +325,36 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 // the wait stopped. The job runs in the API's detached child, out of this
 // process's reach: a shutdown carries on, and a power cycle still cuts and
 // restores AC. Without this, the Ctrl-C reads as if it had called the
-// operation off.
-func (c *Client) reportStillRunning(root Entity, id string) {
+// operation off. No URL is printed: the job resource needs the API key, so
+// the CLI is the way to look.
+func (c *Client) reportStillRunning(id string) {
 	if id == "" {
 		id = "unknown"
 	}
 	fmt.Fprintf(c.stdout, "\nStopped waiting, but the job (id %s) keeps running on the API: "+
 		"interrupting here does not stop it.\n", id)
-	if href, ok := root.Link("job"); ok {
-		if jobURL, err := c.resolve(href); err == nil {
-			fmt.Fprintf(c.stdout, "Follow it at %s, or check the rack with "+
-				"`f3sctl --remote power status`.\n", jobURL)
-			return
-		}
-	}
-	fmt.Fprintln(c.stdout, "Check the rack with `f3sctl --remote power status`.")
+	fmt.Fprintln(c.stdout, checkRackHint)
 }
+
+// interruptedInFlight is runAction's error for a Ctrl-C while the action's
+// request was on the wire. The server may have received it and acted -- for
+// a power action, started a job that now runs regardless -- so "cannot reach
+// the API" would be wrong, and so would "nothing happened".
+func (c *Client) interruptedInFlight(action string, err error) error {
+	fmt.Fprintf(c.stdout, "\nInterrupted while the %s request was in flight: the API may "+
+		"already have acted on it, and a job it started runs on regardless.\n", action)
+	fmt.Fprintln(c.stdout, checkRackHint)
+	return fmt.Errorf("%s interrupted in flight: %w", action, err)
+}
+
+// checkRackHint is how an interrupted client points the operator at the
+// rack's real state.
+const checkRackHint = "Check the rack with `f3sctl --remote power status`."
+
+// errJobNotDone is what waitForJob returns (wrapped, with the job's state and
+// error) for a job that finished in any state but done, so the CLI exits
+// non-zero for a failed remote operation.
+var errJobNotDone = errors.New("the job did not complete")
 
 // jobDeadline returns how long waitForJob polls: jobWaitTimeout, raised to
 // the accepting node's staleness ceiling plus the wait buffer when that is
@@ -350,25 +373,26 @@ func (c *Client) jobDeadline(serverCeiling time.Duration) time.Duration {
 var errJobWaitTimeout = errors.New("gave up waiting for the job")
 
 // reportPoll runs one polling cycle for the job with the given id and prints
-// what it learned. It reports true once the job has stopped running.
-func (c *Client) reportPoll(ctx context.Context, root Entity, id string) bool {
+// what it learned. It reports true once the job has stopped running, with an
+// error wrapping errJobNotDone when it stopped in any state but done.
+func (c *Client) reportPoll(ctx context.Context, root Entity, id string) (bool, error) {
 	job, err := c.pollJob(ctx, root, id)
 	if err != nil && ctx.Err() != nil {
 		// Cancelled or out of time mid-poll: the read failed because of that,
 		// not the network, and waitForJob's next select reports why.
-		return false
+		return false, nil
 	}
 	if err != nil {
 		// A transient network blip mid-shutdown is expected -- the
 		// cluster is, after all, being taken apart.
 		fmt.Fprintf(c.stdout, "  (cannot read the job right now: %v)\n", err)
-		return false
+		return false, nil
 	}
 	if job == nil {
 		// Every attempt this cycle reached the other node. Say so plainly
 		// rather than reporting someone else's outcome as this one's.
 		fmt.Fprintln(c.stdout, "  (polled the other API node; still waiting)")
-		return false
+		return false, nil
 	}
 
 	state, _ := job.Properties["state"].(string)
@@ -381,14 +405,21 @@ func (c *Client) reportPoll(ctx context.Context, root Entity, id string) bool {
 		} else {
 			fmt.Fprintln(c.stdout, "  still running...")
 		}
-		return false
+		return false, nil
 	}
-	if msg, _ := job.Properties["error"].(string); msg != "" {
+	msg, _ := job.Properties["error"].(string)
+	if msg != "" {
 		fmt.Fprintf(c.stdout, "job %s: %s\n", state, msg)
 	} else {
 		fmt.Fprintf(c.stdout, "job %s\n", state)
 	}
-	return true
+	if state == "done" {
+		return true, nil
+	}
+	if msg != "" {
+		return true, fmt.Errorf("%w: job %s: %s", errJobNotDone, state, msg)
+	}
+	return true, fmt.Errorf("%w: job %s", errJobNotDone, state)
 }
 
 // serverStaleCeiling reads the staleness ceiling a job entity advertises

@@ -735,7 +735,11 @@ func fansOff(ctx context.Context, eng *power.Engine, force bool,
 	liveHosts liveHostsFunc, stdout io.Writer) error {
 
 	if !force {
-		if up := liveHosts(ctx); len(up) > 0 {
+		up := liveHosts(ctx)
+		if err := ctx.Err(); err != nil {
+			return guardInterrupted("the rack fans", err)
+		}
+		if len(up) > 0 {
 			return fmt.Errorf("%v may still be running; refusing to switch the rack fans off. "+
 				"Use --force if you mean it", up)
 		}
@@ -756,7 +760,11 @@ func acOff(ctx context.Context, eng *power.Engine, force bool,
 	liveHosts liveHostsFunc, stdout io.Writer) error {
 
 	if !force {
-		if up := liveHosts(ctx); len(up) > 0 {
+		up := liveHosts(ctx)
+		if err := ctx.Err(); err != nil {
+			return guardInterrupted("f-host AC", err)
+		}
+		if len(up) > 0 {
 			return fmt.Errorf("%v may still be running; refusing to cut f-host AC. "+
 				"Shut the hosts down first (f3sctl power off / power all off), "+
 				"or use --force if you mean a hard cut", up)
@@ -769,6 +777,15 @@ func acOff(ctx context.Context, eng *power.Engine, force bool,
 	}
 	fmt.Fprintf(stdout, "f-host AC: %s\n", presenter.OnOff(st.On))
 	return nil
+}
+
+// guardInterrupted is fansOff's and acOff's error for a Ctrl-C during their
+// liveness probe. Checked before the probe's verdict: probes the cancel cut
+// short read as unknown, i.e. running, and "may still be running ... use
+// --force" would send the operator after hosts nobody saw.
+func guardInterrupted(plug string, err error) error {
+	return fmt.Errorf("interrupted while checking whether the f-hosts are off; %s left "+
+		"untouched: %w", plug, err)
 }
 
 // retiredVerbHint maps a wol-f3s spelling to its replacement, so the clean

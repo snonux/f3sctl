@@ -162,8 +162,11 @@ func TestWaitForJobReportsAFailedJobsError(t *testing.T) {
 	api := newFakeJobAPI(t, jobEntity(map[string]any{"id": "mine", "state": "failed", "error": "f2 did not wake"}))
 	c, out := newJobClient(t, api, config.Default(), fastPoll(0))
 
-	if err := c.waitForJob(context.Background(), mustRoot(t, c), "mine", 0); err != nil {
-		t.Fatalf("waitForJob: %v", err)
+	// A failed job is the wait's error, so the CLI exits non-zero -- it
+	// used to return nil and a failed remote shutdown exited 0.
+	err := c.waitForJob(context.Background(), mustRoot(t, c), "mine", 0)
+	if !errors.Is(err, errJobNotDone) || !strings.Contains(err.Error(), "f2 did not wake") {
+		t.Fatalf("waitForJob = %v, want errJobNotDone carrying the job's error", err)
 	}
 	if got := out.String(); !strings.Contains(got, "job failed: f2 did not wake") {
 		t.Errorf("output %q lacks the job's failure", got)
@@ -232,11 +235,14 @@ func TestWaitForJobSurfacesTheCallersCancellation(t *testing.T) {
 	// Ctrl-C stops only the wait: the job runs on in the API's detached
 	// child, and the operator must not be left thinking it was called off.
 	got := out.String()
-	for _, want := range []string{"keeps running on the API", "id mine", api.srv.URL + "/job",
-		"f3sctl --remote power status"} {
+	for _, want := range []string{"keeps running on the API", "id mine", "f3sctl --remote power status"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("output %q, want it to contain %q", got, want)
 		}
+	}
+	// The job resource needs the API key; a URL would only 401 in a browser.
+	if strings.Contains(got, api.srv.URL) {
+		t.Errorf("output %q, want no job URL", got)
 	}
 	out.Reset()
 
@@ -410,7 +416,7 @@ func TestReportPollIsQuietWhenCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if c.reportPoll(ctx, root, "mine") {
+	if finished, _ := c.reportPoll(ctx, root, "mine"); finished {
 		t.Error("reportPoll with a cancelled ctx reported the job finished")
 	}
 	if got := out.String(); got != "" {
