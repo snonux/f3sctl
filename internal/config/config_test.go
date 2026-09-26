@@ -460,3 +460,51 @@ func TestLoadErrorsOnAnInvalidDuration(t *testing.T) {
 		t.Error("Load on an invalid duration succeeded, want a parse error")
 	}
 }
+
+// TestLoadRoundTripsTheInventoryStandaloneFlag pins that the inventory's
+// Standalone flag -- what separates the power group from every f-host -- is
+// carried by the config file both ways: the compiled-in default survives a
+// marshal/Load round trip, and a configured host list takes its flags from the
+// file alone rather than inheriting them from the default host that used to
+// sit at the same index.
+func TestLoadRoundTripsTheInventoryStandaloneFlag(t *testing.T) {
+	dir := t.TempDir()
+
+	raw, err := json.Marshal(Default())
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	full := filepath.Join(dir, "full.json")
+	if err := os.WriteFile(full, raw, 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	cfg, err := Load(full)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Inventory, Default().Inventory) {
+		t.Errorf("inventory round trip differs: got %+v", cfg.Inventory)
+	}
+
+	override := filepath.Join(dir, "override.json")
+	body := `{"inventory":{"hosts":[
+		{"name":"f0","role":"f"},{"name":"f1","role":"f"},
+		{"name":"f2","role":"f","standalone":true},{"name":"f3","role":"f"}]}}`
+	if err := os.WriteFile(override, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	cfg, err = Load(override)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var group []string
+	for _, h := range cfg.Inventory.PowerGroup() {
+		group = append(group, h.Name)
+	}
+	if !reflect.DeepEqual(group, []string{"f0", "f1", "f3"}) {
+		t.Errorf("PowerGroup = %v, want [f0 f1 f3]: f2 is the configured standalone host", group)
+	}
+	if cfg.Inventory.ShellyIP != Default().Inventory.ShellyIP {
+		t.Errorf("ShellyIP = %q, want the default kept (absent key)", cfg.Inventory.ShellyIP)
+	}
+}

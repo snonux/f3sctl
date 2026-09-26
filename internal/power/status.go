@@ -2,6 +2,7 @@ package power
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -119,32 +120,60 @@ func (a *RackActivity) add(name string, l hostLiveness) {
 // gives, one probe per host; the rule applied to it is identical, including
 // that an unprobeable host counts as running.
 //
-// Only the inventory's power group is judged: the plug cools f0-f2, and
-// neither the k3s guests nor f3 are in that set. See RackActivity's doc
-// comment for why f3 is excluded even though it is Role f. The group comes
-// from inv.PowerGroup -- the same set Engine.RackActivity probes -- so the two
+// Only the inventory's power group is judged (PowerGroupStatuses): the plug
+// cools f0-f2, and neither the k3s guests nor the standalone f3 are in that
+// set. See RackActivity's doc comment for why f3 is excluded even though it is
+// Role f. The group is the same one Engine.RackActivity probes, so the two
 // halves of the guard cannot drift apart over which hosts count.
 func RackActivityFrom(inv inventory.Inventory, statuses []HostStatus) RackActivity {
-	return activityFrom(inv.PowerGroup(), statuses)
+	return foldActivity(PowerGroupStatuses(inv, statuses))
 }
 
 // ACActivityFrom is RackActivityFrom for the f-host AC plug: every f-host
-// counts (inv.EveryFHost, f3 included), because shelly2 cuts mains to the
+// counts (EveryFHostStatuses, f3 included), because shelly2 cuts mains to the
 // whole set.
 func ACActivityFrom(inv inventory.Inventory, statuses []HostStatus) RackActivity {
-	return activityFrom(inv.EveryFHost(), statuses)
+	return foldActivity(EveryFHostStatuses(inv, statuses))
 }
 
-// activityFrom folds the statuses of the hosts in group, in snapshot order.
-// Statuses of hosts outside the group contribute nothing.
-func activityFrom(group []inventory.Host, statuses []HostStatus) RackActivity {
+// foldActivity folds already-selected statuses, in snapshot order.
+func foldActivity(statuses []HostStatus) RackActivity {
 	var a RackActivity
 	for _, st := range statuses {
-		if inventory.Includes(group, st.Name) {
-			a.add(st.Name, st.liveness())
-		}
+		a.add(st.Name, st.liveness())
 	}
 	return a
+}
+
+// PowerGroupStatuses returns the statuses of the hosts in inv.PowerGroup --
+// the hosts a bare `power on|off` (Engine.On/Off) acts on -- in snapshot
+// order.
+//
+// This and EveryFHostStatuses are how a snapshot is judged against the set an
+// operation would touch: the fan guard here and the API's availability
+// predicates both select through them rather than restating which hosts
+// belong to which group.
+func PowerGroupStatuses(inv inventory.Inventory, statuses []HostStatus) []HostStatus {
+	return statusesIn(inv.PowerGroup(), statuses)
+}
+
+// EveryFHostStatuses returns the statuses of the hosts in inv.EveryFHost --
+// the hosts `power all on|off` (Engine.OnAll/OffAll) acts on -- in snapshot
+// order.
+func EveryFHostStatuses(inv inventory.Inventory, statuses []HostStatus) []HostStatus {
+	return statusesIn(inv.EveryFHost(), statuses)
+}
+
+// statusesIn keeps the statuses whose host is in group. A status for a host
+// the group does not contain -- whatever its Role -- is dropped.
+func statusesIn(group []inventory.Host, statuses []HostStatus) []HostStatus {
+	var out []HostStatus
+	for _, st := range statuses {
+		if slices.ContainsFunc(group, func(h inventory.Host) bool { return h.Name == st.Name }) {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 // Why explains what is keeping the fans on, distinguishing hosts that answered

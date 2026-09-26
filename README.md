@@ -233,7 +233,11 @@ first readable entry wins, which lets one shipped config serve both the
 ```
 
 Host inventory (IPs, MACs, the broadcast address, the Shelly plug) lives in
-`internal/inventory` and can be overridden by the same file.
+`internal/inventory` and can be overridden by the same file. An
+`inventory.hosts` list replaces the compiled-in one wholesale; mark the f-host
+that is not part of the k3s cluster (f3 by default) with `"standalone": true`,
+which keeps it out of a bare `power on|off` and the fan guard while
+`power all` still includes it.
 
 `peer_nodes` are the API's own other CGI nodes (pi0 and pi1) that
 `internal/coordination.PeerSet` asks "are you mid-job?" before starting one,

@@ -1,6 +1,9 @@
 package inventory
 
 import (
+	"encoding/json"
+	"errors"
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -131,27 +134,106 @@ func TestEveryFHostIsASupersetOfThePowerGroup(t *testing.T) {
 	}
 }
 
-// TestIncludes pins the membership predicate every snapshot-judging caller
-// (the fan and AC guards, the API's availability counts) relies on.
-func TestIncludes(t *testing.T) {
-	inv := Default()
-	group := inv.PowerGroup()
+// TestPowerGroupIsDrivenByTheStandaloneFlag proves the cluster/standalone
+// split is data, not a host name: a differently named host flagged Standalone
+// is the one left out, and a host called f3 without the flag IS in the power
+// group. The flag on a non-f host changes nothing.
+func TestPowerGroupIsDrivenByTheStandaloneFlag(t *testing.T) {
+	inv := Inventory{Hosts: []Host{
+		{Name: "f0", Role: RoleF},
+		{Name: "f3", Role: RoleF},
+		{Name: "f9", Role: RoleF, Standalone: true},
+		{Name: "r0", Role: RoleCluster, Standalone: true},
+	}}
 
-	for _, h := range group {
-		if !Includes(group, h.Name) {
-			t.Errorf("Includes(PowerGroup, %q) = false, want true", h.Name)
+	if got := names(inv.PowerGroup()); !slices.Equal(got, []string{"f0", "f3"}) {
+		t.Errorf("PowerGroup = %v, want [f0 f3]: f3 is unflagged here, f9 is standalone", got)
+	}
+	if got := names(inv.EveryFHost()); !slices.Equal(got, []string{"f0", "f3", "f9"}) {
+		t.Errorf("EveryFHost = %v, want [f0 f3 f9]", got)
+	}
+}
+
+// TestOnlyF3IsStandaloneByDefault pins the compiled-in data the power group
+// is derived from.
+func TestOnlyF3IsStandaloneByDefault(t *testing.T) {
+	for _, h := range Default().Hosts {
+		if h.Standalone != (h.Name == "f3") {
+			t.Errorf("%s: Standalone = %v, want %v", h.Name, h.Standalone, h.Name == "f3")
 		}
 	}
-	for _, name := range []string{StandaloneHost, "r0", "blowfish", "", "F0"} {
-		if Includes(group, name) {
-			t.Errorf("Includes(PowerGroup, %q) = true, want false", name)
-		}
+}
+
+// TestUnmarshalReplacesTheHostListWholesale is the regression test for
+// encoding/json decoding an array into the slice's existing elements: a
+// configured host list must not inherit, by index, the Standalone flag or MAC
+// of the compiled-in host that used to sit at the same position.
+func TestUnmarshalReplacesTheHostListWholesale(t *testing.T) {
+	inv := Default()
+	// Four hosts, so index 3 lands on the default f3 (Standalone, with a MAC).
+	raw := `{"hosts":[
+		{"name":"a0","role":"f","mac":"00:00:00:00:00:01"},
+		{"name":"a1","role":"f","mac":"00:00:00:00:00:02"},
+		{"name":"a2","role":"f","mac":"00:00:00:00:00:03","standalone":true},
+		{"name":"a3","role":"cluster"}]}`
+	if err := json.Unmarshal([]byte(raw), &inv); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
-	if !Includes(inv.EveryFHost(), StandaloneHost) {
-		t.Errorf("Includes(EveryFHost, %q) = false, want true", StandaloneHost)
+
+	a3, ok := inv.ByName("a3")
+	if !ok {
+		t.Fatal("a3 missing after Unmarshal")
 	}
-	if Includes(nil, "f0") {
-		t.Error("Includes(nil, f0) = true; an empty group contains nothing")
+	if a3.Standalone || a3.MAC != "" {
+		t.Errorf("a3 = %+v, inherited the default f3's Standalone/MAC", a3)
+	}
+	if got := names(inv.PowerGroup()); !slices.Equal(got, []string{"a0", "a1"}) {
+		t.Errorf("PowerGroup = %v, want [a0 a1]", got)
+	}
+	if inv.Broadcast != Default().Broadcast {
+		t.Errorf("Broadcast = %q, want the default kept (absent key)", inv.Broadcast)
+	}
+}
+
+// TestUnmarshalKeepsTheHostsWhenAbsent pins the other half of the overlay: a
+// config that changes only a scalar keeps the compiled-in hosts, and the
+// Standalone flag survives a marshal/unmarshal round trip.
+func TestUnmarshalKeepsTheHostsWhenAbsent(t *testing.T) {
+	inv := Default()
+	if err := json.Unmarshal([]byte(`{"broadcast":"10.0.0.255"}`), &inv); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if inv.Broadcast != "10.0.0.255" {
+		t.Errorf("Broadcast = %q, want the override", inv.Broadcast)
+	}
+	if !reflect.DeepEqual(inv.Hosts, Default().Hosts) {
+		t.Error("hosts changed although the overlay did not mention them")
+	}
+
+	raw, err := json.Marshal(Default())
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var back Inventory
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("Unmarshal round trip: %v", err)
+	}
+	if !reflect.DeepEqual(back, Default()) {
+		t.Errorf("round trip lost data: got %+v", back)
+	}
+}
+
+// TestUnmarshalRejectsAMistypedField pins that a type error inside the
+// inventory is reported, not swallowed into a zero value.
+func TestUnmarshalRejectsAMistypedField(t *testing.T) {
+	inv := Default()
+	err := json.Unmarshal([]byte(`{"hosts":[{"name":"f0","standalone":"yes"}]}`), &inv)
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		t.Fatalf("err = %v, want a *json.UnmarshalTypeError", err)
+	}
+	if !reflect.DeepEqual(inv, Default()) {
+		t.Error("a failed Unmarshal modified the inventory")
 	}
 }
 

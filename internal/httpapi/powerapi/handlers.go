@@ -252,7 +252,7 @@ func (sf *Surface) jobStartedMeanwhile(ctx context.Context, apiKey string) bool 
 // this, the local command refused while the same command with --remote went
 // ahead.
 func (sf *Surface) rackStillBusy(ctx context.Context, state contract.State) power.RackActivity {
-	if busy := sf.RackBusy(state); busy.Busy() {
+	if busy := sf.rackBusy(state); busy.Busy() {
 		return busy
 	}
 	return sf.confirmRack(ctx)
@@ -337,7 +337,7 @@ func (sf *Surface) handleACOff(ctx context.Context, state contract.State, req co
 }
 
 func (sf *Surface) acStillBusy(ctx context.Context, state contract.State) power.RackActivity {
-	if busy := sf.ACBusy(state); busy.Busy() {
+	if busy := sf.acBusy(state); busy.Busy() {
 		return busy
 	}
 	return sf.confirmAC(ctx)

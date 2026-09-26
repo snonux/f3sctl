@@ -138,7 +138,7 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 			// group already answers, waking it again is a no-op that would
 			// still cost the caller a job slot.
 			Available: func(s contract.State) bool {
-				up, _, total := sf.ClusterHostsUp(s)
+				up, _, total := sf.clusterHostsUp(s)
 				return !JobRunning(s) && up < total
 			},
 			Handle: sf.action("on"),
@@ -151,7 +151,7 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 			// SSH, so a host that is only mid-boot cannot be shut down and
 			// must not be offered as if it could.
 			Available: func(s contract.State) bool {
-				_, sshUp, _ := sf.ClusterHostsUp(s)
+				_, sshUp, _ := sf.clusterHostsUp(s)
 				return !JobRunning(s) && sshUp > 0
 			},
 			Handle: sf.action("off"),
@@ -170,7 +170,7 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/power/all/on", Action: true,
 			CLIVerb: "power all on",
 			Available: func(s contract.State) bool {
-				up, _, total := sf.EveryFHostUp(s)
+				up, _, total := sf.everyFHostUp(s)
 				return !JobRunning(s) && up < total
 			},
 			Handle: sf.action("all-on"),
@@ -182,7 +182,7 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 			// SSH, not ping, for the same reason as power-off: the whole
 			// shutdown runs over SSH.
 			Available: func(s contract.State) bool {
-				_, sshUp, _ := sf.EveryFHostUp(s)
+				_, sshUp, _ := sf.everyFHostUp(s)
 				return !JobRunning(s) && sshUp > 0
 			},
 			Handle: sf.action("all-off"),
@@ -246,7 +246,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			// f0/f1/f2 ever appear here -- f3 is racked separately and the plug
 			// does not cool it, so it plays no part in this guard.
 			Fields: func(s contract.State) []contract.Field {
-				busy := sf.RackBusy(s)
+				busy := sf.rackBusy(s)
 				if !busy.Busy() {
 					return nil
 				}
@@ -298,7 +298,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			// Guard looks at every f-host (f0–f3): shelly2 powers all of them.
 			// Hard-cutting AC under a live host risks ZFS / bhyve damage.
 			Fields: func(s contract.State) []contract.Field {
-				busy := sf.ACBusy(s)
+				busy := sf.acBusy(s)
 				if !busy.Busy() {
 					return nil
 				}

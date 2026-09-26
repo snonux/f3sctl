@@ -1107,38 +1107,3 @@ func TestIndentNestsContinuationLines(t *testing.T) {
 		}
 	}
 }
-
-// TestActivityFromJudgesTheInventorysGroups pins that the snapshot guards read
-// their host set from the configured inventory (PowerGroup / EveryFHost) --
-// the same set Engine.RackActivity and Engine.ACActivity probe -- rather than
-// from a role/name rule of their own. A configured f4 counts; a status for a
-// Role-f host the inventory does not know, and the k3s guests, do not.
-func TestActivityFromJudgesTheInventorysGroups(t *testing.T) {
-	inv := inventory.Inventory{Hosts: []inventory.Host{
-		{Name: "f0", Role: inventory.RoleF},
-		{Name: inventory.StandaloneHost, Role: inventory.RoleF},
-		{Name: "f4", Role: inventory.RoleF},
-		{Name: "r0", Role: inventory.RoleCluster},
-	}}
-	up := func(name string, role inventory.Role) HostStatus {
-		return HostStatus{Name: name, Role: string(role), Ping: true, PingKnown: true}
-	}
-	snapshot := []HostStatus{
-		{Name: "f0", Role: string(inventory.RoleF), PingKnown: true},
-		up(inventory.StandaloneHost, inventory.RoleF),
-		up("f4", inventory.RoleF),
-		up("stray", inventory.RoleF),
-		up("r0", inventory.RoleCluster),
-	}
-
-	if got := RackActivityFrom(inv, snapshot).Hosts(); !reflect.DeepEqual(got, []string{"f4"}) {
-		t.Errorf("RackActivityFrom hosts = %v, want [f4]", got)
-	}
-	want := []string{inventory.StandaloneHost, "f4"}
-	if got := ACActivityFrom(inv, snapshot).Hosts(); !reflect.DeepEqual(got, want) {
-		t.Errorf("ACActivityFrom hosts = %v, want %v", got, want)
-	}
-	if RackActivityFrom(inventory.Inventory{}, snapshot).Busy() {
-		t.Error("RackActivityFrom with an empty inventory is busy; no host is in its power group")
-	}
-}

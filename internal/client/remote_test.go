@@ -33,8 +33,8 @@ type fakeAPI struct {
 
 	// coldSnapshot, when true, reproduces the gz0 disagreement: handleFans
 	// omits the "force" checkbox from the fans-off advertisement, as
-	// powerapi.Surface.RackBusy (the cheap single-probe snapshot) does when it
-	// reads the rack as idle, while handleFansOff still 409s without force=true, as
+	// powerapi's rackBusy (the cheap single-probe snapshot) does when it reads the rack
+	// as idle, while handleFansOff still 409s without force=true, as
 	// powerapi's stricter, re-probing rackStillBusy() does when it
 	// disagrees and finds a host up within the same request. When false (the
 	// zero value, used by every test predating gz0), the field is always

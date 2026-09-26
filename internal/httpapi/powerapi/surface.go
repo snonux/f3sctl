@@ -76,6 +76,13 @@ type Surface struct {
 	// Inv is the configured inventory: the same one the engine acts on, which
 	// is what makes the per-host action routes match exactly the hosts the
 	// engine probes and shows in /status. See Routes' doc comment.
+	//
+	// Unlike the collaborators below, Inv is required whenever the surface
+	// serves or advertises anything power-related: the availability
+	// predicates (clusterHostsUp, everyFHostUp) and the snapshot halves of
+	// the fan and AC guards (rackBusy, acBusy) judge the snapshot against its
+	// groups. An empty Inventory has no groups, so those guards would read
+	// every rack as cold -- the unsafe answer -- rather than fail.
 	Inv inventory.Inventory
 	// Engine is the fans-and-probes slice of the power engine this surface
 	// drives directly (the plug write, and the strict rack-activity probe the
@@ -173,9 +180,9 @@ func Host(s contract.State, name string) (power.HostStatus, bool) {
 	return power.HostStatus{}, false
 }
 
-// ClusterHostsUp reports how many hosts of the power group (f0/f1/f2,
-// sf.Inv.PowerGroup) answer ICMP, and how many are additionally reachable over
-// SSH.
+// clusterHostsUp reports how many hosts of the power group (f0/f1/f2,
+// power.PowerGroupStatuses) answer ICMP, and how many are additionally
+// reachable over SSH.
 //
 // The two counts answer different questions. Waking is about power, so it uses
 // ping. Shutting down runs entirely over SSH -- the zusb pre-flight, the guest
@@ -183,30 +190,26 @@ func Host(s contract.State, name string) (power.HostStatus, bool) {
 // host that is merely mid-boot produces a job that can only fail. That is
 // exactly what happened on 2026-08-08, when f3 was shut down 48 seconds after
 // waking and the pre-flight got "connection refused".
-func (sf *Surface) ClusterHostsUp(s contract.State) (up, sshUp, total int) {
-	return hostsUp(sf.Inv.PowerGroup(), s)
+func (sf *Surface) clusterHostsUp(s contract.State) (up, sshUp, total int) {
+	return hostsUp(power.PowerGroupStatuses(sf.Inv, s.Hosts))
 }
 
-// EveryFHostUp counts every f-host (f0-f3, sf.Inv.EveryFHost): the set
+// everyFHostUp counts every f-host (f0-f3, power.EveryFHostStatuses): the set
 // `power all` acts on.
 //
-// Separate from ClusterHostsUp, which deliberately excludes f3, so the two
+// Separate from clusterHostsUp, which excludes the standalone f3, so the two
 // commands are judged against exactly the hosts they would touch -- and both
-// read their set from the same inventory methods the engine acts on, so an
-// advertised action can never cover a different set of hosts than the job it
+// select through the same inventory groups the engine acts on, so an
+// advertised action never covers a different set of hosts than the job it
 // starts.
-func (sf *Surface) EveryFHostUp(s contract.State) (up, sshUp, total int) {
-	return hostsUp(sf.Inv.EveryFHost(), s)
+func (sf *Surface) everyFHostUp(s contract.State) (up, sshUp, total int) {
+	return hostsUp(power.EveryFHostStatuses(sf.Inv, s.Hosts))
 }
 
-// hostsUp counts the snapshot's hosts that are in group: all of them, those
-// answering ICMP, and those reachable over SSH.
-func hostsUp(group []inventory.Host, s contract.State) (up, sshUp, total int) {
-	for _, h := range s.Hosts {
-		if !inventory.Includes(group, h.Name) {
-			continue
-		}
-		total++
+// hostsUp counts statuses: all of them, those answering ICMP, and those
+// reachable over SSH.
+func hostsUp(statuses []power.HostStatus) (up, sshUp, total int) {
+	for _, h := range statuses {
 		if h.Ping {
 			up++
 		}
@@ -214,10 +217,10 @@ func hostsUp(group []inventory.Host, s contract.State) (up, sshUp, total int) {
 			sshUp++
 		}
 	}
-	return up, sshUp, total
+	return up, sshUp, len(statuses)
 }
 
-// RackBusy reports which f-hosts may still be drawing power, judged against
+// rackBusy reports which f-hosts may still be drawing power, judged against
 // this request's snapshot. This is what gates switching the fans off.
 //
 // The rule is power's, not this package's, and deliberately so: the CLI's
@@ -232,12 +235,12 @@ func hostsUp(group []inventory.Host, s contract.State) (up, sshUp, total int) {
 // guard: it is what an advertisement is judged against, and every response can
 // afford it. handleFansOff confirms with the strict half before it switches
 // anything.
-func (sf *Surface) RackBusy(s contract.State) power.RackActivity {
+func (sf *Surface) rackBusy(s contract.State) power.RackActivity {
 	return power.RackActivityFrom(sf.Inv, s.Hosts)
 }
 
-// ACBusy reports which f-hosts may still be drawing power on the AC circuit
+// acBusy reports which f-hosts may still be drawing power on the AC circuit
 // (f0–f3), judged against this request's snapshot. Gates switching AC off.
-func (sf *Surface) ACBusy(s contract.State) power.RackActivity {
+func (sf *Surface) acBusy(s contract.State) power.RackActivity {
 	return power.ACActivityFrom(sf.Inv, s.Hosts)
 }

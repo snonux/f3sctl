@@ -6,6 +6,11 @@
 // at runtime from /usr/local/etc/f3sctl.json — see package config.
 package inventory
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Role classifies a host by what f3sctl may do with it.
 type Role string
 
@@ -37,6 +42,12 @@ type Host struct {
 	SSHPort int `json:"ssh_port"`
 	// SSHUser is the account the restricted f3sctl key authenticates as.
 	SSHUser string `json:"ssh_user"`
+	// Standalone marks an f-host that is not part of the k3s cluster (f3: it
+	// runs a standalone Rocky VM, is racked apart from the others and the fan
+	// plug does not cool it). It is left out of PowerGroup -- and so out of a
+	// bare `power on|off` and the fan guard -- but stays in EveryFHost.
+	// Meaningful only for RoleF hosts.
+	Standalone bool `json:"standalone,omitempty"`
 }
 
 // Wakeable reports whether this host can be started with a magic packet.
@@ -63,6 +74,28 @@ type Inventory struct {
 	GogiosMuteFile string `json:"gogios_mute_file"`
 }
 
+// UnmarshalJSON overlays a configured inventory onto inv the way config.Load
+// overlays everything else -- absent keys keep their current value -- except
+// that a present "hosts" list replaces inv.Hosts wholesale.
+//
+// encoding/json decodes an array into the slice's existing elements, so
+// without this a configured host list would inherit, by index, every field it
+// leaves out from the compiled-in host that used to sit there: a Standalone
+// flag, or a MAC, silently landing on an unrelated host.
+func (inv *Inventory) UnmarshalJSON(data []byte) error {
+	type plain Inventory // no methods, so no recursion
+	p := plain(*inv)
+	p.Hosts = nil
+	if err := json.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("decoding inventory: %w", err)
+	}
+	if p.Hosts == nil { // "hosts" absent (or null): keep the current list
+		p.Hosts = inv.Hosts
+	}
+	*inv = Inventory(p)
+	return nil
+}
+
 // Default returns the compiled-in inventory.
 //
 // MAC addresses were read off the hosts with `ifconfig re0 | grep ether`; if a
@@ -77,7 +110,7 @@ func Default() Inventory {
 			{Name: "f0", Role: RoleF, IP: "192.168.1.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl"},
 			{Name: "f1", Role: RoleF, IP: "192.168.1.131", MAC: "e8:ff:1e:d7:1e:44", SSHPort: 22, SSHUser: "f3sctl"},
 			{Name: "f2", Role: RoleF, IP: "192.168.1.132", MAC: "e8:ff:1e:d7:1c:a0", SSHPort: 22, SSHUser: "f3sctl"},
-			{Name: "f3", Role: RoleF, IP: "192.168.1.133", MAC: "e8:ff:1e:d7:f3:d7", SSHPort: 22, SSHUser: "f3sctl"},
+			{Name: "f3", Role: RoleF, IP: "192.168.1.133", MAC: "e8:ff:1e:d7:f3:d7", SSHPort: 22, SSHUser: "f3sctl", Standalone: true},
 
 			{Name: "r0", Role: RoleCluster, IP: "192.168.1.120", SSHPort: 22, SSHUser: "f3sctl"},
 			{Name: "r1", Role: RoleCluster, IP: "192.168.1.121", SSHPort: 22, SSHUser: "f3sctl"},
@@ -118,20 +151,17 @@ func (inv Inventory) ByName(name string) (Host, bool) {
 	return Host{}, false
 }
 
-// StandaloneHost is the f-host that is not part of the k3s cluster: it runs a
-// standalone Rocky VM, is racked apart from the others (the fan plug does not
-// cool it), and is addressed explicitly. It is the one name that separates
-// PowerGroup from EveryFHost; everything else that needs that distinction --
-// the fan guard, the API's availability predicates -- asks those two methods
-// rather than naming it again.
-const StandaloneHost = "f3"
-
 // PowerGroup is the set of hosts a bare `f3sctl power on|off` acts on: the
-// three k3s bhyve hosts. StandaloneHost is deliberately excluded.
+// k3s bhyve hosts, i.e. every f-host not marked Standalone.
+//
+// This is the one place the cluster/standalone split is decided. Everything
+// else that needs it -- the fan guard, the API's availability predicates --
+// asks PowerGroup or EveryFHost rather than naming hosts, so a configured
+// inventory changes all of them at once.
 func (inv Inventory) PowerGroup() []Host {
 	var out []Host
 	for _, h := range inv.ByRole(RoleF) {
-		if h.Name != StandaloneHost {
+		if !h.Standalone {
 			out = append(out, h)
 		}
 	}
@@ -147,21 +177,6 @@ func (inv Inventory) PowerGroup() []Host {
 // whole rack goes dark", which is the other thing people actually want and
 // previously took two commands.
 func (inv Inventory) EveryFHost() []Host { return inv.ByRole(RoleF) }
-
-// Includes reports whether a host named name is in hosts.
-//
-// It is the membership predicate for judging already-probed results (which
-// carry only a name) against a group: callers build the group from PowerGroup
-// or EveryFHost and ask this, so what a snapshot is judged against is exactly
-// the set the engine would act on, never a second copy of the rule.
-func Includes(hosts []Host, name string) bool {
-	for _, h := range hosts {
-		if h.Name == name {
-			return true
-		}
-	}
-	return false
-}
 
 // StorageMaster is the host that normally holds the CARP storage VIP
 // (f3s-storage-ha, 192.168.1.138) and serves NFS. f1 is its BACKUP.

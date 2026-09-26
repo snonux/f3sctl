@@ -501,7 +501,7 @@ func powerConfig(t *testing.T, s *powertest.FakeShelly) config.Config {
 	cfg.Inventory.Broadcast = "127.0.0.1"
 	cfg.Inventory.Hosts = []inventory.Host{
 		{Name: "f0", Role: inventory.RoleF, IP: fHostIP, MAC: "00:11:22:33:44:50", SSHPort: 22, SSHUser: "f3sctl"},
-		{Name: "f3", Role: inventory.RoleF, IP: fHostIP, MAC: "00:11:22:33:44:53", SSHPort: 22, SSHUser: "f3sctl"},
+		{Name: "f3", Role: inventory.RoleF, IP: fHostIP, MAC: "00:11:22:33:44:53", SSHPort: 22, SSHUser: "f3sctl", Standalone: true},
 	}
 	return cfg
 }
