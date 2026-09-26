@@ -29,9 +29,8 @@ type Options struct {
 	// leaves it off by choice: powerapi's hostEntity does carry the role as
 	// the second entry of a host entity's "class" (["host", role]), which
 	// docs/CLIENT.md now lists as stable, but the remote status table has
-	// never shown a ROLE column and the powerGroup property already answers
-	// the question operators ask of it. Turning it on is a presentation
-	// change, not a contract one.
+	// never shown a ROLE column. Turning it on is a presentation change, not
+	// a contract one.
 	ShowRole bool
 }
 

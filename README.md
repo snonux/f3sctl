@@ -240,10 +240,11 @@ the f-host that is not part of the k3s cluster (f3 by default) is standalone,
 which keeps it out of a bare `power on|off` and the fan guard while
 `power all` still includes it. A missing key is an error rather than a
 default, so an older config cannot quietly pull f3 into `power off`. The list
-must also be non-empty, use each non-empty name once, use only the roles
-`f`, `cluster` and `gateway`, set `standalone` only on f-hosts, and keep at
-least one f-host with `"standalone": false` (otherwise the power group would
-be empty).
+must also be non-empty, give every host a non-empty, unique name, use only
+the roles `f`, `cluster` and `gateway`, and keep at least one f-host with
+`"standalone": false` (otherwise the power group would be empty). Only
+f-hosts may set `"standalone": true`; elsewhere the key may be `false` or
+absent.
 `"hosts": null` (or `"inventory": null`) keeps the compiled-in hosts;
 `"hosts": []` is rejected.
 

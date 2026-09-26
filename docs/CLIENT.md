@@ -109,14 +109,6 @@ there means "not measured", not "silent". Show **"unknown"**, never "off". The
 server treats it the same way: an unmeasured host keeps the rack fans on. A
 server too old to send the field omits it; absent means "the probe ran".
 
-Each host entity also says which power actions cover it. Its `class` is
-`["host", "<role>"]`, where the role is `f` for every f-host (f0–f3, the set
-`all-on` / `all-off` act on) and `cluster` for the k3s VMs. The boolean
-`powerGroup` is `true` exactly for the hosts `power-on` / `power-off` act on
-(f0–f2 by default — see "Two power groups" below). Both come from the server's
-configured inventory: use them rather than matching host names, which will be
-wrong the moment the inventory changes.
-
 The second row is genuinely directionless: a host answering ICMP with no sshd
 is either coming up or going down, and one observation cannot tell which. If a
 job is running, `job.properties.action` says which way — use that to pick the
@@ -126,6 +118,14 @@ The third row is genuinely ambiguous and a client should not pretend otherwise.
 A host that failed to shut down cleanly ends up in single-user mode: powered
 on, no network, and **not wakeable by Wake-on-LAN**, because WoL only wakes a
 powered-off NIC. It looks identical to "off" from here.
+
+Each host entity also says which power actions cover it. Its `class` is
+`["host", "<role>"]`, where the role is `f` for every f-host (f0–f3, the set
+`all-on` / `all-off` act on) and `cluster` for the k3s VMs. The boolean
+`powerGroup` is `true` exactly for the hosts `power-on` / `power-off` act on
+(f0–f2 by default — see "Two power groups" below). Both come from the server's
+configured inventory: use them rather than matching host names, which will be
+wrong the moment the inventory changes.
 
 A `power-on` job re-sends its magic packets every two minutes while k3s nodes
 are still down, and if they never answer within the un-mute budget it ends
