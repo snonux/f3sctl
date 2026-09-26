@@ -18,8 +18,9 @@ import (
 // "cache clear" is a POST, which reuses runAction the same way
 // monitoring-mute/unmute do -- see runAction's doc comment.
 //
-// The drill-down categories come from gogios.Statuses, the same list the
-// server builds its /gogios/<status> routes and overview links from, rather
+// The drill-down categories come from gogios.Statuses -- the same list the
+// server builds its /gogios/<status> routes and overview links from, as
+// compiled into this binary; an older or newer server may differ -- rather
 // than being derived from the overview's links at run time. They are CLI
 // grammar: `gogios <status>` must be accepted or rejected before any request
 // (as internal/cli's parseGogiosArgs does when routing here), and "detail"
@@ -93,9 +94,13 @@ func (c *Client) showGogiosStatus(ctx context.Context, status string) error {
 // path in this whole package (see the package doc comment above). "detail
 // <name>" exists for the different case of an operator who already knows a
 // name (from an alert email, say) and has not browsed a drill-down first, so
-// this instead searches every gogios.Statuses category, in order, the same
-// way the server's own Report.Check does (a check's name is unique across
-// the whole report), at the cost of up to six requests instead of one.
+// this instead searches the gogios.Statuses categories in order until one
+// lists the name. Like the server's own Report.Check it finds the one check
+// with that name (names are unique across the report), though it walks the
+// report in a different order, at the cost of up to six requests instead of
+// one. A category the overview does not advertise (a server built with a
+// different list) is skipped rather than failing the whole search; asking
+// for that category directly (`gogios <status>`) still fails.
 func (c *Client) showGogiosCheck(ctx context.Context, name string) error {
 	root, err := c.Root(ctx)
 	if err != nil {
@@ -107,6 +112,9 @@ func (c *Client) showGogiosCheck(ctx context.Context, name string) error {
 	}
 
 	for _, status := range gogios.Statuses() {
+		if _, ok := overview.Link(status); !ok {
+			continue
+		}
 		list, err := c.Follow(ctx, overview, status)
 		if err != nil {
 			return err

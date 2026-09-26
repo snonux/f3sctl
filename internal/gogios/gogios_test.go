@@ -916,10 +916,14 @@ func TestStatusesListsTheSixCategoriesInOrder(t *testing.T) {
 
 // checksForReport has at least one check in every Statuses category, so
 // ChecksFor is exercised non-empty for each: an unhandled CRITICAL (changed
-// from OK) and UNKNOWN, a stale WARNING, a suppressed CRITICAL, and an OK.
+// from OK) and UNKNOWN, a stale WARNING, a suppressed CRITICAL, an OK, and an
+// orphaned StatusChanged WARNING (no twin in any lifecycle section).
 func checksForReport() *Report {
 	return &Report{Sections: Sections{
-		StatusChanged: []Check{{Name: "c1", Status: "CRITICAL", PrevStatus: "OK"}},
+		StatusChanged: []Check{
+			{Name: "c1", Status: "CRITICAL", PrevStatus: "OK"},
+			{Name: "orphan", Status: "WARNING", PrevStatus: "OK"},
+		},
 		Unhandled: []Check{
 			{Name: "c1", Status: "CRITICAL"},
 			{Name: "u1", Status: "UNKNOWN"},
@@ -941,13 +945,14 @@ func checkNames(cs []Check) []string {
 // TestChecksForSelectsEachCategory pins the status-to-checks split for every
 // Statuses category: severities come from ByStatus (a stale WARNING is a
 // WARNING, a suppressed CRITICAL is not a CRITICAL, a changed check is listed
-// once with its PrevStatus), while "stale" and "suppressed" read their
-// lifecycle sections. The table must cover Statuses exactly, so a category
-// added there without a case here fails.
+// once with its PrevStatus, an orphaned StatusChanged entry is listed under
+// its Status), while "stale" and "suppressed" read their lifecycle
+// sections. The table must cover Statuses exactly, so a category added there
+// without a case here fails.
 func TestChecksForSelectsEachCategory(t *testing.T) {
 	want := map[string][]string{
 		"critical":   {"c1"},
-		"warning":    {"w1"},
+		"warning":    {"w1", "orphan"},
 		"unknown":    {"u1"},
 		"stale":      {"w1"},
 		"suppressed": {"s1"},
@@ -973,6 +978,9 @@ func TestChecksForSelectsEachCategory(t *testing.T) {
 	if got := r.ChecksFor("critical"); len(got) != 1 || got[0].PrevStatus != "OK" {
 		t.Errorf("ChecksFor(critical) = %+v, want c1 carrying prevStatus OK", got)
 	}
+	if got := r.ChecksFor("warning"); len(got) != 2 || got[1].PrevStatus != "OK" {
+		t.Errorf("ChecksFor(warning) = %+v, want the orphan last, carrying prevStatus OK", got)
+	}
 }
 
 // TestChecksForRejectsAnUnknownStatus is the negative case: anything outside
@@ -989,14 +997,16 @@ func TestChecksForRejectsAnUnknownStatus(t *testing.T) {
 }
 
 // TestChecksForDoesNotAliasTheReport pins that a caller modifying the
-// returned lifecycle checks cannot rewrite the report's own sections.
+// returned checks -- lifecycle or severity -- cannot rewrite the report's own
+// sections.
 func TestChecksForDoesNotAliasTheReport(t *testing.T) {
 	r := checksForReport()
-	for _, status := range []string{"stale", "suppressed"} {
+	for _, status := range []string{"critical", "stale", "suppressed"} {
 		got := r.ChecksFor(status)
 		got[0].Name = "tampered"
 	}
-	if r.Sections.Stale[0].Name != "w1" || r.Sections.Suppressed[0].Name != "s1" {
-		t.Errorf("ChecksFor aliased the report: stale=%+v suppressed=%+v", r.Sections.Stale, r.Sections.Suppressed)
+	if r.Sections.Unhandled[0].Name != "c1" || r.Sections.Stale[0].Name != "w1" || r.Sections.Suppressed[0].Name != "s1" {
+		t.Errorf("ChecksFor aliased the report: unhandled=%+v stale=%+v suppressed=%+v",
+			r.Sections.Unhandled, r.Sections.Stale, r.Sections.Suppressed)
 	}
 }

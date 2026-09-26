@@ -115,6 +115,10 @@ type fakeGogiosAPI struct {
 	// route has no Available predicate, so a failed report still offers it.
 	broken bool
 
+	// omit, when set, is a drill-down category the overview does not link --
+	// a server built with a different gogios.Statuses list than this client.
+	omit string
+
 	mu          sync.Mutex
 	cacheClears int
 	// drillDowns records, in order, each GET /gogios/<status> path's status,
@@ -192,18 +196,17 @@ func (f *fakeGogiosAPI) handleOverview(w http.ResponseWriter) {
 		{Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
 			Method: http.MethodPost, Href: "/gogios/cache/clear", CLIVerb: "gogios cache clear"},
 	}
+	var links []Link
+	for _, status := range []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"} {
+		if status != f.omit {
+			links = append(links, Link{Rel: []string{status}, Href: "/gogios/" + status})
+		}
+	}
 	writeEntity(w, Entity{
 		Class:      []string{"gogios", "section"},
 		Properties: props,
-		Links: []Link{
-			{Rel: []string{"critical"}, Href: "/gogios/critical"},
-			{Rel: []string{"warning"}, Href: "/gogios/warning"},
-			{Rel: []string{"unknown"}, Href: "/gogios/unknown"},
-			{Rel: []string{"stale"}, Href: "/gogios/stale"},
-			{Rel: []string{"suppressed"}, Href: "/gogios/suppressed"},
-			{Rel: []string{"ok"}, Href: "/gogios/ok"},
-		},
-		Actions: actions,
+		Links:      links,
+		Actions:    actions,
 	})
 }
 
@@ -424,4 +427,34 @@ func TestRunGogiosCoversEveryStatus(t *testing.T) {
 			t.Errorf("detail searched %v, want every category once in order %v", got, want)
 		}
 	})
+}
+
+// TestRunGogiosDetailSkipsAnUnadvertisedCategory pins the version-skew
+// tolerance: when the overview does not link a category this client's
+// gogios.Statuses lists (a server built with a different list), "detail"
+// skips it and still finds a check in a later category, while asking for
+// that category directly still fails.
+func TestRunGogiosDetailSkipsAnUnadvertisedCategory(t *testing.T) {
+	api := newFakeGogiosAPI(t)
+	api.omit = "warning"
+	c := newTestClient(t, api.srv.URL, "k")
+	var out bytes.Buffer
+	c.stdout = &out
+
+	if err := c.runGogios(context.Background(), []string{"detail", "Check", "Disk", "fishfinger"}, false); err != nil {
+		t.Fatalf("runGogios(detail) with warning unadvertised: %v", err)
+	}
+	if !strings.Contains(out.String(), "name:   Check Disk fishfinger") {
+		t.Errorf("output = %q, want the check's detail", out.String())
+	}
+	api.mu.Lock()
+	got := slices.Clone(api.drillDowns)
+	api.mu.Unlock()
+	if want := []string{"critical", "unknown", "stale", "suppressed"}; !slices.Equal(got, want) {
+		t.Errorf("detail searched %v, want %v (warning skipped)", got, want)
+	}
+
+	if err := c.runGogios(context.Background(), []string{"warning"}, false); err == nil {
+		t.Error("runGogios(warning) with warning unadvertised = nil, want an error")
+	}
 }

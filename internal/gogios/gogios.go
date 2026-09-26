@@ -156,11 +156,10 @@ func ClearCache(cfg config.Config) error {
 // CRITICAL/WARNING/UNKNOWN/OK status. ChecksFor owns that split.
 var statuses = [...]string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
 
-// Statuses returns the drill-down categories in display order. It is the
-// single source for the API's /gogios/<status> routes and overview links, the
-// local CLI's `gogios <status>` grammar, and the remote client's grammar and
-// detail search order. Each call returns a fresh copy, so a caller may keep or
-// modify the result without affecting anyone else.
+// Statuses returns the drill-down categories: the six categories of the
+// report's headline counts, lower-cased, in headline order (see statuses).
+// Each call returns a fresh copy, so a caller may keep or modify the result
+// without affecting anyone else.
 func Statuses() []string {
 	return slices.Clone(statuses[:])
 }
@@ -170,7 +169,8 @@ func Statuses() []string {
 // "critical"/"warning"/"unknown"/"ok" are severities: the ByStatus entry for
 // the upper-cased status, i.e. every check Gogios counts in its summary with
 // that Status (suppressed ones excluded, changed ones listed once with their
-// PrevStatus). "stale"/"suppressed" are lifecycle groupings and read
+// PrevStatus), plus any orphaned StatusChanged entry (see ByStatus).
+// "stale"/"suppressed" are lifecycle groupings and read
 // Sections.Stale/Suppressed directly -- filtering ByStatus instead would
 // either double-count a stale check under its severity and "stale", or need a
 // Status value Gogios itself never writes.
