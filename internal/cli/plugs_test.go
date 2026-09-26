@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/powertest"
 )
@@ -239,6 +240,44 @@ func TestPlugVerbReachesOnlyItsOwnPlug(t *testing.T) {
 			}
 			if live.calls != 0 {
 				t.Errorf("liveness consulted %d times, want none: on is never gated", live.calls)
+			}
+		})
+	}
+}
+
+// TestPlugProbesCountTheRightHosts pins which liveness probe each plug's off
+// guard uses in production, against a real engine whose inventory holds only
+// f3 (standalone: outside the fan-cooled power group, but on shelly2's mains).
+//
+// The context is cancelled up front, so ping(8) never runs and every probed
+// host reads as unknown, i.e. running. The fan plug must judge only the power
+// group -- empty here, which fails safe as "no hosts configured" -- and the AC
+// plug every f-host, so f3 must keep `ac off` from cutting mains. Swapping the
+// two probes flips both answers.
+func TestPlugProbesCountTheRightHosts(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+	cfg.Inventory.Hosts = []inventory.Host{
+		{Name: "f3", Role: inventory.RoleF, IP: fHostIP, SSHPort: 22, SSHUser: "f3sctl", Standalone: true},
+	}
+	eng, err := power.New(cfg)
+	if err != nil {
+		t.Fatalf("power.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		plug plug
+		want []string
+	}{
+		{fansPlug, []string{"the rack (no hosts configured)"}},
+		{acPlug, []string{"f3"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.plug.noun, func(t *testing.T) {
+			if got := tt.plug.liveHosts(eng)(ctx); !slices.Equal(got, tt.want) {
+				t.Errorf("%s probe = %q, want %q", tt.plug.noun, got, tt.want)
 			}
 		})
 	}

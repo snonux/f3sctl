@@ -238,7 +238,7 @@ func plugSwitch(ctx context.Context, eng plugEngine, p plug, on bool, stdout io.
 // Checked before the probe's verdict: probes the cancel cut short read as
 // unknown, i.e. running, and "may still be running ... use --force" would send
 // the operator after hosts nobody saw.
-func guardInterrupted(plug string, err error) error {
+func guardInterrupted(subject string, err error) error {
 	return fmt.Errorf("interrupted while checking whether the f-hosts are off; %s left "+
-		"untouched: %w", plug, err)
+		"untouched: %w", subject, err)
 }
