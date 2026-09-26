@@ -231,6 +231,10 @@ async function run(name, confirm, holderRel) {
 // that would break real clients fails here first.
 async function selftest() {
   const entry = await root();
+  // Read before anything else: a running power job withholds every power
+  // action and both plug switches, so the availability checks below expect
+  // nothing offered while one is in flight.
+  const jobRunning = (await request(follow(entry, 'job'))).properties?.state === 'running';
   const status = await request(follow(entry, 'status'));
   const check = (ok, msg) => console.log(`${ok ? 'ok  ' : 'FAIL'} ${msg}`);
 
@@ -257,22 +261,23 @@ async function selftest() {
   check((() => { try { follow(acControl, 'ac'); return true; } catch { return false; } })(),
     'AC control links to the f-host AC plug');
 
-  // The heart of the design: offered actions must match observed state.
+  // The heart of the design: offered actions must match observed state. A
+  // running job (jobRunning, above) withholds all of them.
   const allUp = hosts.filter((h) => h.name !== 'f3' && h.name.startsWith('f')).every((h) => h.ping);
-  check(!!action(power, 'power-on') === !allUp, 'power-on is offered exactly when something is down');
-  check(!!action(power, 'power-off') === hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && h.ping),
-    'power-off is offered exactly when something is up');
+  check(!!action(power, 'power-on') === (!jobRunning && !allUp),
+    'power-on is offered exactly when something is down and no job is running');
+  check(!!action(power, 'power-off') === (!jobRunning && hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && h.ssh)),
+    'power-off is offered exactly when something answers SSH and no job is running');
 
   // "all" covers f3 as well, so it is judged against a different host set than
   // power-on -- with only f3 down, power-on is correctly absent and all-on is
   // not.
   const everyFUp = hosts.filter((h) => h.name.startsWith('f')).every((h) => h.ping);
-  check(!!action(power, 'all-on') === !everyFUp, 'all-on is offered exactly when any f-host is down');
-  check(!!action(power, 'all-off') === hosts.some((h) => h.name.startsWith('f') && h.ssh),
-    'all-off is offered exactly when an f-host answers SSH');
+  check(!!action(power, 'all-on') === (!jobRunning && !everyFUp),
+    'all-on is offered exactly when any f-host is down and no job is running');
+  check(!!action(power, 'all-off') === (!jobRunning && hosts.some((h) => h.name.startsWith('f') && h.ssh)),
+    'all-off is offered exactly when an f-host answers SSH and no job is running');
 
-  // A running power job withholds both plug switches: the job drives them.
-  const jobRunning = (await request(follow(entry, 'job'))).properties?.state === 'running';
   const fans = entities(status, 'fans')[0]?.properties ?? {};
   check(!!action(acControl, 'fans-off') === (!jobRunning && fans.on === true && !fans.error),
     'fans-off is offered only when the plug is on and no job is running');

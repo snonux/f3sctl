@@ -207,9 +207,12 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 
 // fanRoutes is the rack-fan plug's on/off pair.
 //
-// Both are withheld while a power job runs, like every power action: the job
-// switches this plug itself (on before a wake, off after a shutdown), so a
-// manual flip mid-job either races it or is silently undone by it.
+// Both are withheld while a power job runs, like every power action. The
+// rack-wide jobs (power on/off, all on/off, all-cycle) switch this plug
+// themselves -- on before a wake, off after a shutdown -- so a manual flip
+// mid-job either races them or is silently undone. Per-host jobs leave the
+// plug alone, but are gated too: one rule for every job is simpler to reason
+// about, and to render, than a per-action exception.
 func (sf *Surface) fanRoutes() []contract.Route {
 	return []contract.Route{
 		{

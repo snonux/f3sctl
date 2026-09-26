@@ -510,32 +510,44 @@ func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
 // they are independent of it. They are not: the job switches both itself, and
 // an all-cycle's silent standby wait let ac-off through without force.
 func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
-	busy := contract.State{
-		Hosts: []power.HostStatus{
-			{Name: "f0", Role: "f", Ping: true, SSH: true},
-			{Name: "f1", Role: "f", Ping: true, SSH: true},
-			{Name: "f2", Role: "f", Ping: true, SSH: true},
-		},
-		Fans:     power.FansState{On: true},
-		PeerBusy: true,
-		// Job is nil: this node itself is idle, which is the whole point.
+	hosts := []power.HostStatus{
+		{Name: "f0", Role: "f", Ping: true, SSH: true},
+		{Name: "f1", Role: "f", Ping: true, SSH: true},
+		{Name: "f2", Role: "f", Ping: true, SSH: true},
+	}
+	// Two fixtures, plugs on and plugs off, so each plug switch is checked in
+	// the state that would otherwise offer it. Job is nil in both: this node
+	// itself is idle, which is the whole point.
+	fixtures := map[string]contract.State{
+		"plugs on":  {Hosts: hosts, Fans: power.FansState{On: true}, AC: power.ACState{On: true}},
+		"plugs off": {Hosts: hosts},
 	}
 
-	for _, r := range testRoutes(inventory.Default()) {
-		if !r.Action || !isJobGatedPath(r.Path) {
-			continue
-		}
-		if r.IsAvailable(busy) {
-			t.Errorf("%q offered while the peer node is running a job", r.Name)
+	for name, busy := range fixtures {
+		busy.PeerBusy = true
+		for _, r := range testRoutes(inventory.Default()) {
+			if !r.Action || !isJobGatedPath(r.Path) {
+				continue
+			}
+			if r.IsAvailable(busy) {
+				t.Errorf("%s: %q offered while the peer node is running a job", name, r.Name)
+			}
 		}
 	}
 
-	// Sanity check that the loop above really covered the plugs: the same
-	// state with the peer idle offers fans-off, so its absence is the job.
-	idle := busy
-	idle.PeerBusy = false
-	if r, ok := routeByName("fans-off"); !ok || !r.IsAvailable(idle) {
-		t.Error("fans-off not offered with the peer idle; the busy assertion above proves nothing")
+	// Sanity check that the loop above really covered the plugs: with the
+	// peer idle each fixture offers its plug switches, so their absence above
+	// is the job's doing.
+	offered := map[string][]string{
+		"plugs on":  {"fans-off", "ac-off"},
+		"plugs off": {"fans-on", "ac-on"},
+	}
+	for name, idle := range fixtures {
+		for _, action := range offered[name] {
+			if r, ok := routeByName(action); !ok || !r.IsAvailable(idle) {
+				t.Errorf("%s: %s not offered with the peer idle; the busy assertion above proves nothing", name, action)
+			}
+		}
 	}
 }
 

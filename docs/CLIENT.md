@@ -147,6 +147,11 @@ same way as `fans-off` (a `force` checkbox while any of f0–f3 may be drawing
 power — f3 included, because this plug powers all of them). Treat a hard cut
 as last-resort or post-shutdown only.
 
+While **any** power job runs, on either node, both plug switches (`fans-on`,
+`fans-off`, `ac-on`, `ac-off`) are withheld, like every power action: the
+rack-wide jobs drive both plugs themselves. See "Stuck job: recovering the
+plugs" under the power cycle below.
+
 ### Two power groups
 
 `power-on` / `power-off` act on **f0, f1, f2** — the k3s cluster. f3 is
@@ -194,6 +199,21 @@ A shutdown half that fails ends the job with AC untouched (`error` contains
 restored: `error` then contains `AC is still OFF` and names `f3sctl ac on`.
 It runs a shutdown and a wake back to back, so it is the longest job there
 is — take the poll deadline from `staleAfterSeconds`, as below.
+
+The AC plug is not offered while the cycle runs, not even during the AC-off
+dwell: `ac-on` there would race the cycle's own restore, and `ac-off` in the
+standby wait (hosts silent, so no `force` asked) would cut mains under the
+wake half.
+
+#### Stuck job: recovering the plugs
+
+If the process running a job dies (the Pi reboots mid-cycle, say), its
+`job.json` keeps saying `running` until `staleAfterSeconds` has passed, and
+until then the API withholds both plug switches along with every power
+action. An AC plug left off, or fans that need switching, cannot wait that
+long, so the way out meanwhile is on a Pi itself: run `f3sctl ac on` or
+`f3sctl fans on` there, without `--remote`. The local commands switch the plug
+directly and do not consult the job. A client cannot do this for you; it can only say so.
 
 ### Monitoring mute
 
