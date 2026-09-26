@@ -555,7 +555,7 @@ func parseMonitoringArgs(args []string) (verb string, ok bool) {
 	return "", false
 }
 
-func printMonitoring(out io.Writer, states []power.GatewayMute) {
+func printMonitoring(out io.Writer, states []gogios.GatewayMute) {
 	for _, gw := range states {
 		switch {
 		case gw.Err != nil:

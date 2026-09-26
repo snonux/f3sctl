@@ -110,13 +110,14 @@ type Engine struct {
 	zusb  ZusbChecker
 	// monitor is the Gogios monitoring concern: muting, un-muting and reading
 	// the gateways' alerting state, plus the wake path's wait for the k3s nodes
-	// before it clears a mute. Split off Engine (see o51) so the gateway and
-	// cluster-wait mechanism is held here, not mixed into the shutdown/fan-guard
-	// policy; Engine delegates its MuteGogios/UnmuteGogios/UnmuteNow/
-	// MonitoringStatus methods to monitorBackend(). New wires it; only tests
-	// substitute anything else, following the same nil-safe seam pattern as the
-	// backends above.
-	monitor *Monitor
+	// before it clears a mute. The mechanism lives in internal/gogios (split
+	// off Engine in o51, moved out of this package in task ha) so it is not
+	// mixed into the shutdown/fan-guard policy; Engine delegates its
+	// MuteGogios/UnmuteGogios/UnmuteNow/MonitoringStatus methods to
+	// monitorBackend() (monitoring.go). New wires a *gogios.Monitor; only
+	// tests substitute anything else, following the same nil-safe seam
+	// pattern as the backends above.
+	monitor gogiosMonitor
 }
 
 // New returns an Engine.
@@ -166,7 +167,7 @@ func New(cfg config.Config) (*Engine, error) {
 	e.ac = execAC{shelly: newShellyClient(cfg.Inventory.ShellyACIP, cfg.ResolveShellyPassword)}
 	e.nfs = execNFS{e}
 	e.zusb = execZusb{e}
-	e.monitor = NewMonitor(cfg, e.powerBackend(), e.Probe)
+	e.monitor = e.newMonitor()
 	return e, nil
 }
 

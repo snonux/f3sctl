@@ -23,8 +23,8 @@ import (
 	"io"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
-	"github.com/snonux/f3sctl/internal/power"
 )
 
 // Surface is the Gogios REST surface, bound to the collaborators its handlers
@@ -66,7 +66,7 @@ type Monitor interface {
 	// UnmuteNow clears it immediately, without waiting for the next power-on.
 	UnmuteNow(ctx context.Context, log io.Writer) error
 	// MonitoringStatus reads the marker from each gateway.
-	MonitoringStatus(ctx context.Context) []power.GatewayMute
+	MonitoringStatus(ctx context.Context) []gogios.GatewayMute
 }
 
 // New returns a Surface bound to its collaborators, rendering every actions
@@ -88,9 +88,9 @@ func New(node string, href func(string) string, cfg config.Config, monitor Monit
 // Muted reports whether Gogios is muted on at least one gateway.
 //
 // A method on contract.State cannot exist for this -- State is shared
-// vocabulary, and only this surface knows what "muted" means (power.AnyMuted
+// vocabulary, and only this surface knows what "muted" means (gogios.AnyMuted
 // over the gateways) -- so it is a plain function here.
-func Muted(s contract.State) bool { return power.AnyMuted(s.Monitoring) }
+func Muted(s contract.State) bool { return gogios.AnyMuted(s.Monitoring) }
 
 // NotAllMuted reports whether some gateway is not known to be muted -- i.e.
 // whether a mute might still change anything. False when no gateway was read

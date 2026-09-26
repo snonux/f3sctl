@@ -103,7 +103,7 @@ func runEveryHandler(t *testing.T, actions contract.ActionRenderer) {
 
 	state := contract.State{
 		Fans: power.FansState{On: true}, AC: power.ACState{On: true},
-		Monitoring: []power.GatewayMute{{Name: "gw", Muted: true}},
+		Monitoring: []gogios.GatewayMute{{Name: "gw", Muted: true}},
 		Gogios:     &gogios.Report{},
 	}
 	req := contract.Request{Query: url.Values{"name": {"x"}}, Form: url.Values{"force": {"true"}}}
@@ -129,7 +129,7 @@ func TestTestRouterSharesItsBaseWithTheSurfaces(t *testing.T) {
 	rt := testRouter(inventory.Default(), base)
 	state := contract.State{
 		Fans:       power.FansState{On: true},
-		Monitoring: []power.GatewayMute{{Name: "gw", Muted: true}},
+		Monitoring: []gogios.GatewayMute{{Name: "gw", Muted: true}},
 	}
 
 	for _, path := range []string{"/fans", "/monitoring"} {

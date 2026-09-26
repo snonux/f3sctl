@@ -15,8 +15,8 @@ import (
 
 	"github.com/snonux/f3sctl/internal/client"
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
-	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/powertest"
 )
 
@@ -301,7 +301,7 @@ func TestAPIGatewaySwitchWithoutAnAPIKeySaysSo(t *testing.T) {
 
 func TestReportGatewaysTreatsUnreadableAsFailed(t *testing.T) {
 	var log bytes.Buffer
-	err := reportGateways(&log, []power.GatewayMute{
+	err := reportGateways(&log, []gogios.GatewayMute{
 		{Name: "blowfish", Muted: true},
 		{Name: "fishfinger", Err: errors.New("ssh: timed out")},
 	}, true, "gogios-mute", "muted")

@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
-	"github.com/snonux/f3sctl/internal/power"
 )
 
 // echoActions is a contract.ActionRenderer that renders one action per name
@@ -38,8 +38,8 @@ type fakeMonitor struct{}
 
 func (fakeMonitor) MuteGogios(context.Context, io.Writer) error { return nil }
 func (fakeMonitor) UnmuteNow(context.Context, io.Writer) error  { return nil }
-func (fakeMonitor) MonitoringStatus(context.Context) []power.GatewayMute {
-	return []power.GatewayMute{{Name: "gw", Muted: true}}
+func (fakeMonitor) MonitoringStatus(context.Context) []gogios.GatewayMute {
+	return []gogios.GatewayMute{{Name: "gw", Muted: true}}
 }
 
 // actionNames lists an entity's action names in order.

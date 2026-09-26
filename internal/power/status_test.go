@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/powertest"
@@ -163,8 +162,7 @@ func TestSnapshotSelectorsMatchWhatTheEngineTouches(t *testing.T) {
 				h.Standalone = h.Name == "f2"
 			}
 			eng.fans = &fakeFans{}
-			verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-			eng.monitor = newTestMonitor(t, verb, (&downForProbes{}).probe, nil, []string{"r0"}, time.Minute)
+			eng.monitor = &fakeMonitor{}
 
 			if err := tc.act(eng, context.Background(), &bytes.Buffer{}); err != nil {
 				t.Fatalf("%s: %v", tc.name, err)

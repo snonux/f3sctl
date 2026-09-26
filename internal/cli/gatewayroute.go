@@ -7,7 +7,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/client"
 	"github.com/snonux/f3sctl/internal/config"
-	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/gogios"
 )
 
 // gatewaySwitchFor picks how a local power run reaches the Gogios mute on the
@@ -28,7 +28,7 @@ import (
 // the API route; if the API is not configured either, that route fails with
 // the API's own "no API key/URL" error, which says what to set up rather than
 // repeating the unreadable key paths.
-func gatewaySwitchFor(cfg config.Config, local bool) power.GatewaySwitch {
+func gatewaySwitchFor(cfg config.Config, local bool) gogios.GatewaySwitch {
 	if local {
 		return nil
 	}
@@ -38,14 +38,14 @@ func gatewaySwitchFor(cfg config.Config, local bool) power.GatewaySwitch {
 	return apiGatewaySwitch{cfg: cfg}
 }
 
-// apiGatewaySwitch is the power.GatewaySwitch that sets the mute through the
+// apiGatewaySwitch is the gogios.GatewaySwitch that sets the mute through the
 // pi0/pi1 HTTP API, the same way `f3sctl monitoring mute|unmute` does.
 type apiGatewaySwitch struct {
 	cfg config.Config
 }
 
 // SetMute performs the API's mute or unmute and reports each gateway in the
-// shape the SSH path (power.Monitor.eachGateway) uses, so the wake's log and
+// shape the SSH path (gogios.Monitor.eachGateway) uses, so the wake's log and
 // error read the same whichever route was taken -- plus "(via the API)", so
 // an operator can tell which one it was.
 func (s apiGatewaySwitch) SetMute(ctx context.Context, log io.Writer, mute bool) error {
@@ -79,7 +79,7 @@ func (s apiGatewaySwitch) newClient(log io.Writer) (*client.Client, error) {
 // reportGateways logs one line per gateway and returns an error naming every
 // gateway that is not in the wanted state: unreadable counts as failed, since
 // "unknown" is not "un-muted".
-func reportGateways(log io.Writer, states []power.GatewayMute, mute bool, verb, past string) error {
+func reportGateways(log io.Writer, states []gogios.GatewayMute, mute bool, verb, past string) error {
 	var failed []string
 	for _, st := range states {
 		switch {

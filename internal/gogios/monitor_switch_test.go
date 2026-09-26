@@ -1,4 +1,4 @@
-package power
+package gogios
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
@@ -42,19 +41,14 @@ func (f *fakeSwitch) callsList() []bool {
 	return append([]bool(nil), f.calls...)
 }
 
-func allNodesUp(_ context.Context, hosts []inventory.Host) []HostStatus {
-	out := make([]HostStatus, len(hosts))
-	for i, h := range hosts {
-		out[i] = HostStatus{Name: h.Name, Ping: true}
-	}
-	return out
-}
+// allNodesUp is a probe on which every node answers.
+func allNodesUp(context.Context, []inventory.Host) []string { return nil }
 
 func TestMonitorMuteAndUnmuteUseTheSwitchInsteadOfSSH(t *testing.T) {
 	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
 	sw := &fakeSwitch{}
 	m := newTestMonitor(t, verb, nil, []string{"blowfish", "fishfinger"}, nil, time.Minute)
-	m.via = sw
+	m.WithSwitch(sw)
 
 	if err := m.Mute(context.Background(), io.Discard); err != nil {
 		t.Fatalf("Mute: %v", err)
@@ -76,7 +70,7 @@ func TestMonitorUnmuteGogiosUsesTheSwitchAfterTheClusterAnswers(t *testing.T) {
 	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
 	sw := &fakeSwitch{}
 	m := newTestMonitor(t, verb, allNodesUp, []string{"blowfish", "fishfinger"}, []string{"r0", "r1", "r2"}, time.Minute)
-	m.via = sw
+	m.WithSwitch(sw)
 
 	if err := m.UnmuteGogios(context.Background(), io.Discard, nil); err != nil {
 		t.Fatalf("UnmuteGogios: %v", err)
@@ -92,7 +86,7 @@ func TestMonitorUnmuteGogiosUsesTheSwitchAfterTheClusterAnswers(t *testing.T) {
 func TestMonitorUnmuteGogiosTimeoutStillUnmutesThroughTheSwitch(t *testing.T) {
 	sw := &fakeSwitch{}
 	m := newTestMonitor(t, &fakeGatewayVerb{}, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1"}, -time.Second)
-	m.via = sw
+	m.WithSwitch(sw)
 
 	err := m.UnmuteGogios(context.Background(), io.Discard, nil)
 	if !errors.Is(err, ErrClusterIncomplete) {
@@ -107,7 +101,7 @@ func TestMonitorUnmuteGogiosTimeoutStillUnmutesThroughTheSwitch(t *testing.T) {
 func TestMonitorUnmuteGogiosReportsAFailingSwitch(t *testing.T) {
 	sw := &fakeSwitch{err: errors.New("could not gogios-unmute Gogios on: [fishfinger]")}
 	m := newTestMonitor(t, &fakeGatewayVerb{}, allNodesUp, []string{"blowfish", "fishfinger"}, []string{"r0"}, time.Minute)
-	m.via = sw
+	m.WithSwitch(sw)
 
 	err := m.UnmuteGogios(context.Background(), io.Discard, nil)
 	if err == nil || errors.Is(err, ErrClusterIncomplete) || !strings.Contains(err.Error(), "fishfinger") {
@@ -120,7 +114,7 @@ func TestMonitorUnmuteGogiosReportsAFailingSwitch(t *testing.T) {
 func TestMonitorUnmuteGogiosCancelledWithSwitchSuggestsTheCLI(t *testing.T) {
 	sw := &fakeSwitch{}
 	m := newTestMonitor(t, &fakeGatewayVerb{}, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1"}, time.Hour)
-	m.via = sw
+	m.WithSwitch(sw)
 	m.poll = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -142,35 +136,11 @@ func TestMonitorUnmuteGogiosCancelledWithSwitchSuggestsTheCLI(t *testing.T) {
 func TestMonitorWithoutGatewaysDoesNotCallTheSwitch(t *testing.T) {
 	sw := &fakeSwitch{err: errors.New("must not be called")}
 	m := newTestMonitor(t, &fakeGatewayVerb{}, allNodesUp, nil, []string{"r0"}, time.Minute)
-	m.via = sw
+	m.WithSwitch(sw)
 	if err := m.UnmuteGogios(context.Background(), io.Discard, nil); err != nil {
 		t.Fatalf("UnmuteGogios: %v", err)
 	}
 	if len(sw.callsList()) != 0 {
 		t.Error("switch called with no gateways in the inventory")
-	}
-}
-
-// WithGatewaySwitch works on a hand-built Engine (no monitor yet), and nil
-// restores the SSH verb.
-func TestEngineWithGatewaySwitchInstallsAndClears(t *testing.T) {
-	var cfg config.Config
-	cfg.Inventory.Hosts = []inventory.Host{{Name: "blowfish", Role: inventory.RoleGateway}}
-	e := &Engine{cfg: cfg}
-	sw := &fakeSwitch{}
-	e.WithGatewaySwitch(sw)
-	if e.monitor == nil || e.monitor.via != sw {
-		t.Fatalf("monitor.via = %v, want the switch", e.monitor)
-	}
-	if err := e.UnmuteNow(context.Background(), io.Discard); err != nil {
-		t.Fatalf("UnmuteNow: %v", err)
-	}
-	if got := sw.callsList(); len(got) != 1 {
-		t.Errorf("switch calls = %v, want one", got)
-	}
-
-	e.WithGatewaySwitch(nil)
-	if e.monitor.via != nil {
-		t.Error("WithGatewaySwitch(nil) left a switch installed")
 	}
 }

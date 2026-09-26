@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/gogios"
 )
 
 // SetMute asks the API to mute (or un-mute) Gogios on both gateways and
@@ -15,14 +15,14 @@ import (
 // discovery (root -> gogios folder -> /monitoring) and the same action,
 // matched by its CLI verb, but returning state instead of printing it, so the
 // local wake path can use it as its un-mute transport when this machine holds
-// no SSH key the gateways accept (see power.GatewaySwitch).
+// no SSH key the gateways accept (see gogios.GatewaySwitch).
 //
 // The server withholds an action that would change nothing (unmute is only
 // advertised while something is muted), so a missing action is not an error
 // by itself: the state the monitoring resource reports is returned for the
 // caller to judge. Only a resource that reports no gateways at all -- nothing
 // to judge -- is an error here.
-func (c *Client) SetMute(ctx context.Context, mute bool) ([]power.GatewayMute, error) {
+func (c *Client) SetMute(ctx context.Context, mute bool) ([]gogios.GatewayMute, error) {
 	root, err := c.Root(ctx)
 	if err != nil {
 		return nil, err
@@ -54,11 +54,11 @@ func (c *Client) SetMute(ctx context.Context, mute bool) ([]power.GatewayMute, e
 // gatewayStates decodes the per-gateway entities of a monitoring resource.
 // A gateway the server could not read carries an "error" property instead of
 // "muted" (unknown is not the same as un-muted), which becomes Err here.
-func gatewayStates(mon Entity) []power.GatewayMute {
-	var out []power.GatewayMute
+func gatewayStates(mon Entity) []gogios.GatewayMute {
+	var out []gogios.GatewayMute
 	for _, gw := range mon.Entities {
 		name, _ := gw.Properties["name"].(string)
-		st := power.GatewayMute{Name: name}
+		st := gogios.GatewayMute{Name: name}
 		if msg, _ := gw.Properties["error"].(string); msg != "" {
 			st.Err = errors.New(msg)
 		} else {

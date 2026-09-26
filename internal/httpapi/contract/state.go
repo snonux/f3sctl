@@ -25,7 +25,7 @@ type State struct {
 	// Monitoring is the per-gateway Gogios mute state. Nil when it was not
 	// collected for this request: reading it costs two SSH round trips to the
 	// gateways, so only the routes declaring NeedMonitoring pay for it.
-	Monitoring []power.GatewayMute
+	Monitoring []gogios.GatewayMute
 
 	// Gogios is the fetched-or-cached Gogios alert report (internal/gogios),
 	// populated by the composition root only for routes declaring NeedReport

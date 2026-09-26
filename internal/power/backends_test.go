@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/powertest"
 )
@@ -627,24 +630,28 @@ func TestRewakeResendsToEveryHostAndLogsFailures(t *testing.T) {
 }
 
 // TestOnFailsAndUnmutesWhenANodeNeverComesBack pins on()'s timeout path: the
-// wake returns an error naming the missing node rather than claiming success,
-// and Gogios is still un-muted so that node alerts.
+// wake returns an error naming the missing node rather than claiming success.
+// That Gogios is still un-muted, so the node alerts, is the monitor's half
+// (gogios.Monitor.UnmuteGogios, pinned in internal/gogios); here the monitor
+// reports the timeout and on() must word it as an incomplete wake.
 func TestOnFailsAndUnmutesWhenANodeNeverComesBack(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, false)
 	eng := testEngine(t, shelly)
 	eng.fans = &fakeFans{}
 	eng.power = &fakePower{}
-	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-	eng.monitor = newTestMonitor(t, verb, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1", "r2"}, -time.Second)
+	mon := &fakeMonitor{unmuteGogios: func(context.Context, io.Writer, func()) error {
+		return clusterNeverAnswered("r0")
+	}}
+	eng.monitor = mon
 
 	var log bytes.Buffer
 	err := eng.On(context.Background(), &log)
-	if !errors.Is(err, ErrClusterIncomplete) || !strings.Contains(err.Error(), "wake incomplete") ||
+	if !errors.Is(err, gogios.ErrClusterIncomplete) || !strings.Contains(err.Error(), "wake incomplete") ||
 		!strings.HasSuffix(err.Error(), ": r0") {
 		t.Fatalf("On err = %v, want an incomplete wake naming r0", err)
 	}
-	if got := verb.callsList(); len(got) != 1 || got[0] != "gogios-unmute:blowfish" {
-		t.Errorf("gateway calls = %v, want Gogios un-muted despite the missing node", got)
+	if got := mon.callsList(); len(got) != 1 || got[0] != "unmute-gogios" {
+		t.Errorf("monitor calls = %v, want the wake's one wait-then-un-mute", got)
 	}
 	if strings.Contains(log.String(), "All k3s nodes answer") {
 		t.Errorf("log = %q, must not claim the cluster answered", log.String())
@@ -653,16 +660,14 @@ func TestOnFailsAndUnmutesWhenANodeNeverComesBack(t *testing.T) {
 
 // TestOnInterruptedWhileWaitingForTheCluster pins a Ctrl-C during the wake's
 // cluster wait: the error must say the wake was interrupted and Gogios left
-// muted -- not "woke, but Gogios is not fully un-muted" -- and nothing may be
-// un-muted.
+// muted -- not "woke, but Gogios is not fully un-muted".
 func TestOnInterruptedWhileWaitingForTheCluster(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, false)
 	eng := testEngine(t, shelly)
 	eng.fans = &fakeFans{}
 	eng.power = &fakePower{}
-	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-	eng.monitor = newTestMonitor(t, verb, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
-	eng.monitor.poll = time.Millisecond
+	mon := &fakeMonitor{unmuteGogios: abandonOnCancel}
+	eng.monitor = mon
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	time.AfterFunc(50*time.Millisecond, cancel)
@@ -671,14 +676,14 @@ func TestOnInterruptedWhileWaitingForTheCluster(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "woke") {
 		t.Fatalf("On err = %v, want a wrapped context.Canceled that does not claim a wake", err)
 	}
-	if !errors.Is(err, errWaitAbandoned) || !strings.Contains(err.Error(), "before every k3s node answered") {
+	if !errors.Is(err, gogios.ErrWaitAbandoned) || !strings.Contains(err.Error(), "before every k3s node answered") {
 		t.Errorf("On err = %v, want the abandoned-wait wording", err)
 	}
 	if !strings.Contains(err.Error(), "f3sctl monitoring unmute") {
 		t.Errorf("On err = %v, want it to name `f3sctl monitoring unmute`", err)
 	}
-	if got := verb.callsList(); len(got) != 0 {
-		t.Errorf("gateway calls = %v, want Gogios left muted", got)
+	if got := mon.callsList(); len(got) != 1 || got[0] != "unmute-gogios" {
+		t.Errorf("monitor calls = %v, want no un-mute beyond the abandoned wait", got)
 	}
 }
 
@@ -687,15 +692,18 @@ func TestOnInterruptedWhileWaitingForTheCluster(t *testing.T) {
 // so "before every k3s node answered" would be false. The error must say the
 // un-mute was interrupted and how to check, and keep ErrClusterIncomplete in
 // the chain when the wait had timed out with a node missing.
+//
+// The gateway error is the one gogios.Monitor's SSH path returns: it names
+// the gateway but does not wrap the cancel, so on() must add it.
 func TestOnInterruptedWhileUnmuting(t *testing.T) {
+	gatewayErr := errors.New("could not gogios-unmute Gogios on: [blowfish]")
 	cases := []struct {
 		name       string
-		probe      func(context.Context, []inventory.Host) []HostStatus
-		budget     time.Duration
+		err        error
 		incomplete bool
 	}{
-		{"every node up", allNodesUp, time.Minute, false},
-		{"after the wait timed out", oneNodeDown, -time.Second, true},
+		{"every node up", gatewayErr, false},
+		{"after the wait timed out", fmt.Errorf("%w; %w", clusterNeverAnswered("r0"), gatewayErr), true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -705,13 +713,13 @@ func TestOnInterruptedWhileUnmuting(t *testing.T) {
 			eng.power = &fakePower{}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-			verb.onCall = func(string) { cancel() } // Ctrl-C mid un-mute
-			verb.err["gogios-unmute:blowfish"] = context.Canceled
-			eng.monitor = newTestMonitor(t, verb, tc.probe, []string{"blowfish"}, []string{"r0", "r1", "r2"}, tc.budget)
+			eng.monitor = &fakeMonitor{unmuteGogios: func(context.Context, io.Writer, func()) error {
+				cancel() // Ctrl-C mid un-mute
+				return tc.err
+			}}
 
 			err := eng.On(ctx, &bytes.Buffer{})
-			if !errors.Is(err, context.Canceled) || errors.Is(err, errWaitAbandoned) {
+			if !errors.Is(err, context.Canceled) || errors.Is(err, gogios.ErrWaitAbandoned) {
 				t.Fatalf("On err = %v, want context.Canceled and not an abandoned wait", err)
 			}
 			msg := err.Error()
@@ -719,7 +727,7 @@ func TestOnInterruptedWhileUnmuting(t *testing.T) {
 				strings.Contains(msg, "before every k3s node answered") {
 				t.Errorf("On err = %v, want the interrupted-un-mute wording", err)
 			}
-			if got := errors.Is(err, ErrClusterIncomplete); got != tc.incomplete {
+			if got := errors.Is(err, gogios.ErrClusterIncomplete); got != tc.incomplete {
 				t.Errorf("errors.Is(err, ErrClusterIncomplete) = %v, want %v: %v", got, tc.incomplete, err)
 			}
 		})
@@ -749,26 +757,28 @@ func TestOnInterruptedBeforeTheFansIsNotARefusal(t *testing.T) {
 }
 
 // TestOnResendsMagicPacketsWhileTheClusterIsDown pins the rewake wiring in
-// on(): while a node stays down the woken hosts get their packets again, so
-// Wake is called more than once per host before the cluster answers.
+// on(): the rewake the monitor calls while a node stays down re-sends the
+// woken hosts their packets, so Wake is called more than once per host before
+// the cluster answers. How often the monitor calls it is its own concern
+// (pinned in internal/gogios).
 func TestOnResendsMagicPacketsWhileTheClusterIsDown(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, false)
 	eng := testEngine(t, shelly)
 	eng.fans = &fakeFans{}
 	power := &fakePower{}
 	eng.power = power
-	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-	d := &downForProbes{n: 20}
-	eng.monitor = newTestMonitor(t, verb, d.probe, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
-	eng.monitor.poll = time.Millisecond
-	eng.monitor.rewakeEvery = time.Millisecond
+	eng.monitor = &fakeMonitor{unmuteGogios: func(_ context.Context, _ io.Writer, rewake func()) error {
+		rewake()
+		rewake()
+		return nil
+	}}
 
 	if err := eng.On(context.Background(), &bytes.Buffer{}); err != nil {
 		t.Fatalf("On: %v", err)
 	}
 	hosts := len(eng.cfg.Inventory.PowerGroup())
-	if got := len(power.wakeCalls()); got <= hosts {
-		t.Errorf("Wake calls = %d for %d hosts, want the packets re-sent while r0 was down", got, hosts)
+	if got := len(power.wakeCalls()); got != 3*hosts {
+		t.Errorf("Wake calls = %d for %d hosts, want each host's packet sent once and re-sent twice", got, hosts)
 	}
 }
 
@@ -780,13 +790,12 @@ func TestOnReportsAGatewayFailureAfterACompleteWake(t *testing.T) {
 	eng := testEngine(t, shelly)
 	eng.fans = &fakeFans{}
 	eng.power = &fakePower{}
-	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{
-		"gogios-unmute:blowfish": errors.New("ssh: connect timed out"),
+	eng.monitor = &fakeMonitor{unmuteGogios: func(context.Context, io.Writer, func()) error {
+		return errors.New("could not gogios-unmute Gogios on: [blowfish]")
 	}}
-	eng.monitor = newTestMonitor(t, verb, (&downForProbes{}).probe, []string{"blowfish"}, []string{"r0"}, time.Minute)
 
 	err := eng.On(context.Background(), &bytes.Buffer{})
-	if err == nil || errors.Is(err, ErrClusterIncomplete) || !strings.Contains(err.Error(), "woke, but") {
+	if err == nil || errors.Is(err, gogios.ErrClusterIncomplete) || !strings.Contains(err.Error(), "woke, but") {
 		t.Fatalf("On err = %v, want a complete wake with a failed un-mute", err)
 	}
 }

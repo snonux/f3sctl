@@ -426,7 +426,7 @@ func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
 			{Name: "f2", Role: "f", Ping: true, SSH: true},
 		},
-		Monitoring: []power.GatewayMute{
+		Monitoring: []gogios.GatewayMute{
 			{Name: "blowfish", Muted: true},
 			{Name: "fishfinger", Muted: true},
 		},
@@ -462,21 +462,21 @@ func TestMonitoringActionsFollowEachGatewaysState(t *testing.T) {
 	down := errors.New("ssh: connect timed out")
 	for _, tc := range []struct {
 		name       string
-		gateways   []power.GatewayMute
+		gateways   []gogios.GatewayMute
 		wantMute   bool
 		wantUnmute bool
 	}{
-		{"all muted", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, false, true},
-		{"all alerting", []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger"}}, true, false},
-		{"partial mute", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, true, true},
+		{"all muted", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, false, true},
+		{"all alerting", []gogios.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger"}}, true, false},
+		{"partial mute", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, true, true},
 		// An unreadable gateway is not known to be muted: it earns the
 		// (idempotent) mute, never the un-mute. {muted, unreachable} is the
 		// usual aftermath of a partial mute, and must offer both.
-		{"muted and unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: down}}, true, true},
-		{"alerting and unreadable", []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: down}}, true, false},
-		{"all unreadable", []power.GatewayMute{{Name: "blowfish", Err: down}, {Name: "fishfinger", Err: down}}, true, false},
+		{"muted and unreadable", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: down}}, true, true},
+		{"alerting and unreadable", []gogios.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: down}}, true, false},
+		{"all unreadable", []gogios.GatewayMute{{Name: "blowfish", Err: down}, {Name: "fishfinger", Err: down}}, true, false},
 		// Read, but no gateway configured: nothing to mute or un-mute.
-		{"no gateways", []power.GatewayMute{}, false, false},
+		{"no gateways", []gogios.GatewayMute{}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := contract.State{Monitoring: tc.gateways}

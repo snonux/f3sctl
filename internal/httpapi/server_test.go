@@ -14,6 +14,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
@@ -552,7 +553,7 @@ func TestRootIsAFolderIndex(t *testing.T) {
 // folderServer is countingServer with a chosen fleet: the named hosts are all
 // ping+SSH-up, the fan plug reads as on, and the gateway mute read returns
 // the given state. It exists so the folder tests can judge availability.
-func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.Context) []power.GatewayMute) *Server {
+func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.Context) []gogios.GatewayMute) *Server {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -667,18 +668,18 @@ func TestACControlFolderOffersThePlugActions(t *testing.T) {
 func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 	tests := []struct {
 		name string
-		mute []power.GatewayMute
+		mute []gogios.GatewayMute
 		want []string // the mute actions that must be offered
 		not  []string // ...and the ones that must not
 	}{
-		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}}, []string{"monitoring-unmute"}, []string{"monitoring-mute"}},
-		{"alerting", []power.GatewayMute{{Name: "blowfish", Muted: false}}, []string{"monitoring-mute"}, []string{"monitoring-unmute"}},
-		{"partial", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, []string{"monitoring-mute", "monitoring-unmute"}, nil},
+		{"muted", []gogios.GatewayMute{{Name: "blowfish", Muted: true}}, []string{"monitoring-unmute"}, []string{"monitoring-mute"}},
+		{"alerting", []gogios.GatewayMute{{Name: "blowfish", Muted: false}}, []string{"monitoring-mute"}, []string{"monitoring-unmute"}},
+		{"partial", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, []string{"monitoring-mute", "monitoring-unmute"}, nil},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := folderServer(t, nil, func(context.Context) []power.GatewayMute { return tt.mute })
+			srv := folderServer(t, nil, func(context.Context) []gogios.GatewayMute { return tt.mute })
 			e := getEntity(t, srv, "/gogios")
 
 			for _, name := range tt.want {
@@ -710,13 +711,13 @@ func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 func TestGogiosCacheClearCarriesTheMutePairLikeTheFolder(t *testing.T) {
 	tests := []struct {
 		name     string
-		mute     []power.GatewayMute
+		mute     []gogios.GatewayMute
 		offered  []string
 		withheld []string
 	}{
-		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}},
+		{"muted", []gogios.GatewayMute{{Name: "blowfish", Muted: true}},
 			[]string{"monitoring-unmute"}, []string{"monitoring-mute"}},
-		{"alerting", []power.GatewayMute{{Name: "blowfish", Muted: false}},
+		{"alerting", []gogios.GatewayMute{{Name: "blowfish", Muted: false}},
 			[]string{"monitoring-mute"}, []string{"monitoring-unmute"}},
 		{"unreadable", nil,
 			nil, []string{"monitoring-mute", "monitoring-unmute"}},
@@ -725,7 +726,7 @@ func TestGogiosCacheClearCarriesTheMutePairLikeTheFolder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var reads int
-			srv := folderServer(t, nil, func(context.Context) []power.GatewayMute {
+			srv := folderServer(t, nil, func(context.Context) []gogios.GatewayMute {
 				reads++
 				return tt.mute
 			})

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
@@ -71,17 +72,17 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 // wakeUnmuteError words on()'s UnmuteGogios failure by what actually
 // happened, most specific first:
 //
-//   - the wait was abandoned (errWaitAbandoned): the marker is untouched and
+//   - the wait was abandoned (gogios.ErrWaitAbandoned): the marker is untouched and
 //     not every node was seen; "woke, but" would claim a wake nobody saw
 //     finish;
 //   - cancelled during the un-mute itself, after the wait ended: some
 //     gateways may be un-muted, some not, and the cluster may or may not be
-//     complete -- ErrClusterIncomplete stays in the chain when it applies;
-//   - the cluster never came back (ErrClusterIncomplete);
+//     complete -- gogios.ErrClusterIncomplete stays in the chain when it applies;
+//   - the cluster never came back (gogios.ErrClusterIncomplete);
 //   - every node answered but a gateway could not be un-muted.
 func wakeUnmuteError(ctx context.Context, err error) error {
 	switch {
-	case errors.Is(err, errWaitAbandoned):
+	case errors.Is(err, gogios.ErrWaitAbandoned):
 		return fmt.Errorf("wake interrupted before every k3s node answered; Gogios left "+
 			"muted, clear it with `f3sctl monitoring unmute` once the nodes are up: %w", err)
 	case ctx.Err() != nil:
@@ -90,7 +91,7 @@ func wakeUnmuteError(ctx context.Context, err error) error {
 		}
 		return fmt.Errorf("wake interrupted while un-muting Gogios; check `f3sctl monitoring "+
 			"status` and clear what is left with `f3sctl monitoring unmute`: %w", err)
-	case errors.Is(err, ErrClusterIncomplete):
+	case errors.Is(err, gogios.ErrClusterIncomplete):
 		return fmt.Errorf("wake incomplete: %w", err)
 	}
 	return fmt.Errorf("woke, but Gogios is not fully un-muted: %w", err)

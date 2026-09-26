@@ -12,10 +12,10 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/inventory"
-	"github.com/snonux/f3sctl/internal/power"
 )
 
 // gatewayRecorder is a fake gogiosapi.Monitor over scripted gateway states:
@@ -24,7 +24,7 @@ import (
 // test can tell serve()'s 409 backstop from the handler running.
 type gatewayRecorder struct {
 	mu    sync.Mutex
-	gws   []power.GatewayMute
+	gws   []gogios.GatewayMute
 	calls int
 }
 
@@ -54,10 +54,10 @@ func (g *gatewayRecorder) set(muted bool, verb string) error {
 	return nil
 }
 
-func (g *gatewayRecorder) MonitoringStatus(context.Context) []power.GatewayMute {
+func (g *gatewayRecorder) MonitoringStatus(context.Context) []gogios.GatewayMute {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return append([]power.GatewayMute(nil), g.gws...)
+	return append([]gogios.GatewayMute(nil), g.gws...)
 }
 
 func (g *gatewayRecorder) callCount() int {
@@ -107,13 +107,13 @@ func TestPostMonitoringMuteFinishesAPartialMute(t *testing.T) {
 	unreadable := errFake{}
 	for _, tc := range []struct {
 		name      string
-		gws       []power.GatewayMute
+		gws       []gogios.GatewayMute
 		wantCode  int
 		wantCalls int
 	}{
-		{"partial, alerting", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, http.StatusOK, 1},
-		{"partial, unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: unreadable}}, http.StatusBadGateway, 1},
-		{"all known muted", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, http.StatusConflict, 0},
+		{"partial, alerting", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, http.StatusOK, 1},
+		{"partial, unreadable", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: unreadable}}, http.StatusBadGateway, 1},
+		{"all known muted", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, http.StatusConflict, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gw := &gatewayRecorder{gws: tc.gws}
@@ -133,7 +133,7 @@ func TestPostMonitoringMuteFinishesAPartialMute(t *testing.T) {
 // mute answers with: the re-read monitoring resource, both gateways muted, and
 // the mute no longer offered while the un-mute is.
 func TestPostMonitoringMuteReportsTheResultingState(t *testing.T) {
-	gw := &gatewayRecorder{gws: []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}}
+	gw := &gatewayRecorder{gws: []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}}
 	e := postEntity(t, muteServer(t, gw), "/monitoring/mute")
 
 	if muted, _ := e.Properties["muted"].(bool); !muted {
@@ -153,7 +153,7 @@ func TestPostMonitoringMuteReportsTheResultingState(t *testing.T) {
 // gateway state in the body -- the client must re-read /monitoring for that.
 // The reachable gateway is muted all the same.
 func TestPostMonitoringMuteNamesAnUnreachableGateway(t *testing.T) {
-	gw := &gatewayRecorder{gws: []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: errFake{}}}}
+	gw := &gatewayRecorder{gws: []gogios.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: errFake{}}}}
 	e := postEntity(t, muteServer(t, gw), "/monitoring/mute")
 
 	if msg, _ := e.Properties["message"].(string); msg != "could not gogios-mute Gogios on: [fishfinger]" {

@@ -1,4 +1,4 @@
-package power
+package gogios
 
 import (
 	"bytes"
@@ -12,14 +12,14 @@ import (
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
-// This file is the first direct coverage of the Gogios monitoring concern,
-// which before o51 lived untested on the Engine. The extraction onto Monitor
-// gives the concern its own faking points -- the gatewayVerb transport and a
-// probe func -- so the behaviour can be pinned without an Engine, an SSH key,
-// or a real network: a fake verb records what was asked, and a fake probe
-// says whether the k3s nodes are up.
+// This file is the direct coverage of the Gogios mute concern, which before
+// o51 lived untested on power.Engine. The extraction onto Monitor (moved here
+// from internal/power in task ha) gives the concern its own faking points --
+// the GatewayVerb transport and a NodeProbe -- so the behaviour can be pinned
+// without an Engine, an SSH key, or a real network: a fake verb records what
+// was asked, and a fake probe says which k3s nodes are down.
 
-// fakeGatewayVerb is the gatewayVerb stand-in: it records every
+// fakeGatewayVerb is the GatewayVerb stand-in: it records every
 // gogios-mute/gogios-unmute/gogios-status call (verb:host, in order) and
 // returns a scripted stdout or error per (verb, host).
 type fakeGatewayVerb struct {
@@ -54,7 +54,7 @@ func (f *fakeGatewayVerb) callsList() []string {
 // wait) named cluster nodes, with the given verb and probe and a negligible
 // un-mute budget. Named hosts only -- no real inventory -- so the test says
 // exactly what the Monitor reaches.
-func newTestMonitor(t *testing.T, verb *fakeGatewayVerb, probe func(context.Context, []inventory.Host) []HostStatus, gateways, nodes []string, unmute time.Duration) *Monitor {
+func newTestMonitor(t *testing.T, verb *fakeGatewayVerb, probe NodeProbe, gateways, nodes []string, unmute time.Duration) *Monitor {
 	t.Helper()
 	toHosts := func(names []string) []inventory.Host {
 		var hs []inventory.Host
@@ -168,7 +168,7 @@ func TestMonitorStatusMapsTheVerbOutputToMuted(t *testing.T) {
 // never probing the k3s nodes.
 func TestMonitorUnmuteDoesNotWaitForTheCluster(t *testing.T) {
 	probeCalled := false
-	probe := func(context.Context, []inventory.Host) []HostStatus {
+	probe := func(context.Context, []inventory.Host) []string {
 		probeCalled = true
 		return nil
 	}
@@ -191,15 +191,8 @@ func TestMonitorUnmuteDoesNotWaitForTheCluster(t *testing.T) {
 // with the cluster up, UnmuteGogios waits (probe says all nodes answer) and
 // then runs gogios-unmute on every gateway.
 func TestMonitorUnmuteGogiosWaitsForTheClusterThenClears(t *testing.T) {
-	allUp := func(_ context.Context, hosts []inventory.Host) []HostStatus {
-		out := make([]HostStatus, len(hosts))
-		for i, h := range hosts {
-			out[i] = HostStatus{Name: h.Name, Ping: true}
-		}
-		return out
-	}
 	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-	m := newTestMonitor(t, verb, allUp, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, time.Minute)
+	m := newTestMonitor(t, verb, allNodesUp, []string{"blowfish", "sunfish"}, []string{"r0", "r1", "r2"}, time.Minute)
 
 	var log bytes.Buffer
 	if err := m.UnmuteGogios(context.Background(), &log, nil); err != nil {
@@ -210,13 +203,13 @@ func TestMonitorUnmuteGogiosWaitsForTheClusterThenClears(t *testing.T) {
 	}
 }
 
-// oneNodeDown is a probe on which r0 never answers and the rest do.
-func oneNodeDown(_ context.Context, hosts []inventory.Host) []HostStatus {
-	out := make([]HostStatus, len(hosts))
-	for i, h := range hosts {
-		out[i] = HostStatus{Name: h.Name, Ping: i != 0} // r0 never answers
+// oneNodeDown is a probe on which the first node (r0) never answers and the
+// rest do.
+func oneNodeDown(_ context.Context, hosts []inventory.Host) []string {
+	if len(hosts) == 0 {
+		return nil
 	}
-	return out
+	return []string{hosts[0].Name} // r0 never answers
 }
 
 // TestMonitorUnmuteGogiosUnmutesAnywayWhenTheClusterNeverAnswers pins the
@@ -292,16 +285,15 @@ type downForProbes struct {
 	n, got int
 }
 
-func (d *downForProbes) probe(_ context.Context, hosts []inventory.Host) []HostStatus {
+func (d *downForProbes) probe(_ context.Context, hosts []inventory.Host) []string {
 	d.mu.Lock()
 	d.got++
 	up := d.got > d.n
 	d.mu.Unlock()
-	out := make([]HostStatus, len(hosts))
-	for i, h := range hosts {
-		out[i] = HostStatus{Name: h.Name, Ping: i != 0 || up}
+	if up || len(hosts) == 0 {
+		return nil
 	}
-	return out
+	return []string{hosts[0].Name}
 }
 
 // TestMonitorUnmuteGogiosRewakesWhileNodesAreDown pins the WoL retry: while a

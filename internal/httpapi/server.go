@@ -80,7 +80,7 @@ type Server struct {
 	// seconds); same reasoning as probeHosts. Fetched only for the routes
 	// that declare contract.NeedMonitoring (see enrichState). See
 	// Server.monitorStatusFn.
-	monitorStatus func(context.Context) []power.GatewayMute
+	monitorStatus func(context.Context) []gogios.GatewayMute
 }
 
 // ServeCGI answers a single CGI request read from the process environment and
@@ -344,7 +344,7 @@ func (s *Server) acStatusFn() func(context.Context) (power.ACState, error) {
 // monitorStatusFn returns the gateway mute read, falling back to the
 // engine's real one. Same nil-safety pattern as the power surface's
 // confirmRack.
-func (s *Server) monitorStatusFn() func(context.Context) []power.GatewayMute {
+func (s *Server) monitorStatusFn() func(context.Context) []gogios.GatewayMute {
 	if s.monitorStatus != nil {
 		return s.monitorStatus
 	}

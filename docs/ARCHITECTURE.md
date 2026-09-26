@@ -91,7 +91,8 @@ flowchart TD
     BACK --> SSH["ssh(1) → agent verbs"]
     BACK --> PING["ping(8)"]
     BACK --> HTTP["Shelly HTTP RPC"]
-    GOGIOSAPI --> REPORT["internal/gogios<br/>alert report fetch + cache"]
+    GOGIOSAPI --> REPORT["internal/gogios<br/>alert report fetch + cache<br/>gateway mute (Monitor)"]
+    POWER -->|"mute · un-mute · wait<br/>(gogiosMonitor slice)"| REPORT
 
     CLI --> PRES["internal/presenter<br/>shared status table"]
     CLIENT --> PRES

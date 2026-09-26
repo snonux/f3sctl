@@ -92,7 +92,7 @@ func needsBaseStates() []contract.State {
 			Fans:       power.FansState{On: up},
 			AC:         power.ACState{On: up},
 			PeerBusy:   peerBusy,
-			Monitoring: []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}},
+			Monitoring: []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}},
 			Gogios:     needsReport,
 		}
 	}
@@ -125,7 +125,7 @@ func needsServer(t *testing.T) *Server {
 	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	jobs := coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0)
 	peers := coordination.NewPeerSet(nil, "")
-	gw := &gatewayRecorder{gws: []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}}
+	gw := &gatewayRecorder{gws: []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}}
 	inv := inventory.Default()
 
 	href := contract.Hrefs("")
@@ -294,7 +294,7 @@ type countingMonitor struct {
 	reads *int32
 }
 
-func (m *countingMonitor) MonitoringStatus(ctx context.Context) []power.GatewayMute {
+func (m *countingMonitor) MonitoringStatus(ctx context.Context) []gogios.GatewayMute {
 	atomic.AddInt32(m.reads, 1)
 	return m.gatewayRecorder.MonitoringStatus(ctx)
 }
@@ -310,7 +310,7 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 	fc := &fetchCounts{}
 	// One alerting gateway, the plugs off: the mute and fans-on are both
 	// available, so serving them reaches their handlers.
-	gw := &countingMonitor{gatewayRecorder: gatewayRecorder{gws: []power.GatewayMute{{Name: "blowfish"}}}, reads: &fc.mute}
+	gw := &countingMonitor{gatewayRecorder: gatewayRecorder{gws: []gogios.GatewayMute{{Name: "blowfish"}}}, reads: &fc.mute}
 
 	idle := coordination.Job{ID: "j0", Action: "on", State: coordination.JobDone, Node: "pi1"}
 	peerBody, err := json.Marshal(map[string]any{"class": []string{"job"}, "properties": idle})
@@ -414,15 +414,15 @@ func TestStatusRendersOnlyActionsJudgedOnItsOwnState(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name string
-		mute []power.GatewayMute
+		mute []gogios.GatewayMute
 	}{
-		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}}},
-		{"alerting", []power.GatewayMute{{Name: "blowfish"}}},
-		{"partial", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}},
+		{"muted", []gogios.GatewayMute{{Name: "blowfish", Muted: true}}},
+		{"alerting", []gogios.GatewayMute{{Name: "blowfish"}}},
+		{"partial", []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reads int
-			srv := folderServer(t, up, func(context.Context) []power.GatewayMute {
+			srv := folderServer(t, up, func(context.Context) []gogios.GatewayMute {
 				reads++
 				return tc.mute
 			})
@@ -458,9 +458,9 @@ func TestEnrichStateFollowsTheMatchedRouteNotThePath(t *testing.T) {
 		return contract.Entity{Properties: map[string]any{"gateways": len(s.Monitoring)}}, http.StatusOK, nil
 	}
 	srv, _ := countingServer(t)
-	srv.monitorStatus = func(context.Context) []power.GatewayMute {
+	srv.monitorStatus = func(context.Context) []gogios.GatewayMute {
 		reads++
-		return []power.GatewayMute{{Name: "blowfish"}}
+		return []gogios.GatewayMute{{Name: "blowfish"}}
 	}
 	srv.router = routerOver(t, []contract.Route{
 		{Name: "shared-get", Method: http.MethodGet, Path: "/shared", SkipsProbe: true,

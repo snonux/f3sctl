@@ -11,8 +11,9 @@
 // detail -- does not re-fetch on every click.
 //
 // Nothing here is policy: this package has no opinion on which alerts matter.
-// It is the read-side sibling of internal/power's Monitor, which owns the
-// mute-marker concern; the alert-browse concern lives here, off the Engine.
+// This file is the read side (alert browsing); monitor.go is its write-side
+// sibling, the Monitor that owns the mute-marker concern. Both live here, off
+// power.Engine, which only decides when to mute and un-mute.
 package gogios
 
 import (

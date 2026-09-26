@@ -16,7 +16,7 @@ import (
 // the 2026-08-09 bug: waitForJob's poll deadline (jobWaitTimeout) must exceed
 // the server's worst-case job runtime, which for `power on` is anchored on
 // cfg.UnmuteTimeout (see jobWaitTimeout's doc comment and
-// internal/power/monitor.go waitForCluster). A deadline that is only equal to
+// internal/gogios/monitor.go waitForCluster). A deadline that is only equal to
 // UnmuteTimeout, with no buffer for the wake prelude and gateway SSH round
 // trips, is exactly what let the client report "gave up waiting for the job"
 // moments before the job actually finished.

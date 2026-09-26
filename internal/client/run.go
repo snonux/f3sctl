@@ -18,7 +18,7 @@ import (
 // UnmuteTimeout alone is not the job's full worst-case runtime: On() also
 // switches the fans, sends the magic packets, and eachGateway does two SSH
 // round trips to clear the mute after waitForCluster returns (see
-// internal/power/monitor.go, internal/power/wake.go on()). That prelude and
+// internal/gogios/monitor.go, internal/power/wake.go on()). That prelude and
 // cleanup cost single-digit seconds normally, but a gateway SSH connection
 // under load is not bounded by anything in this codebase, so the buffer is
 // minutes rather than seconds -- generous on purpose, since the bug this

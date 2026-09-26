@@ -459,9 +459,7 @@ func TestCycleAllInterruptedWhileWakingSaysACIsBack(t *testing.T) {
 		}
 	}}
 	rig.eng.fans = fans
-	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
-	rig.eng.monitor = newTestMonitor(t, verb, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
-	rig.eng.monitor.poll = time.Millisecond
+	rig.eng.monitor = &fakeMonitor{unmuteGogios: abandonOnCancel}
 
 	err := rig.eng.CycleAll(ctx, &rig.log)
 	if !errors.Is(err, context.Canceled) {

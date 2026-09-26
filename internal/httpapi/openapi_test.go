@@ -15,6 +15,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
@@ -107,8 +108,8 @@ type fakeMonitor struct{ err error }
 
 func (m fakeMonitor) MuteGogios(context.Context, io.Writer) error { return m.err }
 func (m fakeMonitor) UnmuteNow(context.Context, io.Writer) error  { return m.err }
-func (fakeMonitor) MonitoringStatus(context.Context) []power.GatewayMute {
-	return []power.GatewayMute{{Name: "gw"}}
+func (fakeMonitor) MonitoringStatus(context.Context) []gogios.GatewayMute {
+	return []gogios.GatewayMute{{Name: "gw"}}
 }
 
 // docOpts shapes a docServer: what the fleet, the plugs and the gateways
@@ -159,8 +160,8 @@ func docServer(t *testing.T, o docOpts) *Server {
 		probeHosts: func(context.Context) []power.HostStatus { return hosts },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{On: o.plugsOn}, nil },
 		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{On: o.plugsOn}, nil },
-		monitorStatus: func(context.Context) []power.GatewayMute {
-			return []power.GatewayMute{{Name: "gw", Muted: o.muted}}
+		monitorStatus: func(context.Context) []gogios.GatewayMute {
+			return []gogios.GatewayMute{{Name: "gw", Muted: o.muted}}
 		},
 	}).assemble(inv, pw, gg, "")
 }

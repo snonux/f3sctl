@@ -20,6 +20,7 @@ import (
 	"github.com/snonux/f3sctl/internal/client"
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
@@ -155,7 +156,7 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
 		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
-		monitorStatus: func(context.Context) []power.GatewayMute {
+		monitorStatus: func(context.Context) []gogios.GatewayMute {
 			return nil
 		},
 	}).assemble(cfg.Inventory, pw, gg, "")
