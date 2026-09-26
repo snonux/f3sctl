@@ -31,7 +31,7 @@ func TestDefaultPeerJobPathIsDerived(t *testing.T) {
 // OpenAPI document a generator reads must both come from testRoutes(inventory.Default()), with
 // neither inventing nor omitting an endpoint.
 func TestOpenAPICoversEveryRoute(t *testing.T) {
-	router := NewRouter("/cgi-bin/f3sctl", testRoutes(inventory.Default()))
+	router := mustRouter("/cgi-bin/f3sctl", testRoutes(inventory.Default()))
 	doc := NewOpenAPIBuilder(router, inventory.Default()).Build()
 
 	paths, ok := doc["paths"].(map[string]any)
@@ -404,7 +404,7 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 			if _, ok := routeByName(name); !ok {
 				t.Errorf("no %q action; %s cannot be powered individually", name, h.Name)
 			}
-			if _, ok := NewRouter("", testRoutes(inventory.Default())).Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
+			if _, ok := mustRouter("", testRoutes(inventory.Default())).Lookup("POST", "/power/"+h.Name+"/"+verb); !ok {
 				t.Errorf("no route serving POST /power/%s/%s", h.Name, verb)
 			}
 		}

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -29,20 +30,24 @@ type Router struct {
 	routes []contract.Route
 }
 
+// ErrAmbiguousRoutes is wrapped by NewRouter's error for a route table in
+// which two routes share a name, or a method and path.
+var ErrAmbiguousRoutes = errors.New("ambiguous route table")
+
 // NewRouter returns a Router that builds hrefs under base and serves the
 // given route table.
 //
-// It panics if the table is ambiguous (see checkRoutes). Lookups take the
-// first match, so a duplicate would silently serve one route under another's
-// name -- a host called "fans" had its shutdown offered as "fans-off". Host
-// names are validated when the inventory is loaded (inventory.validateHost),
-// so reaching this is a programming error, and failing at startup is the
-// honest response.
-func NewRouter(base string, rs []contract.Route) *Router {
+// It refuses an ambiguous table (see checkRoutes). Lookups take the first
+// match, so a duplicate would silently serve one route under another's name
+// -- a host called "fans" had its shutdown offered as "fans-off". Host names
+// are validated when the inventory is loaded (inventory.validateHost), so
+// this is the structural backstop: newServer returns the error and ServeCGI
+// reports it as a 500, like any other misconfiguration.
+func NewRouter(base string, rs []contract.Route) (*Router, error) {
 	if err := checkRoutes(rs); err != nil {
-		panic("httpapi: " + err.Error())
+		return nil, fmt.Errorf("%w: %w", ErrAmbiguousRoutes, err)
 	}
-	return &Router{base: base, routes: rs}
+	return &Router{base: base, routes: rs}, nil
 }
 
 // checkRoutes reports the first route that shares its name, or its method

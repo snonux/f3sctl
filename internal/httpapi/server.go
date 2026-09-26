@@ -132,23 +132,28 @@ func newServer(cfg config.Config) (*Server, error) {
 		siren:  NewSirenRenderer(),
 		node:   node,
 	}
-	return srv.assemble(cfg.Inventory, pw, gg, base), nil
+	return srv.build(cfg.Inventory, pw, gg, base)
 }
 
-// assemble builds this Server's route table, hangs a Router (and the OpenAPI
+// build builds this Server's route table, hangs a Router (and the OpenAPI
 // builder over it) off the Server, and injects the router's action rendering
 // into both surfaces -- the wiring that makes the Server servable. It is its
 // own step so tests can construct a Server literal, wire the surfaces they
 // want, and go through exactly the same route-table and injection path
-// production takes.
-func (s *Server) assemble(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) *Server {
-	router := NewRouter(base, s.buildRoutes(inv, pw, gg))
+// production takes (their assemble helper wraps this one).
+//
+// It fails only on an ambiguous route table (see NewRouter).
+func (s *Server) build(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) (*Server, error) {
+	router, err := NewRouter(base, s.buildRoutes(inv, pw, gg))
+	if err != nil {
+		return nil, err
+	}
 	s.router = router
 	s.openapi = NewOpenAPIBuilder(router, inv)
 
 	pw.Actions, pw.ActionsFor, pw.SectionActions = router.actions, router.actionsFor, router.SectionActions
 	gg.ActionsFor = router.actionsFor
-	return s
+	return s, nil
 }
 
 // resolvePeerJobPath returns the URL path this node asks a peer for its

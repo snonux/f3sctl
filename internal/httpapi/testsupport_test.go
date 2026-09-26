@@ -33,6 +33,27 @@ func testRoutes(inv inventory.Inventory) []contract.Route {
 	return testServer().buildRoutes(inv, testPowerSurface(inv), testGogiosSurface())
 }
 
+// assemble is Server.build for tests, whose route tables are known to be
+// unambiguous: it panics instead of returning the error, so a Server literal
+// can be wired in one expression.
+func (s *Server) assemble(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) *Server {
+	srv, err := s.build(inv, pw, gg, base)
+	if err != nil {
+		panic(err)
+	}
+	return srv
+}
+
+// mustRouter is NewRouter for tests whose route tables are known to be
+// unambiguous.
+func mustRouter(base string, rs []contract.Route) *Router {
+	rt, err := NewRouter(base, rs)
+	if err != nil {
+		panic(err)
+	}
+	return rt
+}
+
 // testServer returns a Server with no collaborators at all, for building the
 // route table (which needs a Server only to bind the root-resource handlers).
 func testServer() *Server {

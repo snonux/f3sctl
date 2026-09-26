@@ -28,7 +28,7 @@ func TestOpenAPIDocumentsForceForAnyInventory(t *testing.T) {
 		{"renamed", renamed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			router := NewRouter("", testRoutes(tc.inv))
+			router := mustRouter("", testRoutes(tc.inv))
 			doc := NewOpenAPIBuilder(router, tc.inv).Build()
 			paths, _ := doc["paths"].(map[string]any)
 

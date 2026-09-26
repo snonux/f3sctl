@@ -194,7 +194,7 @@ var reservedHostNames = []string{"all", "on", "off", "status", "cycle", "power",
 // typo such as "F" matches neither RoleF nor anything else). The standalone
 // flag is refused on a non-f host, where it means nothing.
 func validateHost(h Host) error {
-	if err := validateHostName(h.Name); err != nil {
+	if err := ValidateHostName(h.Name); err != nil {
 		return err
 	}
 	switch h.Role {
@@ -210,8 +210,11 @@ func validateHost(h Host) error {
 	return nil
 }
 
-// validateHostName applies hostNamePattern and reservedHostNames.
-func validateHostName(name string) error {
+// ValidateHostName reports whether name may be a host's name: a simple token
+// (hostNamePattern) that is not a reserved word (reservedHostNames). It is
+// exported so the API's tests can check the reserved words against the
+// routes they protect.
+func ValidateHostName(name string) error {
 	switch {
 	case name == "":
 		return errors.New("empty name")
