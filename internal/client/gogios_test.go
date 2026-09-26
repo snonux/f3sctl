@@ -108,7 +108,13 @@ type fakeGogiosAPI struct {
 	// instead of a real report -- the unreachable-backend case
 	// the overview and drill-down handlers render as a 200 with "error" rather
 	// than a non-2xx status (see internal/httpapi/gogiosapi/handlers.go).
+	// The actions stay advertised, as on the real server: its cache-clear
+	// route has no Available predicate, so a failed report still offers it.
 	broken bool
+
+	// noActions, when true, makes GET /gogios advertise no actions at all --
+	// the case of every action being withheld.
+	noActions bool
 
 	mu          sync.Mutex
 	cacheClears int
@@ -130,34 +136,7 @@ func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
 			Links:      []Link{{Rel: []string{"gogios"}, Href: "/gogios"}},
 		})
 	case r.URL.Path == "/gogios" && r.Method == http.MethodGet:
-		if f.broken {
-			writeEntity(w, Entity{Class: []string{"gogios"}, Properties: map[string]any{"error": "gogios at https://gogios.buetow.org/index.json returned 502 Bad Gateway"}})
-			return
-		}
-		f.mu.Lock()
-		cleared := f.cacheClears
-		f.mu.Unlock()
-		writeEntity(w, Entity{
-			Class: []string{"gogios"},
-			Properties: map[string]any{
-				"subject": "GOGIOS Report [C:1 W:0 U:0 S:0 SU:0 OK:1]", "lastUpdated": "2026-08-27T08:58:18+02:00",
-				"summary": map[string]any{"critical": float64(1), "warning": float64(0), "unknown": float64(0),
-					"stale": float64(0), "suppressed": float64(0), "ok": float64(1)},
-				"clears": float64(cleared), // lets a test prove this GET followed a real re-fetch
-			},
-			Links: []Link{
-				{Rel: []string{"critical"}, Href: "/gogios/critical"},
-				{Rel: []string{"warning"}, Href: "/gogios/warning"},
-				{Rel: []string{"unknown"}, Href: "/gogios/unknown"},
-				{Rel: []string{"stale"}, Href: "/gogios/stale"},
-				{Rel: []string{"suppressed"}, Href: "/gogios/suppressed"},
-				{Rel: []string{"ok"}, Href: "/gogios/ok"},
-			},
-			Actions: []Action{{
-				Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
-				Method: http.MethodPost, Href: "/gogios/cache/clear", CLIVerb: "gogios cache clear",
-			}},
-		})
+		f.handleOverview(w)
 	case r.URL.Path == "/gogios/critical" && r.Method == http.MethodGet:
 		writeEntity(w, Entity{Entities: []Entity{
 			{Properties: map[string]any{"name": "Check Ping6 r1", "status": "CRITICAL", "output": "timed out"}},
@@ -180,6 +159,45 @@ func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 	}
+}
+
+// handleOverview answers GET /gogios: the report (or, when broken, the error
+// property in its place), the drill-down links and, unless noActions, the
+// cache-clear action.
+func (f *fakeGogiosAPI) handleOverview(w http.ResponseWriter) {
+	f.mu.Lock()
+	cleared := f.cacheClears
+	f.mu.Unlock()
+
+	props := map[string]any{
+		"subject": "GOGIOS Report [C:1 W:0 U:0 S:0 SU:0 OK:1]", "lastUpdated": "2026-08-27T08:58:18+02:00",
+		"summary": map[string]any{"critical": float64(1), "warning": float64(0), "unknown": float64(0),
+			"stale": float64(0), "suppressed": float64(0), "ok": float64(1)},
+		"clears": float64(cleared), // lets a test prove this GET followed a real re-fetch
+	}
+	if f.broken {
+		props = map[string]any{"error": "gogios at https://gogios.buetow.org/index.json returned 502 Bad Gateway"}
+	}
+	var actions []Action
+	if !f.noActions {
+		actions = []Action{{
+			Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
+			Method: http.MethodPost, Href: "/gogios/cache/clear", CLIVerb: "gogios cache clear",
+		}}
+	}
+	writeEntity(w, Entity{
+		Class:      []string{"gogios"},
+		Properties: props,
+		Links: []Link{
+			{Rel: []string{"critical"}, Href: "/gogios/critical"},
+			{Rel: []string{"warning"}, Href: "/gogios/warning"},
+			{Rel: []string{"unknown"}, Href: "/gogios/unknown"},
+			{Rel: []string{"stale"}, Href: "/gogios/stale"},
+			{Rel: []string{"suppressed"}, Href: "/gogios/suppressed"},
+			{Rel: []string{"ok"}, Href: "/gogios/ok"},
+		},
+		Actions: actions,
+	})
 }
 
 // TestRunGogiosShowsTheOverview pins the bare/"status" path end to end.
@@ -338,12 +356,33 @@ func TestRunGogiosOverviewListsTheAvailableActions(t *testing.T) {
 	}
 }
 
-// TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine is the negative
-// case: the fake's broken report advertises no actions, so no
-// "available now" line may be printed.
-func TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine(t *testing.T) {
+// TestRunGogiosBrokenReportStillListsCacheClear pins the unreachable-report
+// case as the real server renders it: the error is shown in place of the
+// report, and cache clear -- which carries no Available predicate, so it is
+// offered even then -- is still listed as available.
+func TestRunGogiosBrokenReportStillListsCacheClear(t *testing.T) {
 	api := newFakeGogiosAPI(t)
 	api.broken = true
+	c := newTestClient(t, api.srv.URL, "k")
+	var out bytes.Buffer
+	c.stdout = &out
+
+	if err := c.runGogios(context.Background(), nil, false); err != nil {
+		t.Fatalf("runGogios(nil): %v", err)
+	}
+	for _, want := range []string{"gogios: unknown (", "available now: gogios cache clear\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output = %q, want it to contain %q", out.String(), want)
+		}
+	}
+}
+
+// TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine is the negative
+// case: a /gogios advertising no actions (every one withheld) must print no
+// "available now" line at all, not an empty one.
+func TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine(t *testing.T) {
+	api := newFakeGogiosAPI(t)
+	api.noActions = true
 	c := newTestClient(t, api.srv.URL, "k")
 	var out bytes.Buffer
 	c.stdout = &out
