@@ -118,13 +118,20 @@ func (inv Inventory) ByName(name string) (Host, bool) {
 	return Host{}, false
 }
 
+// StandaloneHost is the f-host that is not part of the k3s cluster: it runs a
+// standalone Rocky VM, is racked apart from the others (the fan plug does not
+// cool it), and is addressed explicitly. It is the one name that separates
+// PowerGroup from EveryFHost; everything else that needs that distinction --
+// the fan guard, the API's availability predicates -- asks those two methods
+// rather than naming it again.
+const StandaloneHost = "f3"
+
 // PowerGroup is the set of hosts a bare `f3sctl power on|off` acts on: the
-// three k3s bhyve hosts. f3 is deliberately excluded — it runs a standalone
-// Rocky VM, is not part of the cluster, and is addressed explicitly.
+// three k3s bhyve hosts. StandaloneHost is deliberately excluded.
 func (inv Inventory) PowerGroup() []Host {
 	var out []Host
 	for _, h := range inv.ByRole(RoleF) {
-		if h.Name != "f3" {
+		if h.Name != StandaloneHost {
 			out = append(out, h)
 		}
 	}
@@ -140,6 +147,21 @@ func (inv Inventory) PowerGroup() []Host {
 // whole rack goes dark", which is the other thing people actually want and
 // previously took two commands.
 func (inv Inventory) EveryFHost() []Host { return inv.ByRole(RoleF) }
+
+// Includes reports whether a host named name is in hosts.
+//
+// It is the membership predicate for judging already-probed results (which
+// carry only a name) against a group: callers build the group from PowerGroup
+// or EveryFHost and ask this, so what a snapshot is judged against is exactly
+// the set the engine would act on, never a second copy of the rule.
+func Includes(hosts []Host, name string) bool {
+	for _, h := range hosts {
+		if h.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // StorageMaster is the host that normally holds the CARP storage VIP
 // (f3s-storage-ha, 192.168.1.138) and serves NFS. f1 is its BACKUP.

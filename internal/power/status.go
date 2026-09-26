@@ -119,29 +119,30 @@ func (a *RackActivity) add(name string, l hostLiveness) {
 // gives, one probe per host; the rule applied to it is identical, including
 // that an unprobeable host counts as running.
 //
-// Non-f hosts are ignored: the plug cools f0-f2, and neither the k3s guests
-// nor f3 are in that set. See RackActivity's doc comment for why f3 is
-// excluded even though it is Role f.
-func RackActivityFrom(statuses []HostStatus) RackActivity {
-	var a RackActivity
-	for _, st := range statuses {
-		if st.Role != string(inventory.RoleF) || st.Name == "f3" {
-			continue
-		}
-		a.add(st.Name, st.liveness())
-	}
-	return a
+// Only the inventory's power group is judged: the plug cools f0-f2, and
+// neither the k3s guests nor f3 are in that set. See RackActivity's doc
+// comment for why f3 is excluded even though it is Role f. The group comes
+// from inv.PowerGroup -- the same set Engine.RackActivity probes -- so the two
+// halves of the guard cannot drift apart over which hosts count.
+func RackActivityFrom(inv inventory.Inventory, statuses []HostStatus) RackActivity {
+	return activityFrom(inv.PowerGroup(), statuses)
 }
 
-// ACActivityFrom is RackActivityFrom for the f-host AC plug: every Role-f
-// host counts, f3 included, because shelly2 cuts mains to the whole set.
-func ACActivityFrom(statuses []HostStatus) RackActivity {
+// ACActivityFrom is RackActivityFrom for the f-host AC plug: every f-host
+// counts (inv.EveryFHost, f3 included), because shelly2 cuts mains to the
+// whole set.
+func ACActivityFrom(inv inventory.Inventory, statuses []HostStatus) RackActivity {
+	return activityFrom(inv.EveryFHost(), statuses)
+}
+
+// activityFrom folds the statuses of the hosts in group, in snapshot order.
+// Statuses of hosts outside the group contribute nothing.
+func activityFrom(group []inventory.Host, statuses []HostStatus) RackActivity {
 	var a RackActivity
 	for _, st := range statuses {
-		if st.Role != string(inventory.RoleF) {
-			continue
+		if inventory.Includes(group, st.Name) {
+			a.add(st.Name, st.liveness())
 		}
-		a.add(st.Name, st.liveness())
 	}
 	return a
 }

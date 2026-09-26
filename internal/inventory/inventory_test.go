@@ -1,6 +1,9 @@
 package inventory
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // TestShutdownOrderPutsStorageMasterLast pins the ordering rule that keeps the
 // CARP storage VIP from failing over onto a host that is about to be powered
@@ -126,4 +129,55 @@ func TestEveryFHostIsASupersetOfThePowerGroup(t *testing.T) {
 	if len(all) <= len(Default().PowerGroup()) {
 		t.Error("EveryFHost is no larger than PowerGroup; f3 should make it bigger")
 	}
+}
+
+// TestIncludes pins the membership predicate every snapshot-judging caller
+// (the fan and AC guards, the API's availability counts) relies on.
+func TestIncludes(t *testing.T) {
+	inv := Default()
+	group := inv.PowerGroup()
+
+	for _, h := range group {
+		if !Includes(group, h.Name) {
+			t.Errorf("Includes(PowerGroup, %q) = false, want true", h.Name)
+		}
+	}
+	for _, name := range []string{StandaloneHost, "r0", "blowfish", "", "F0"} {
+		if Includes(group, name) {
+			t.Errorf("Includes(PowerGroup, %q) = true, want false", name)
+		}
+	}
+	if !Includes(inv.EveryFHost(), StandaloneHost) {
+		t.Errorf("Includes(EveryFHost, %q) = false, want true", StandaloneHost)
+	}
+	if Includes(nil, "f0") {
+		t.Error("Includes(nil, f0) = true; an empty group contains nothing")
+	}
+}
+
+// TestPowerGroupFollowsAConfiguredInventory checks that the groups are derived
+// from the hosts actually configured rather than from a fixed list: an added
+// f-host joins both, and an inventory without the standalone host has
+// identical groups.
+func TestPowerGroupFollowsAConfiguredInventory(t *testing.T) {
+	inv := Inventory{Hosts: []Host{
+		{Name: "f0", Role: RoleF},
+		{Name: "f4", Role: RoleF},
+		{Name: "r0", Role: RoleCluster},
+	}}
+
+	if got := names(inv.PowerGroup()); !slices.Equal(got, []string{"f0", "f4"}) {
+		t.Errorf("PowerGroup = %v, want [f0 f4]", got)
+	}
+	if got := names(inv.EveryFHost()); !slices.Equal(got, []string{"f0", "f4"}) {
+		t.Errorf("EveryFHost = %v, want [f0 f4]", got)
+	}
+}
+
+func names(hosts []Host) []string {
+	out := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		out = append(out, h.Name)
+	}
+	return out
 }

@@ -264,7 +264,7 @@ func TestFansOffConfirmsASnapshotThatLooksCold(t *testing.T) {
 	sf := testSurface(t, plug, func(context.Context) power.RackActivity {
 		confirmed = true
 		// The confirming probe hears f1 answer on a later round.
-		return power.RackActivityFrom([]power.HostStatus{fState("f1", true, true)})
+		return power.RackActivityFrom(inventory.Default(), []power.HostStatus{fState("f1", true, true)})
 	})
 
 	_, status, err := sf.handleFansOff(context.Background(), coldSnapshot(), contract.Request{})

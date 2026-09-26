@@ -420,7 +420,7 @@ func (c *Client) Perform(ctx context.Context, a Action, confirm bool) (Entity, e
 	}
 
 	// gz0: fans-off's "force" checkbox is gated by the server's cheap,
-	// single-probe snapshot (powerapi.RackBusy), while the plug switch
+	// single-probe snapshot (powerapi.Surface.RackBusy), while the plug switch
 	// itself is guarded by a stricter multi-probe confirmation inside the
 	// engine (powerapi's rackStillBusy). When the snapshot reads the rack
 	// as cold, the advertisement omits the field entirely -- so the loop

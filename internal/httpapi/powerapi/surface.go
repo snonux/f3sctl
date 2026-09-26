@@ -173,8 +173,9 @@ func Host(s contract.State, name string) (power.HostStatus, bool) {
 	return power.HostStatus{}, false
 }
 
-// ClusterHostsUp reports how many of f0/f1/f2 answer ICMP, and how many are
-// additionally reachable over SSH.
+// ClusterHostsUp reports how many hosts of the power group (f0/f1/f2,
+// sf.Inv.PowerGroup) answer ICMP, and how many are additionally reachable over
+// SSH.
 //
 // The two counts answer different questions. Waking is about power, so it uses
 // ping. Shutting down runs entirely over SSH -- the zusb pre-flight, the guest
@@ -182,29 +183,27 @@ func Host(s contract.State, name string) (power.HostStatus, bool) {
 // host that is merely mid-boot produces a job that can only fail. That is
 // exactly what happened on 2026-08-08, when f3 was shut down 48 seconds after
 // waking and the pre-flight got "connection refused".
-func ClusterHostsUp(s contract.State) (up, sshUp, total int) {
-	for _, h := range s.Hosts {
-		if h.Role != "f" || h.Name == "f3" {
-			continue
-		}
-		total++
-		if h.Ping {
-			up++
-		}
-		if h.SSH {
-			sshUp++
-		}
-	}
-	return up, sshUp, total
+func (sf *Surface) ClusterHostsUp(s contract.State) (up, sshUp, total int) {
+	return hostsUp(sf.Inv.PowerGroup(), s)
 }
 
-// EveryFHostUp counts f0-f3, f3 included: the set `power all` acts on.
+// EveryFHostUp counts every f-host (f0-f3, sf.Inv.EveryFHost): the set
+// `power all` acts on.
 //
 // Separate from ClusterHostsUp, which deliberately excludes f3, so the two
-// commands are judged against exactly the hosts they would touch.
-func EveryFHostUp(s contract.State) (up, sshUp, total int) {
+// commands are judged against exactly the hosts they would touch -- and both
+// read their set from the same inventory methods the engine acts on, so an
+// advertised action can never cover a different set of hosts than the job it
+// starts.
+func (sf *Surface) EveryFHostUp(s contract.State) (up, sshUp, total int) {
+	return hostsUp(sf.Inv.EveryFHost(), s)
+}
+
+// hostsUp counts the snapshot's hosts that are in group: all of them, those
+// answering ICMP, and those reachable over SSH.
+func hostsUp(group []inventory.Host, s contract.State) (up, sshUp, total int) {
 	for _, h := range s.Hosts {
-		if h.Role != "f" {
+		if !inventory.Includes(group, h.Name) {
 			continue
 		}
 		total++
@@ -233,12 +232,12 @@ func EveryFHostUp(s contract.State) (up, sshUp, total int) {
 // guard: it is what an advertisement is judged against, and every response can
 // afford it. handleFansOff confirms with the strict half before it switches
 // anything.
-func RackBusy(s contract.State) power.RackActivity {
-	return power.RackActivityFrom(s.Hosts)
+func (sf *Surface) RackBusy(s contract.State) power.RackActivity {
+	return power.RackActivityFrom(sf.Inv, s.Hosts)
 }
 
 // ACBusy reports which f-hosts may still be drawing power on the AC circuit
 // (f0–f3), judged against this request's snapshot. Gates switching AC off.
-func ACBusy(s contract.State) power.RackActivity {
-	return power.ACActivityFrom(s.Hosts)
+func (sf *Surface) ACBusy(s contract.State) power.RackActivity {
+	return power.ACActivityFrom(sf.Inv, s.Hosts)
 }

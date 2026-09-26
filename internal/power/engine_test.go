@@ -250,7 +250,7 @@ func TestACActivityIncludesF3(t *testing.T) {
 
 // TestACActivityFromIncludesF3 is the snapshot half of the same rule.
 func TestACActivityFromIncludesF3(t *testing.T) {
-	busy := ACActivityFrom([]HostStatus{
+	busy := ACActivityFrom(inventory.Default(), []HostStatus{
 		{Name: "f3", Role: string(inventory.RoleF), Ping: true, PingKnown: true},
 		{Name: "r0", Role: string(inventory.RoleCluster), Ping: true, PingKnown: true},
 	})
@@ -258,7 +258,7 @@ func TestACActivityFromIncludesF3(t *testing.T) {
 		t.Errorf("ACActivityFrom = %+v, want busy with only f3", busy)
 	}
 
-	cold := ACActivityFrom([]HostStatus{
+	cold := ACActivityFrom(inventory.Default(), []HostStatus{
 		{Name: "f0", Role: string(inventory.RoleF), PingKnown: true},
 		{Name: "f3", Role: string(inventory.RoleF), PingKnown: true},
 	})
@@ -509,7 +509,7 @@ func TestProbeKeepsWhetherTheProbeRanAtAll(t *testing.T) {
 	if st.PingKnown {
 		t.Error("PingKnown = true, want false: the probe never reached a conclusion")
 	}
-	if !RackActivityFrom([]HostStatus{st}).Busy() {
+	if !RackActivityFrom(inventory.Default(), []HostStatus{st}).Busy() {
 		t.Error("a host whose probe never ran does not keep the rack fans on")
 	}
 }
@@ -549,7 +549,7 @@ func TestBothHalvesOfTheGuardAgree(t *testing.T) {
 					Ping: tc.up, PingKnown: tc.known,
 				})
 			}
-			folded := RackActivityFrom(snapshot)
+			folded := RackActivityFrom(eng.cfg.Inventory, snapshot)
 
 			if probed.Busy() != tc.wantBusy {
 				t.Errorf("Engine.RackActivity busy = %v, want %v", probed.Busy(), tc.wantBusy)
@@ -1105,5 +1105,40 @@ func TestIndentNestsContinuationLines(t *testing.T) {
 		if got := indent(tc.in); got != tc.want {
 			t.Errorf("indent(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// TestActivityFromJudgesTheInventorysGroups pins that the snapshot guards read
+// their host set from the configured inventory (PowerGroup / EveryFHost) --
+// the same set Engine.RackActivity and Engine.ACActivity probe -- rather than
+// from a role/name rule of their own. A configured f4 counts; a status for a
+// Role-f host the inventory does not know, and the k3s guests, do not.
+func TestActivityFromJudgesTheInventorysGroups(t *testing.T) {
+	inv := inventory.Inventory{Hosts: []inventory.Host{
+		{Name: "f0", Role: inventory.RoleF},
+		{Name: inventory.StandaloneHost, Role: inventory.RoleF},
+		{Name: "f4", Role: inventory.RoleF},
+		{Name: "r0", Role: inventory.RoleCluster},
+	}}
+	up := func(name string, role inventory.Role) HostStatus {
+		return HostStatus{Name: name, Role: string(role), Ping: true, PingKnown: true}
+	}
+	snapshot := []HostStatus{
+		{Name: "f0", Role: string(inventory.RoleF), PingKnown: true},
+		up(inventory.StandaloneHost, inventory.RoleF),
+		up("f4", inventory.RoleF),
+		up("stray", inventory.RoleF),
+		up("r0", inventory.RoleCluster),
+	}
+
+	if got := RackActivityFrom(inv, snapshot).Hosts(); !reflect.DeepEqual(got, []string{"f4"}) {
+		t.Errorf("RackActivityFrom hosts = %v, want [f4]", got)
+	}
+	want := []string{inventory.StandaloneHost, "f4"}
+	if got := ACActivityFrom(inv, snapshot).Hosts(); !reflect.DeepEqual(got, want) {
+		t.Errorf("ACActivityFrom hosts = %v, want %v", got, want)
+	}
+	if RackActivityFrom(inventory.Inventory{}, snapshot).Busy() {
+		t.Error("RackActivityFrom with an empty inventory is busy; no host is in its power group")
 	}
 }
