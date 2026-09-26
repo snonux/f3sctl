@@ -214,9 +214,14 @@ If the process running a job dies (the Pi reboots mid-cycle, say), its
 until then the API withholds both plug switches along with every power
 action. An AC plug left off, or fans that need switching, cannot wait that
 long, so the way out meanwhile is local: on any LAN host with f3sctl and its
-config (a Pi, say), run `f3sctl ac on` or `f3sctl fans on` without
-`--remote`. The plug commands run locally by default, need no authorisation,
-switch the plug directly and do not consult the job. A client cannot do this for you; it can only say so.
+config, run `f3sctl ac on` or `f3sctl fans on`. The plug commands run locally
+by default, switch the plug directly and do not consult the job. They need no
+API key or SSH key, but they do need a readable Shelly password file (the
+plug's digest password, from `shelly_password_file`, e.g.
+`/var/db/f3sctl/shelly_plug` — readable only through `doas` on the Pis, so
+there it is `doas f3sctl ac on`). Do not pass `-r`/`--remote` or
+`-v`/`--verbose`: verbose implies remote, and remote goes back through the
+API that is refusing. A client cannot do this for you; it can only say so.
 
 ### Monitoring mute
 

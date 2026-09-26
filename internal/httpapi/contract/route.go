@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"fmt"
 )
 
 // Section is the part of the API surface a route belongs to: the value a
@@ -149,6 +150,14 @@ func (r Route) IsAvailable(s State) bool {
 		return true
 	}
 	return r.Available(s)
+}
+
+// NotAvailableError is the 409 message for an action refused because the state
+// no longer allows it: serve()'s up-front availability check, and any handler
+// that finds the state changed under it before acting. One wording, so a
+// client sees the same refusal whichever of the two caught it.
+func NotAvailableError(name string) error {
+	return fmt.Errorf("%q is not available right now; re-fetch the resource and read its actions", name)
 }
 
 // FieldsFor returns the route's parameters for the current state.

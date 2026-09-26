@@ -127,11 +127,13 @@ type Engine interface {
 }
 
 // Jobs is the slice of the coordination manager the surface drives: starting
-// the detached child that performs a power operation, and telling a polling
-// client how long it may wait. Satisfied by *coordination.Manager.
+// the detached child that performs a power operation, telling a polling
+// client how long it may wait, and re-reading this node's job right before a
+// plug write (see jobStartedMeanwhile). Satisfied by *coordination.Manager.
 type Jobs interface {
 	Start(action string, args []string) (coordination.Job, error)
 	StaleCeiling() time.Duration
+	Read() *coordination.Job
 }
 
 // Peers is the slice of the peer set the surface drives: the pre-start busy

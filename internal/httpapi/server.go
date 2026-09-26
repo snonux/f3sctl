@@ -228,8 +228,7 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 	// offered the action in the first place. This is the backstop for a
 	// client racing another, or one that ignored the contract.
 	if r.Action && !r.IsAvailable(state) {
-		return s.siren.WriteError(out, http.StatusConflict,
-			fmt.Sprintf("%q is not available right now; re-fetch the resource and read its actions", r.Name))
+		return s.siren.WriteError(out, http.StatusConflict, contract.NotAvailableError(r.Name).Error())
 	}
 
 	entity, status, err := r.Handle(ctx, state, req)

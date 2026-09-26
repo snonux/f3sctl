@@ -212,7 +212,8 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 // themselves -- on before a wake, off after a shutdown -- so a manual flip
 // mid-job either races them or is silently undone. Per-host jobs leave the
 // plug alone, but are gated too: one rule for every job is simpler to reason
-// about, and to render, than a per-action exception.
+// about, and to render, than a per-action exception. As for ac-off, fans-off
+// re-reads the job state after its confirming probe (jobStartedMeanwhile).
 func (sf *Surface) fanRoutes() []contract.Route {
 	return []contract.Route{
 		{
@@ -264,14 +265,18 @@ func (sf *Surface) fanRoutes() []contract.Route {
 	}
 }
 
-// acRoutes is the f-host mains AC plug's on/off pair (shelly2). Independent
-// of power on/off: never started as a job side-effect, never flipped by boot.
+// acRoutes is the f-host mains AC plug's on/off pair (shelly2). Power on/off
+// and a boot never switch it; the only job that drives it is all-cycle.
 //
-// Both are nevertheless withheld while a power job runs. `power all cycle`
-// cuts and restores this plug itself, and its hosts are silent during the
-// standby wait, so without the job check ac-off would pass the ACBusy guard
-// with no confirmation and cut mains under the wake half; during the AC-off
-// dwell ac-on would race the cycle's own restore.
+// Both are withheld while a power job runs. `power all cycle` cuts and
+// restores this plug itself, and its hosts are silent during the standby
+// wait, so without the job check ac-off would pass the ACBusy guard with no
+// confirmation and cut mains under the wake half; during the AC-off dwell
+// ac-on would race the cycle's own restore.
+//
+// The check is a snapshot, not a lock: ac-off's confirming probe can take a
+// minute after it, so handleACOff re-reads the job state right before the
+// write (jobStartedMeanwhile), narrowing the gap to the moment in between.
 func (sf *Surface) acRoutes() []contract.Route {
 	return []contract.Route{
 		{

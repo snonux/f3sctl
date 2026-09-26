@@ -187,6 +187,9 @@ func (sf *Surface) handleFansOn(ctx context.Context, state contract.State, req c
 // The check mirrors the `force` field the registry advertises, so a client that
 // renders what it was given normally never hits this path -- normally, because
 // this one is the stricter of the two. See rackStillBusy.
+//
+// A request that passes the guard has just spent up to a minute probing, and
+// a job may have started on either node in that time; see jobStartedMeanwhile.
 func (sf *Surface) handleFansOff(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
 	if !req.BoolField("force") {
 		if busy := sf.rackStillBusy(ctx, state); busy.Busy() {
@@ -195,8 +198,36 @@ func (sf *Surface) handleFansOff(ctx context.Context, state contract.State, req 
 					"re-send with force=true if you really mean to switch the plug off",
 				busy.Why())
 		}
+		if sf.jobStartedMeanwhile(ctx, req.APIKey) {
+			return contract.Entity{}, http.StatusConflict, contract.NotAvailableError("fans-off")
+		}
 	}
 	return sf.setFans(ctx, state, req, false)
+}
+
+// jobStartedMeanwhile re-reads this node's and the peer's job state, fresh
+// rather than from the request's snapshot, right before a plug write that
+// followed a confirming probe.
+//
+// serve() refuses a plug switch while a job runs, but it judges that once, up
+// front, and the off handlers then probe for the better part of a minute. A
+// power-on or all-cycle started on either node inside that window would have
+// its plug flipped under it. This narrows the gap to the few milliseconds
+// between this read and the write; it is a re-check, not a lock -- the plug
+// has no lock to take, and Manager.Start's flock only serialises jobs. The
+// switches without a probe (on, and off with force) have no such window
+// beyond serve()'s own check, so they are not re-checked.
+func (sf *Surface) jobStartedMeanwhile(ctx context.Context, apiKey string) bool {
+	if sf.Jobs != nil {
+		if j := sf.Jobs.Read(); j != nil && j.State == coordination.JobRunning {
+			return true
+		}
+	}
+	if sf.Peers == nil {
+		return false
+	}
+	busy, _ := sf.Peers.Busy(ctx, sf.Node, apiKey)
+	return busy
 }
 
 // rackStillBusy is the enforcement half of the fan guard: the same question the
@@ -277,6 +308,9 @@ func (sf *Surface) handleACOn(ctx context.Context, state contract.State, req con
 // handleACOff switches the AC plug off, requiring explicit confirmation while
 // any f-host may still be drawing power. Independent of power off: cutting
 // AC is never an automatic side-effect of a graceful shutdown.
+//
+// As for fans-off, a job that started during the confirming probe is caught
+// by jobStartedMeanwhile before the plug is touched.
 func (sf *Surface) handleACOff(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
 	if !req.BoolField("force") {
 		if busy := sf.acStillBusy(ctx, state); busy.Busy() {
@@ -284,6 +318,9 @@ func (sf *Surface) handleACOff(ctx context.Context, state contract.State, req co
 				"hosts may still be drawing power (%s); cutting mains AC hard-powers them off "+
 					"and risks ZFS / bhyve damage; re-send with force=true if you really mean it",
 				busy.Why())
+		}
+		if sf.jobStartedMeanwhile(ctx, req.APIKey) {
+			return contract.Entity{}, http.StatusConflict, contract.NotAvailableError("ac-off")
 		}
 	}
 	return sf.setAC(ctx, state, req, false)
