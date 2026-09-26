@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -349,31 +350,8 @@ func (e *Engine) powerHost(name string) (inventory.Host, error) {
 }
 
 // indent prefixes continuation lines of remote output so it reads as nested
-// under the host it came from.
+// under the host it came from. One trailing newline is dropped first, so
+// output ending in the usual '\n' does not leave a dangling indented line.
 func indent(s string) string {
-	out := ""
-	for i, line := range splitLines(s) {
-		if i > 0 {
-			out += "\n  "
-		}
-		out += line
-	}
-	return out
-}
-
-func splitLines(s string) []string {
-	var lines []string
-	cur := ""
-	for _, r := range s {
-		if r == '\n' {
-			lines = append(lines, cur)
-			cur = ""
-			continue
-		}
-		cur += string(r)
-	}
-	if cur != "" {
-		lines = append(lines, cur)
-	}
-	return lines
+	return strings.ReplaceAll(strings.TrimSuffix(s, "\n"), "\n", "\n  ")
 }

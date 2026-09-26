@@ -1078,3 +1078,27 @@ func TestLiveHostsReportsThePowerGroupInInventoryOrder(t *testing.T) {
 		t.Errorf("LiveHosts = %v, want [f0 f2]: only power-group hosts, in inventory order, f3 excluded", got)
 	}
 }
+
+// TestIndentNestsContinuationLines pins indent's output, including the edge
+// cases of the original rune-by-rune version it replaced: one trailing newline
+// is dropped (remote output usually ends in one), blank inner lines keep their
+// indent, and nothing but '\n' separates lines.
+func TestIndentNestsContinuationLines(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"", ""},
+		{"one line", "one line"},
+		{"a\nb", "a\n  b"},
+		{"a\nb\n", "a\n  b"},
+		{"a\n", "a"},
+		{"\n", ""},
+		{"a\n\nb", "a\n  \n  b"},
+		{"a\n\n", "a\n  "},
+		{"\na", "\n  a"},
+		{"a\r\nb", "a\r\n  b"},
+		{"grüße\nüber", "grüße\n  über"},
+	} {
+		if got := indent(tc.in); got != tc.want {
+			t.Errorf("indent(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
