@@ -249,9 +249,10 @@ Follow one of the six `rel`s to drill down into that category's checks. Note
 whatever severity it already had, so it can legitimately appear under both
 its severity link and `stale`. The four severity links list exactly the
 checks behind the matching `summary` count (the report's Unhandled, Stale and
-Ok sections), each once. A suppressed check is left out of the summary counts
-too, so it appears only under `suppressed` — never under its severity link —
-but its `self` (detail) link still works. Each check entity carries its own
+Ok sections), each once. A suppressed check is left out of the severity and
+`stale` counts (it is counted only in `summary.suppressed`), so it appears
+only under `suppressed` — never under its severity link — but its `self`
+(detail) link still works. Each check entity carries its own
 `self` link with `?name=` already filled in; **do not** build that query
 string yourself or reuse the bare route — a check's name is mandatory and
 the API does not advertise a root-level link for it (see the per-check `self`
