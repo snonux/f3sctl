@@ -51,11 +51,18 @@ func documented(t *testing.T, doc map[string]any, method, path string, status in
 	return ok
 }
 
-// fakeJobs is a powerapi.Jobs that never spawns a child: Start answers with
-// a running job, or with err when one is set.
-type fakeJobs struct{ err error }
+// fakeJobs is a powerapi.Jobs that never spawns a child: Start records the
+// job it was asked for and answers with it running, or with err when one is
+// set.
+type fakeJobs struct {
+	err error
+	// action and args are what the last Start was called with.
+	action string
+	args   []string
+}
 
-func (f fakeJobs) Start(action string, _ []string) (coordination.Job, error) {
+func (f *fakeJobs) Start(action string, args []string) (coordination.Job, error) {
+	f.action, f.args = action, args
 	if f.err != nil {
 		return coordination.Job{}, f.err
 	}
@@ -65,8 +72,8 @@ func (f fakeJobs) Start(action string, _ []string) (coordination.Job, error) {
 	}, nil
 }
 
-func (fakeJobs) StaleCeiling() time.Duration { return time.Minute }
-func (fakeJobs) Read() *coordination.Job     { return nil }
+func (*fakeJobs) StaleCeiling() time.Duration { return time.Minute }
+func (*fakeJobs) Read() *coordination.Job     { return nil }
 
 // fakePeers is a powerapi.Peers whose other node reports busy as set, and
 // which counts the peer-job fetches made through it.
@@ -160,7 +167,7 @@ func (o docOpts) withDefaults() docOpts {
 		o.eng = &plugRecorder{}
 	}
 	if o.jobs == nil {
-		o.jobs = fakeJobs{}
+		o.jobs = &fakeJobs{}
 	}
 	if o.peers == nil {
 		o.peers = &fakePeers{}
@@ -200,9 +207,9 @@ func TestOpenAPIDocumentsTheStatusesHandlersReturn(t *testing.T) {
 		{name: "job action accepted", opts: cold, path: "/power/on", want: http.StatusAccepted},
 		{name: "job action peer busy", opts: docOpts{peers: &fakePeers{busy: true}},
 			path: "/power/on", want: http.StatusConflict},
-		{name: "job action lock held", opts: docOpts{jobs: fakeJobs{err: coordination.ErrJobRunning}},
+		{name: "job action lock held", opts: docOpts{jobs: &fakeJobs{err: coordination.ErrJobRunning}},
 			path: "/power/on", want: http.StatusConflict},
-		{name: "job action spawn fails", opts: docOpts{jobs: fakeJobs{err: errors.New("fork failed")}},
+		{name: "job action spawn fails", opts: docOpts{jobs: &fakeJobs{err: errors.New("fork failed")}},
 			path: "/power/on", want: http.StatusInternalServerError},
 		{name: "bad API key", opts: cold, path: "/power/on", apiKey: "wrong", want: http.StatusUnauthorized},
 	} {
@@ -227,32 +234,58 @@ func TestOpenAPIDocumentsTheStatusesHandlersReturn(t *testing.T) {
 // to success -- on a cold fleet or a hot one, whichever it is offered on,
 // with force=true so the off switches skip their confirming probe -- and
 // requires the status it answers to be exactly its Response.Status(). This is
-// what ties Response to the handler that actually serves the route.
+// what ties Response to the handler that actually serves the route. For a
+// job route it also checks the job the handler started: its own JobAction,
+// with the argv JobArgsFrom derives for it -- the detached child runs
+// nothing otherwise.
 func TestEveryActionAnswersItsDeclaredSuccessStatus(t *testing.T) {
+	routes := testRoutes(inventory.Default())
+	jobs := []*fakeJobs{{}, {}}
 	servers := []*Server{
-		docServer(t, docOpts{}),
-		docServer(t, docOpts{hostsUp: true, plugsOn: true, muted: true}),
+		docServer(t, docOpts{jobs: jobs[0]}),
+		docServer(t, docOpts{hostsUp: true, plugsOn: true, muted: true, jobs: jobs[1]}),
 	}
 	force := url.Values{"force": {"true"}}
-	for _, r := range testRoutes(inventory.Default()) {
+	for _, r := range routes {
 		if !r.Action {
 			continue
 		}
 		var got []int
-		for _, srv := range servers {
+		for i, srv := range servers {
 			status := serveStatus(t, srv, postRequest(r.Path, force))
-			got = append(got, status)
-			if status/100 == 2 {
-				if status != r.Response.Status() {
-					t.Errorf("route %q answered %d, but declares Response status %d", r.Name, status, r.Response.Status())
-				}
-				got = nil
-				break
+			if status/100 != 2 {
+				got = append(got, status)
+				continue
 			}
+			if status != r.Response.Status() {
+				t.Errorf("route %q answered %d, but declares Response status %d", r.Name, status, r.Response.Status())
+			}
+			if r.Response == contract.ResponseJob {
+				checkJobStarted(t, routes, r, jobs[i])
+			}
+			got = nil
+			break
 		}
 		if got != nil {
 			t.Errorf("route %q never succeeded (answered %v): no fixture offers it", r.Name, got)
 		}
+	}
+}
+
+// checkJobStarted requires the job r's handler just started through jobs to
+// be r's own JobAction, run with the non-empty argv JobArgsFrom derives for
+// that action from routes.
+func checkJobStarted(t *testing.T, routes []contract.Route, r contract.Route, jobs *fakeJobs) {
+	t.Helper()
+	if jobs.action != r.JobAction() {
+		t.Errorf("route %q started job %q, want its JobAction %q", r.Name, jobs.action, r.JobAction())
+	}
+	want := powerapi.JobArgsFrom(routes, r.JobAction())
+	if len(want) == 0 {
+		t.Errorf("route %q: JobArgsFrom(%q) is empty, so the job child would run nothing", r.Name, r.JobAction())
+	}
+	if strings.Join(jobs.args, " ") != strings.Join(want, " ") {
+		t.Errorf("route %q started its job with argv %q, want %q", r.Name, jobs.args, want)
 	}
 }
 

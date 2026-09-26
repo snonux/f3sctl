@@ -88,11 +88,12 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 				"with API covering the entry point itself. Hypermedia (Siren): " +
 				"fetch the root and follow what it offers rather than hard-coding " +
 				"these paths. Every error is a Siren entity of class \"error\". " +
-				"Every request, whatever its path, is authenticated first (401); " +
-				"after that, a path not listed here (other than this document, " +
-				"/openapi.json) answers 404, and a method not listed for a path " +
-				"answers 405. An action's form fields may also be sent as query " +
-				"parameters of the same name.",
+				"Authentication (401) is checked before a request is matched to a " +
+				"route, so an unauthenticated request never sees a 404 or 405; " +
+				"an authenticated one to a path not listed here (other than this " +
+				"document, /openapi.json) answers 404, and a method not listed for " +
+				"a path answers 405. An action's form fields may also be sent as " +
+				"query parameters of the same name.",
 		},
 		// The sections: one tag object per contract.Route.Section a route
 		// declares, in the fixed order of the sections table below. This is
