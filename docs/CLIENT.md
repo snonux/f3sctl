@@ -644,7 +644,9 @@ X-API-Key: ...
   "properties": { "action": "off", "state": "running", "node": "pi0", "rc": null } }
 ```
 → `202`. Poll `/status`; the f-hosts lose `ssh`, then `ping`. Meanwhile the
-power folder offers **no** power actions at all, because a job is running.
+power folder offers **no** power actions at all, because a job is running,
+and AC control offers no plug switches either: the job drives the fan and AC
+plugs itself, so a manual flip mid-job would race it.
 
 When it finishes, the power folder offers `power-on`, and AC control offers
 `fans-on` once the plug is off.

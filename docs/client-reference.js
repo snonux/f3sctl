@@ -271,11 +271,15 @@ async function selftest() {
   check(!!action(power, 'all-off') === hosts.some((h) => h.name.startsWith('f') && h.ssh),
     'all-off is offered exactly when an f-host answers SSH');
 
+  // A running power job withholds both plug switches: the job drives them.
+  const jobRunning = (await request(follow(entry, 'job'))).properties?.state === 'running';
   const fans = entities(status, 'fans')[0]?.properties ?? {};
-  check(!!action(acControl, 'fans-off') === (fans.on === true && !fans.error), 'fans-off is offered only when the plug is on');
+  check(!!action(acControl, 'fans-off') === (!jobRunning && fans.on === true && !fans.error),
+    'fans-off is offered only when the plug is on and no job is running');
 
   const ac = entities(status, 'ac')[0]?.properties ?? {};
-  check(!!action(acControl, 'ac-off') === (ac.on === true && !ac.error), 'ac-off is offered only when the AC plug is on');
+  check(!!action(acControl, 'ac-off') === (!jobRunning && ac.on === true && !ac.error),
+    'ac-off is offered only when the AC plug is on and no job is running');
 
   // A host that could not be probed counts as running: the fan plug cools the
   // rack, and an unmeasured host is not a host known to be off. That is the

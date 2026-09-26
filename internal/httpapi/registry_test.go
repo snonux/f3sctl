@@ -130,6 +130,16 @@ func TestActionAvailability(t *testing.T) {
 		Fans:  power.FansState{On: true},
 		Job:   &coordination.Job{State: coordination.JobRunning, Action: "off"},
 	}
+	acOn := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: true}}
+	acOff := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: false}}
+	// A cycle in its standby wait or AC-off dwell: every host silent, which is
+	// exactly when ac-off would otherwise be offered without a force field.
+	cycling := &coordination.Job{State: coordination.JobRunning, Action: "all-cycle"}
+	busyFansOff := contract.State{Hosts: allDown.Hosts, Job: busy.Job}
+	busyACOn := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: true}, Job: cycling}
+	busyACOff := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: false}, Job: cycling}
+	peerBusyACOn := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: true}, PeerBusy: true}
+	peerBusyFansOff := contract.State{Hosts: allDown.Hosts, PeerBusy: true}
 
 	cases := []struct {
 		name   string
@@ -156,12 +166,25 @@ func TestActionAvailability(t *testing.T) {
 		{"job running", busy, "f3-on", false, "a job is running"},
 		{"job running", busy, "f3-off", false, "a job is running"},
 
-		// Fan actions are not gated on jobs: switching the plug is
-		// instantaneous and independent of an in-flight power sequence.
 		{"fans on", allUp, "fans-on", false, "already on"},
 		{"fans on", allUp, "fans-off", true, "on, so it can be switched off"},
 		{"fans off", allDown, "fans-on", true, "off, so it can be switched on"},
 		{"fans off", allDown, "fans-off", false, "already off"},
+		{"ac on", acOn, "ac-on", false, "already on"},
+		{"ac on", acOn, "ac-off", true, "on, so it can be cut"},
+		{"ac off", acOff, "ac-on", true, "off, so it can be restored"},
+		{"ac off", acOff, "ac-off", false, "already off"},
+
+		// The Shelly plugs are withheld during a job too, in whichever state
+		// would otherwise offer them: the job switches both plugs itself
+		// (fans around a wake/shutdown, AC in the middle of all-cycle), and a
+		// silent rack mid-cycle would let ac-off through without force.
+		{"job running", busy, "fans-off", false, "a job is running"},
+		{"job running", busyFansOff, "fans-on", false, "a job is running"},
+		{"job running", busyACOff, "ac-on", false, "a job is running"},
+		{"job running", busyACOn, "ac-off", false, "a job is running"},
+		{"peer job running", peerBusyACOn, "ac-off", false, "the other node runs a job"},
+		{"peer job running", peerBusyFansOff, "fans-on", false, "the other node runs a job"},
 	}
 
 	// A host that is only mid-boot must not be offered a shutdown: the whole
@@ -472,7 +495,7 @@ func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
 }
 
 // TestPowerActionsWithheldWhileThePeerIsBusy pins that a job on the *other* API
-// node withholds power actions here too.
+// node withholds power and Shelly plug actions here too.
 //
 // relayd load-balances pi0 and pi1, so the node answering a request is often
 // not the node running the job. Judging availability on local job state alone
@@ -482,6 +505,10 @@ func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
 //
 // A client is entitled to trust what it was handed; that is the entire premise
 // of a self-describing API.
+//
+// The fan and AC plugs used to stay offered during a job, on the theory that
+// they are independent of it. They are not: the job switches both itself, and
+// an all-cycle's silent standby wait let ac-off through without force.
 func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 	busy := contract.State{
 		Hosts: []power.HostStatus{
@@ -495,7 +522,7 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 	}
 
 	for _, r := range testRoutes(inventory.Default()) {
-		if !r.Action || !strings.HasPrefix(r.Path, "/power/") {
+		if !r.Action || !isJobGatedPath(r.Path) {
 			continue
 		}
 		if r.IsAvailable(busy) {
@@ -503,10 +530,24 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 		}
 	}
 
-	// The fan plug is not part of a power job, so it stays usable.
-	if r, ok := routeByName("fans-off"); ok && !r.IsAvailable(busy) {
-		t.Error("fans-off withheld because the peer is busy; the plug is independent of power jobs")
+	// Sanity check that the loop above really covered the plugs: the same
+	// state with the peer idle offers fans-off, so its absence is the job.
+	idle := busy
+	idle.PeerBusy = false
+	if r, ok := routeByName("fans-off"); !ok || !r.IsAvailable(idle) {
+		t.Error("fans-off not offered with the peer idle; the busy assertion above proves nothing")
 	}
+}
+
+// isJobGatedPath reports whether a route belongs to a family that a running
+// power job withholds: host power and both Shelly plugs.
+func isJobGatedPath(path string) bool {
+	for _, prefix := range []string{"/power/", "/fans/", "/ac/"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAllActionsAccountForF3 pins that the all-on/all-off pair is judged

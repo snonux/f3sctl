@@ -206,6 +206,10 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 }
 
 // fanRoutes is the rack-fan plug's on/off pair.
+//
+// Both are withheld while a power job runs, like every power action: the job
+// switches this plug itself (on before a wake, off after a shutdown), so a
+// manual flip mid-job either races it or is silently undone by it.
 func (sf *Surface) fanRoutes() []contract.Route {
 	return []contract.Route{
 		{
@@ -214,14 +218,18 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			CLIVerb: "fans on",
 			// Unavailable when the plug cannot be read: without a read-back
 			// there is no way to report truthfully whether it worked.
-			Available: func(s contract.State) bool { return s.FansErr == nil && !s.Fans.On },
-			Handle:    sf.handleFansOn,
+			Available: func(s contract.State) bool {
+				return !JobRunning(s) && s.FansErr == nil && !s.Fans.On
+			},
+			Handle: sf.handleFansOn,
 		},
 		{
 			Name: "fans-off", Title: "Switch the rack fans off",
 			Method: http.MethodPost, Path: "/fans/off", Action: true,
-			CLIVerb:   "fans off",
-			Available: func(s contract.State) bool { return s.FansErr == nil && s.Fans.On },
+			CLIVerb: "fans off",
+			Available: func(s contract.State) bool {
+				return !JobRunning(s) && s.FansErr == nil && s.Fans.On
+			},
 			// The guard is expressed as a field rather than documented as a
 			// rule: while the rack may be busy the client is handed a
 			// confirmation toggle with the reason in its title, and when the
@@ -255,20 +263,30 @@ func (sf *Surface) fanRoutes() []contract.Route {
 
 // acRoutes is the f-host mains AC plug's on/off pair (shelly2). Independent
 // of power on/off: never started as a job side-effect, never flipped by boot.
+//
+// Both are nevertheless withheld while a power job runs. `power all cycle`
+// cuts and restores this plug itself, and its hosts are silent during the
+// standby wait, so without the job check ac-off would pass the ACBusy guard
+// with no confirmation and cut mains under the wake half; during the AC-off
+// dwell ac-on would race the cycle's own restore.
 func (sf *Surface) acRoutes() []contract.Route {
 	return []contract.Route{
 		{
 			Name: "ac-on", Title: "Restore f-host mains AC",
 			Method: http.MethodPost, Path: "/ac/on", Action: true,
-			CLIVerb:   "ac on",
-			Available: func(s contract.State) bool { return s.ACErr == nil && !s.AC.On },
-			Handle:    sf.handleACOn,
+			CLIVerb: "ac on",
+			Available: func(s contract.State) bool {
+				return !JobRunning(s) && s.ACErr == nil && !s.AC.On
+			},
+			Handle: sf.handleACOn,
 		},
 		{
 			Name: "ac-off", Title: "Cut f-host mains AC",
 			Method: http.MethodPost, Path: "/ac/off", Action: true,
-			CLIVerb:   "ac off",
-			Available: func(s contract.State) bool { return s.ACErr == nil && s.AC.On },
+			CLIVerb: "ac off",
+			Available: func(s contract.State) bool {
+				return !JobRunning(s) && s.ACErr == nil && s.AC.On
+			},
 			// Guard looks at every f-host (f0–f3): shelly2 powers all of them.
 			// Hard-cutting AC under a live host risks ZFS / bhyve damage.
 			Fields: func(s contract.State) []contract.Field {
