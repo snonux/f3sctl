@@ -93,27 +93,7 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 	}
 
 	accepted, failed := e.shutdownEach(ctx, log, tl, hosts)
-
-	// Accepting the command is not the same as completing it. A host can run
-	// the whole shutdown sequence and then wedge in the final phase -- after
-	// syslogd has exited, so nothing is logged -- leaving it powered on, off
-	// the network, and NOT wakeable by Wake-on-LAN, which only wakes a NIC
-	// that actually powered down. Recovering from that needs a console or the
-	// physical button.
-	//
-	// f1 did exactly this on 2026-08-08 while f0 and f2 powered off cleanly.
-	// Nothing reported a problem at the time: the tool said "shutdown sent"
-	// and moved on, and the failure only surfaced later when the host would
-	// not wake. Confirming each host actually goes silent turns that into an
-	// error at the moment it happens.
-	e.reporter().Step("confirming the hosts actually powered down")
-	confirmed := tl.track("confirm power-down")
-	stuck := e.awaitPowerDown(ctx, log, accepted)
-	confirmed()
-	if len(stuck) > 0 {
-		failed = append(failed, stuck...)
-	}
-
+	failed = append(failed, e.confirmPowerDown(ctx, log, tl, accepted)...)
 	if len(failed) > 0 {
 		return shutdownFailure(failed)
 	}
@@ -125,6 +105,28 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 
 	fmt.Fprintln(log, "All hosts accepted shutdown.")
 	return nil
+}
+
+// confirmPowerDown waits for every host that accepted its shutdown to actually
+// go silent, returning the names of those that did not.
+//
+// Accepting the command is not the same as completing it. A host can run the
+// whole shutdown sequence and then wedge in the final phase -- after syslogd
+// has exited, so nothing is logged -- leaving it powered on, off the network,
+// and NOT wakeable by Wake-on-LAN, which only wakes a NIC that actually
+// powered down. Recovering from that needs a console or the physical button.
+//
+// f1 did exactly this on 2026-08-08 while f0 and f2 powered off cleanly.
+// Nothing reported a problem at the time: the tool said "shutdown sent" and
+// moved on, and the failure only surfaced later when the host would not wake.
+// Confirming each host actually goes silent turns that into an error at the
+// moment it happens.
+func (e *Engine) confirmPowerDown(ctx context.Context, log io.Writer, tl *timeline,
+	accepted []inventory.Host) []string {
+
+	e.reporter().Step("confirming the hosts actually powered down")
+	defer tl.track("confirm power-down")()
+	return e.awaitPowerDown(ctx, log, accepted)
 }
 
 // offPreflight runs everything that happens before the first host is touched:

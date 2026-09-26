@@ -473,6 +473,35 @@ func TestOffReportsPowerOffFailureAndLeavesFansOn(t *testing.T) {
 	}
 }
 
+// TestOffFailsWhenAnAcceptedHostNeverGoesSilent is the negative test for the
+// confirm step (confirmPowerDown): a host that accepts the poweroff but keeps
+// answering -- the 2026-08-08 wedge -- must fail the run exactly like a host
+// that refused, and must keep the fans on.
+func TestOffFailsWhenAnAcceptedHostNeverGoesSilent(t *testing.T) {
+	rig := newOffTestRig(t, "f0")
+	rig.power.onPowerOff = func(inventory.Host) {} // accepted, but stays up
+	rig.eng.powerDownTimeout = 20 * time.Millisecond
+	fans := &fakeFans{state: true}
+	rig.eng.fans = fans
+
+	err := rig.eng.Off(context.Background(), &rig.log)
+	if err == nil {
+		t.Fatal("power off succeeded, want the unconfirmed f0 to fail the run")
+	}
+	if !strings.Contains(err.Error(), "f0") || !strings.Contains(err.Error(), fansLeftOn) {
+		t.Errorf("error = %v, want it to name f0 and say %q", err, fansLeftOn)
+	}
+	if got := rig.power.calls(); len(got) != 1 || got[0] != "f0" {
+		t.Errorf("PowerOff calls = %v, want exactly [f0]", got)
+	}
+	if !strings.Contains(rig.log.String(), "confirm power-down") {
+		t.Errorf("the timing summary does not mention the confirm step:\n%s", rig.log.String())
+	}
+	if len(fans.calls) != 0 {
+		t.Fatalf("fan Set calls = %v, want none: an unconfirmed shutdown must not touch the fans", fans.calls)
+	}
+}
+
 // TestOnRunsThroughFakeBackendsEndToEnd drives a full wake -- fans on, then a
 // magic packet to every PowerGroup host -- with neither the fan plug nor
 // PowerBackend's Wake mechanism real. This is on()'s half of the gap
