@@ -306,8 +306,13 @@ func (e *Engine) zusbBackend() ZusbChecker {
 // sshRunner returns the SSH runner, creating one when the field is unset (a
 // hand-built Engine). Same nil-safety reasoning as liveness; it stores the
 // fallback rather than returning a throwaway because the runner is stateful
-// (see the ssh field). The sync.Once makes that first store safe against
-// shutdownTogether's goroutines reaching it concurrently.
+// (see the ssh field).
+//
+// The sync.Once is defensive: New always sets ssh, and on()/off() reach this
+// through logWarnings before any goroutine starts, so today the first call is
+// never concurrent. It only makes a concurrent first use on a hand-built Engine
+// safe. It does not make the runner itself thread-safe: its warn hook is still
+// set once per operation, by logWarnings, before any goroutine runs.
 func (e *Engine) sshRunner() *runner {
 	e.sshInit.Do(func() {
 		if e.ssh == nil {
@@ -352,6 +357,8 @@ func (e *Engine) powerHost(name string) (inventory.Host, error) {
 // indent prefixes continuation lines of remote output so it reads as nested
 // under the host it came from. One trailing newline is dropped first, so
 // output ending in the usual '\n' does not leave a dangling indented line.
+// It works on bytes, so invalid UTF-8 is passed through unchanged rather than
+// replaced with U+FFFD.
 func indent(s string) string {
 	return strings.ReplaceAll(strings.TrimSuffix(s, "\n"), "\n", "\n  ")
 }

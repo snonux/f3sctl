@@ -976,9 +976,11 @@ func TestSSHRunnerKeepsAnInjectedRunner(t *testing.T) {
 	}
 }
 
-// TestSSHRunnerFallbackIsCreatedOnceUnderConcurrency covers shutdownTogether's
-// shape: several goroutines reaching the fallback at once must all get the
-// same runner (and, under -race, must not race on storing it).
+// TestSSHRunnerFallbackIsCreatedOnceUnderConcurrency covers the defensive
+// half of sshRunner: no caller in this package reaches it concurrently for the
+// first time today (logWarnings gets there before any goroutine starts), but
+// if something did, on a hand-built Engine, every goroutine must get the same
+// runner and, under -race, must not race on storing it.
 func TestSSHRunnerFallbackIsCreatedOnceUnderConcurrency(t *testing.T) {
 	e := &Engine{cfg: config.Default()}
 
@@ -1082,7 +1084,9 @@ func TestLiveHostsReportsThePowerGroupInInventoryOrder(t *testing.T) {
 // TestIndentNestsContinuationLines pins indent's output, including the edge
 // cases of the original rune-by-rune version it replaced: one trailing newline
 // is dropped (remote output usually ends in one), blank inner lines keep their
-// indent, and nothing but '\n' separates lines.
+// indent, and nothing but '\n' separates lines. One deliberate difference: the
+// old loop decoded runes, so an invalid byte came out as U+FFFD; bytes are now
+// passed through unchanged.
 func TestIndentNestsContinuationLines(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"", ""},
@@ -1096,6 +1100,7 @@ func TestIndentNestsContinuationLines(t *testing.T) {
 		{"\na", "\n  a"},
 		{"a\r\nb", "a\r\n  b"},
 		{"grüße\nüber", "grüße\n  über"},
+		{"a\xffb", "a\xffb"},
 	} {
 		if got := indent(tc.in); got != tc.want {
 			t.Errorf("indent(%q) = %q, want %q", tc.in, got, tc.want)
