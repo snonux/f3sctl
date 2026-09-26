@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/inventory"
 )
@@ -93,6 +94,11 @@ func (sf *Surface) powerResourceRoutes() []contract.Route {
 		{
 			Name: "job", Title: "Current or last power job",
 			Method: http.MethodGet, Path: JobPath,
+			Query: []contract.QueryParam{{
+				Name: coordination.PeerQueryParam,
+				Description: "Set only by the other API node asking for this node's own job; " +
+					"skips the merge with the peer's job. Clients leave it unset.",
+			}},
 			// handleJob renders only state.Job, which snapshot() always reads
 			// regardless of this flag (it is a cheap local disk read).
 			SkipsProbe: true,
@@ -135,6 +141,7 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 			Name: "power-on", Title: "Power on " + hostList(sf.Inv.PowerGroup()),
 			Method: http.MethodPost, Path: "/power/on", Action: true,
 			CLIVerb: "power on", JobActionName: "on",
+			Response: contract.ResponseJob,
 			// Offered only when something is actually off. When the whole
 			// group already answers, waking it again is a no-op that would
 			// still cost the caller a job slot.
@@ -148,6 +155,7 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 			Name: "power-off", Title: "Power off " + hostList(sf.Inv.PowerGroup()),
 			Method: http.MethodPost, Path: "/power/off", Action: true,
 			CLIVerb: "power off", JobActionName: "off",
+			Response: contract.ResponseJob,
 			// Requires SSH, not just ping: the whole shutdown runs over
 			// SSH, so a host that is only mid-boot cannot be shut down and
 			// must not be offered as if it could.
@@ -169,7 +177,8 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 		{
 			Name: "all-on", Title: "Power on every f-host (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/on", Action: true,
-			CLIVerb: "power all on",
+			CLIVerb:  "power all on",
+			Response: contract.ResponseJob,
 			Available: func(s contract.State) bool {
 				up, _, total := sf.everyFHostUp(s)
 				return !JobRunning(s) && up < total
@@ -179,7 +188,8 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 		{
 			Name: "all-off", Title: "Power off every f-host (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/off", Action: true,
-			CLIVerb: "power all off",
+			CLIVerb:  "power all off",
+			Response: contract.ResponseJob,
 			// SSH, not ping, for the same reason as power-off: the whole
 			// shutdown runs over SSH.
 			Available: func(s contract.State) bool {
@@ -191,7 +201,8 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 		{
 			Name: "all-cycle", Title: "Power-cycle every f-host through mains AC (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/cycle", Action: true,
-			CLIVerb: "power all cycle",
+			CLIVerb:  "power all cycle",
+			Response: contract.ResponseJob,
 			// Needs the AC plug readable: the cycle's middle is cutting and
 			// restoring it, and a plug that cannot be read back cannot be
 			// confirmed restored. Host state does not gate it -- hosts that
@@ -221,6 +232,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Name: "fans-on", Title: "Switch the rack fans on",
 			Method: http.MethodPost, Path: "/fans/on", Action: true,
 			CLIVerb: "fans on",
+			Errors:  []contract.ErrorResponse{plugWriteFailed},
 			// Unavailable when the plug cannot be read: without a read-back
 			// there is no way to report truthfully whether it worked.
 			Available: func(s contract.State) bool {
@@ -232,6 +244,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Name: "fans-off", Title: "Switch the rack fans off",
 			Method: http.MethodPost, Path: "/fans/off", Action: true,
 			CLIVerb: "fans off",
+			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.FansErr == nil && s.Fans.On
 			},
@@ -284,6 +297,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Name: "ac-on", Title: "Restore f-host mains AC",
 			Method: http.MethodPost, Path: "/ac/on", Action: true,
 			CLIVerb: "ac on",
+			Errors:  []contract.ErrorResponse{plugWriteFailed},
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil && !s.AC.On
 			},
@@ -293,6 +307,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Name: "ac-off", Title: "Cut f-host mains AC",
 			Method: http.MethodPost, Path: "/ac/off", Action: true,
 			CLIVerb: "ac off",
+			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil && s.AC.On
 			},
@@ -334,7 +349,8 @@ func (sf *Surface) hostRoutes(name string) []contract.Route {
 		{
 			Name: name + "-on", Title: "Power on " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/on", Action: true,
-			CLIVerb: "power " + name + " on",
+			CLIVerb:  "power " + name + " on",
+			Response: contract.ResponseJob,
 			Available: func(s contract.State) bool {
 				h, ok := Host(s, name)
 				return ok && !JobRunning(s) && !h.Ping
@@ -344,7 +360,8 @@ func (sf *Surface) hostRoutes(name string) []contract.Route {
 		{
 			Name: name + "-off", Title: "Power off " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/off", Action: true,
-			CLIVerb: "power " + name + " off",
+			CLIVerb:  "power " + name + " off",
+			Response: contract.ResponseJob,
 			// SSH, not ping: the shutdown runs over SSH, so a host that is
 			// only mid-boot cannot be shut down and must not be offered as if
 			// it could.
@@ -372,4 +389,22 @@ func hostList(hosts []inventory.Host) string {
 		names = append(names, h.Name)
 	}
 	return strings.Join(names, "/")
+}
+
+// plugWriteFailed is the 502 every plug switch answers when the Shelly write,
+// or the read-back that reports its result, fails (setFans, setAC). Declared
+// on the routes for the OpenAPI document; see contract.Route.Errors.
+var plugWriteFailed = contract.ErrorResponse{
+	Status:      http.StatusBadGateway,
+	Description: "the Shelly plug could not be switched or read back",
+}
+
+// unconfirmedCut is the off switches' own 409, on top of serve()'s
+// availability backstop: handleFansOff/handleACOff refuse a cut without
+// force=true while their confirming probe still hears a host, or when a job
+// started during that probe.
+var unconfirmedCut = contract.ErrorResponse{
+	Status: http.StatusConflict,
+	Description: "a power job started during the confirming probe, or hosts may still " +
+		"be running: re-send with force=true to confirm",
 }

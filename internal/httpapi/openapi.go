@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal"
@@ -18,7 +19,11 @@ import (
 // Siren tells a running client what it may do *at this moment*; OpenAPI tells
 // a code generator, a test, or a person what the surface is in general. Both
 // come from the same route registry (registry.go's buildRoutes), so neither
-// can describe an endpoint that does not exist or miss one that does.
+// can describe an endpoint that does not exist or miss one that does. The
+// per-operation detail -- success status (sync 200 or job 202), error
+// statuses, query parameters -- is generated from the same declarations
+// (contract.Route's Response, Errors and Query), and openapi_test.go drives
+// real handlers to pin that what they answer is what is documented.
 // It is the one route not wrapped in a Siren envelope -- an OpenAPI document
 // has its own well-known shape, and burying it inside "properties" would make
 // it useless to every tool that reads OpenAPI. serve() recognises it by path
@@ -82,7 +87,9 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 				"Gogios (alerting -- the mute pair and the alert-report browse), " +
 				"with API covering the entry point itself. Hypermedia (Siren): " +
 				"fetch the root and follow what it offers rather than hard-coding " +
-				"these paths.",
+				"these paths. Every error is a Siren entity of class \"error\"; " +
+				"a path not listed here answers 404, and a method not listed for " +
+				"a path answers 405.",
 		},
 		// The sections: one tag object per contract.Route.Section a route
 		// declares, in the fixed order of the sections table below. This is
@@ -155,6 +162,12 @@ func tagList() []any {
 }
 
 // operationFor renders one route's OpenAPI Operation Object.
+//
+// Everything a reader needs to call the route correctly -- its parameters,
+// its success status, the errors it can answer with -- is generated from the
+// route's own declaration (Response, Query, Errors, Action, Method), never
+// written out per path here. That is what keeps this document from drifting
+// into describing, say, a synchronous plug switch as a 202 job.
 func operationFor(r contract.Route, widest contract.State) map[string]any {
 	op := map[string]any{
 		"operationId": r.Name,
@@ -163,11 +176,11 @@ func operationFor(r contract.Route, widest contract.State) map[string]any {
 		// without one renders untagged (Swagger UI's "default" group) rather
 		// than guessing -- and TestOpenAPICoversEveryRoute fails on it. See
 		// contract.Route.Section.
-		"tags": []any{r.Section},
-		"responses": map[string]any{
-			"200": map[string]any{"description": "Siren entity"},
-			"401": map[string]any{"description": "missing or bad X-API-Key"},
-		},
+		"tags":      []any{r.Section},
+		"responses": responsesFor(r),
+	}
+	if params := parametersFor(r); len(params) > 0 {
+		op["parameters"] = params
 	}
 
 	if r.Action {
@@ -175,9 +188,7 @@ func operationFor(r contract.Route, widest contract.State) map[string]any {
 		// here; it is described in prose so a reader of the static document
 		// is not misled into thinking every action is always callable.
 		op["description"] = "Advertised in the parent entity's actions only when currently available. " +
-			"A 409 means it was attempted when it was not."
-		op["responses"].(map[string]any)["202"] = map[string]any{"description": "accepted; poll the job resource"}
-		op["responses"].(map[string]any)["409"] = map[string]any{"description": "not available now, or another job is running"}
+			"A 409 means it was attempted when it was not. " + completionNote(r.Response)
 
 		if fields := describeFields(r, widest); len(fields) > 0 {
 			op["requestBody"] = map[string]any{
@@ -192,6 +203,100 @@ func operationFor(r contract.Route, widest contract.State) map[string]any {
 	}
 
 	return op
+}
+
+// completionNote says, in prose, how an action of kind k completes -- the
+// half of contract.ResponseKind a status code alone does not convey.
+func completionNote(k contract.ResponseKind) string {
+	if k == contract.ResponseJob {
+		return "Starts a detached power job and answers 202 at once; " +
+			"poll the job resource until its state leaves \"running\"."
+	}
+	return "Performed before the response is written; answers 200 with the updated resource."
+}
+
+// responsesFor renders every status a route can answer with: its one success
+// status (from r.Response), the errors the pipeline adds around every route
+// or every action (pipelineErrors), and the ones its own handler declares
+// (r.Errors). A status declared by both keeps both reasons, joined, since
+// either can produce it.
+func responsesFor(r contract.Route) map[string]any {
+	reasons := map[int]string{}
+	for _, e := range append(pipelineErrors(r), r.Errors...) {
+		if prev, ok := reasons[e.Status]; ok {
+			reasons[e.Status] = prev + "; or " + e.Description
+			continue
+		}
+		reasons[e.Status] = e.Description
+	}
+	reasons[r.Response.Status()] = successDescription(r)
+
+	out := make(map[string]any, len(reasons))
+	for status, desc := range reasons {
+		out[strconv.Itoa(status)] = map[string]any{"description": desc}
+	}
+	return out
+}
+
+// successDescription describes a route's success response body.
+func successDescription(r contract.Route) string {
+	switch {
+	case r.Response == contract.ResponseJob:
+		return "accepted: the started job, as a Siren entity; poll the job resource"
+	case r.Action:
+		return "done: the updated resource, as a Siren entity"
+	default:
+		return "Siren entity"
+	}
+}
+
+// pipelineErrors is every error status that can answer a request for r
+// without r's own handler deciding it: ServeCGI's malformed-body (400, POST
+// only) and server-construction (500) failures, serve()'s auth check (401),
+// its availability backstop for actions (409), and, for a job route, the
+// job manager's refusal or failure to start one. A route's Errors add to
+// these, or add a reason to one of them.
+//
+// 404 and 405 are not here: they answer paths and methods no route declares,
+// so there is no operation to hang them on; the info description says so.
+func pipelineErrors(r contract.Route) []contract.ErrorResponse {
+	job := r.Response == contract.ResponseJob
+	fault := "server fault: this node is misconfigured"
+	if job {
+		fault += ", or the job could not be started"
+	}
+	out := []contract.ErrorResponse{
+		{Status: http.StatusUnauthorized, Description: "missing or bad X-API-Key"},
+		{Status: http.StatusInternalServerError, Description: fault},
+	}
+	if r.Method == http.MethodPost {
+		out = append(out, contract.ErrorResponse{Status: http.StatusBadRequest, Description: "the request body could not be read"})
+	}
+	if r.Action {
+		conflict := "not available now: re-fetch the parent resource and read its actions"
+		if job {
+			conflict += "; or a power job is already running on either API node"
+		}
+		out = append(out, contract.ErrorResponse{Status: http.StatusConflict, Description: conflict})
+	}
+	return out
+}
+
+// parametersFor renders a route's declared query parameters (r.Query) as
+// OpenAPI Parameter Objects. Every parameter is a plain string: the query
+// string carries nothing else.
+func parametersFor(r contract.Route) []any {
+	out := make([]any, 0, len(r.Query))
+	for _, q := range r.Query {
+		out = append(out, map[string]any{
+			"name":        q.Name,
+			"in":          "query",
+			"required":    q.Required,
+			"description": q.Description,
+			"schema":      map[string]any{"type": "string"},
+		})
+	}
+	return out
 }
 
 // describeFields renders a route's parameters for the static document.

@@ -41,3 +41,21 @@ func TestJobActionFallsBackToName(t *testing.T) {
 		t.Errorf("JobAction() = %q, want the declared override", got)
 	}
 }
+
+// TestResponseKindStatus pins the success status each ResponseKind stands
+// for, and that the zero value -- what every route not declaring Response
+// gets -- is the synchronous 200, not the job 202.
+func TestResponseKindStatus(t *testing.T) {
+	for _, tc := range []struct {
+		kind ResponseKind
+		want int
+	}{
+		{kind: ResponseSync, want: 200},
+		{kind: ResponseJob, want: 202},
+		{kind: Route{}.Response, want: 200},
+	} {
+		if got := tc.kind.Status(); got != tc.want {
+			t.Errorf("ResponseKind(%d).Status() = %d, want %d", tc.kind, got, tc.want)
+		}
+	}
+}

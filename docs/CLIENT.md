@@ -772,6 +772,11 @@ groups the operations into sections by tag — **Power** (host wake/shutdown,
 status, jobs), **AC** (rack-fan and f-host mains Shelly plugs), and **Gogios**
 (alerting: the mute pair and the alert-report browse), with **API** covering
 the entry point itself — so a generated reader shows the domains separately.
+Each operation's responses say how it completes — `200` with the updated
+resource for a synchronous action (the plugs, the mute pair, the cache clear),
+`202` with the job entity for a power operation — which error statuses it can
+answer with, and any query parameters it reads (`gogios-check`'s required
+`name`), all generated from the same route declarations.
 It describes what exists in general; the Siren responses describe what is
 possible now. When they seem to disagree, the Siren response is the one to
 act on.

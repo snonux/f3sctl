@@ -73,6 +73,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			Name: "monitoring-unmute", Title: "Resume Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/unmute", Action: true,
 			CLIVerb:    "monitoring unmute",
+			Errors:     []contract.ErrorResponse{gatewayWriteFailed},
 			SkipsProbe: true,
 			Available:  func(s contract.State) bool { return Muted(s) },
 			Handle:     sf.handleUnmute,
@@ -81,6 +82,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			Name: "monitoring-mute", Title: "Suppress Gogios alerting",
 			Method: http.MethodPost, Path: "/monitoring/mute", Action: true,
 			CLIVerb:    "monitoring mute",
+			Errors:     []contract.ErrorResponse{gatewayWriteFailed},
 			SkipsProbe: true,
 			// Not !Muted: a partial mute leaves a gateway alerting (or
 			// unknown), and the mute is what finishes it -- so both
@@ -138,6 +140,14 @@ func (sf *Surface) reportRoutes() []contract.Route {
 		contract.Route{
 			Name: "gogios-check", Title: "One Gogios check's detail",
 			Method: http.MethodGet, Path: "/gogios/check",
+			Query: []contract.QueryParam{{
+				Name: "name", Required: true,
+				Description: "The check's exact name, as in its entity's \"name\" property.",
+			}},
+			Errors: []contract.ErrorResponse{
+				{Status: http.StatusNotFound, Description: "no check has that name"},
+				{Status: http.StatusBadGateway, Description: "the Gogios report could not be fetched"},
+			},
 			// Not linked from root: its href is meaningless without ?name=,
 			// which Router.Links() has no way to fill in. A client reaches it
 			// through each check entity's own self link instead (see
@@ -151,6 +161,9 @@ func (sf *Surface) reportRoutes() []contract.Route {
 			Name: "gogios-cache-clear", Title: "Clear the cached Gogios report",
 			Method: http.MethodPost, Path: "/gogios/cache/clear", Action: true,
 			CLIVerb: "gogios cache clear",
+			Errors: []contract.ErrorResponse{{
+				Status: http.StatusInternalServerError, Description: "the on-disk report cache could not be cleared",
+			}},
 			// Always advertised: unlike the power/fan/monitoring actions, there
 			// is no state in which clearing the cache would fail to make sense.
 			SkipsProbe: true,
@@ -158,4 +171,12 @@ func (sf *Surface) reportRoutes() []contract.Route {
 		},
 	)
 	return out
+}
+
+// gatewayWriteFailed is the 502 the mute pair answers when changing the
+// marker on the gateways fails (setMute). Declared on the routes for the
+// OpenAPI document; see contract.Route.Errors.
+var gatewayWriteFailed = contract.ErrorResponse{
+	Status:      http.StatusBadGateway,
+	Description: "the mute marker could not be changed on the gateways",
 }
