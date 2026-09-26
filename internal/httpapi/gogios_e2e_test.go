@@ -48,12 +48,17 @@ import (
 // only exercise with Go literals: a CRITICAL in "unhandled" and ANOTHER
 // CRITICAL in "stale" (so /gogios/critical must return both), a WARNING, and
 // one OK. The stale CRITICAL's name carries both a space and a dot, so it
-// doubles as the "detail by name" fixture (scope item 3).
+// doubles as the "detail by name" fixture (scope item 3). The unhandled
+// CRITICAL just changed, so -- as Gogios writes it -- it is also listed in
+// "statusChanged"; the drill-down must still name it only once.
 const gogiosE2EReportJSON = `{
   "subject": "GOGIOS Report [C:2 W:1 U:0 S:1 SU:0 OK:1]",
   "lastUpdated": "2026-08-27T08:58:18+02:00",
   "summary": {"critical":2,"warning":1,"unknown":0,"stale":1,"suppressed":0,"ok":1},
   "sections": {
+    "statusChanged": [
+      {"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","prevStatus":"OK","output":"timed out","epoch":1724744298}
+    ],
     "unhandled": [
       {"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","output":"timed out","epoch":1724744298},
       {"name":"Check HTTP IPv4 foo.zone","status":"WARNING","output":"slow response","epoch":1724744299}
@@ -267,7 +272,8 @@ func TestGogiosE2EOverview(t *testing.T) {
 // TestGogiosE2ECriticalDrillDownUnionsAcrossSections pins scope item 2: a
 // CRITICAL check that is unhandled and a different CRITICAL check that is
 // stale both appear under /gogios/critical, in the same order
-// Report.ByStatus unions its sections (Unhandled before Stale).
+// Report.ByStatus unions its sections (Unhandled before Stale) -- and the
+// unhandled one, although also listed in statusChanged, appears only once.
 func TestGogiosE2ECriticalDrillDownUnionsAcrossSections(t *testing.T) {
 	upstream, _ := gogiosE2EUpstream(t, gogiosE2EReportJSON, http.StatusOK)
 	e2e, cfg, apiKey := gogiosE2EServer(t, upstream)
@@ -295,6 +301,9 @@ func TestGogiosE2ECriticalDrillDownUnionsAcrossSections(t *testing.T) {
 		if got, _ := e.Properties["status"].(string); got != "CRITICAL" {
 			t.Errorf("critical[%d].status = %q, want CRITICAL", i, got)
 		}
+	}
+	if got, _ := critical.Entities[0].Properties["prevStatus"].(string); got != "OK" {
+		t.Errorf("critical[0].prevStatus = %q, want OK (carried over from statusChanged)", got)
 	}
 }
 

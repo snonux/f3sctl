@@ -22,13 +22,19 @@ import (
 
 // reportJSON is a small, representative Gogios report: one CRITICAL (unhandled),
 // one stale WARNING, and two OKs, plus an unknown JSON key (defensive parsing).
+// The CRITICAL and one OK changed since the last notification, so -- exactly as
+// Gogios writes it -- each is listed twice: once in statusChanged (with
+// prevStatus) and once in its lifecycle section (without).
 const reportJSON = `{
   "lastUpdated": "2026-08-27T08:58:18+02:00",
   "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:0 OK:2]",
   "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":0,"ok":2},
   "futureField": "ignore me",
   "sections": {
-    "statusChanged": [],
+    "statusChanged": [
+      {"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","prevStatus":"OK","output":"timed out","epoch":1724744298},
+      {"name":"Check HTTP IPv4 foo.zone","status":"OK","prevStatus":"WARNING","output":"HTTP OK","epoch":1724744301}
+    ],
     "unhandled": [
       {"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","output":"timed out","epoch":1724744298}
     ],
@@ -729,6 +735,66 @@ func TestCheckByNameFindsAcrossSections(t *testing.T) {
 	}
 	if _, ok := r.Check("no such check"); ok {
 		t.Error("Check(unknown) found, want not found")
+	}
+}
+
+// TestByStatusListsStatusChangedChecksOnce pins the regression: Gogios lists a
+// changed check in statusChanged AND in its lifecycle section, so a union of
+// every section showed it twice (summary critical=1, drill-down 2 entries).
+// Each severity's drill-down must match the summary count, name each check
+// once, and still carry the changed check's PrevStatus.
+func TestByStatusListsStatusChangedChecksOnce(t *testing.T) {
+	r, err := parse([]byte(reportJSON))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(r.Sections.StatusChanged) == 0 {
+		t.Fatal("fixture has no statusChanged checks; the regression is not exercised")
+	}
+
+	by := r.ByStatus()
+	for status, want := range map[string]int{
+		"CRITICAL": r.Summary.Critical,
+		"WARNING":  r.Summary.Warning,
+		"UNKNOWN":  r.Summary.Unknown,
+		"OK":       r.Summary.Ok,
+	} {
+		if got := len(by[status]); got != want {
+			t.Errorf("%s = %d checks, want %d (the summary count): %+v", status, got, want, by[status])
+		}
+		seen := map[string]bool{}
+		for _, c := range by[status] {
+			if seen[c.Name] {
+				t.Errorf("%s lists %q more than once", status, c.Name)
+			}
+			seen[c.Name] = true
+		}
+	}
+
+	if got := by["CRITICAL"]; len(got) == 1 && got[0].PrevStatus != "OK" {
+		t.Errorf("CRITICAL[0].PrevStatus = %q, want OK (from statusChanged)", got[0].PrevStatus)
+	}
+	if r.Sections.Unhandled[0].PrevStatus != "" {
+		t.Errorf("ByStatus mutated the report: Unhandled[0].PrevStatus = %q", r.Sections.Unhandled[0].PrevStatus)
+	}
+}
+
+// TestCheckCarriesPrevStatusFromStatusChanged pins that the detail lookup
+// returns the lifecycle entry enriched with the statusChanged PrevStatus, and
+// that an unchanged check gets none.
+func TestCheckCarriesPrevStatusFromStatusChanged(t *testing.T) {
+	r, err := parse([]byte(reportJSON))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	got, ok := r.Check("Check HTTP IPv4 foo.zone")
+	if !ok || got.Status != "OK" || got.PrevStatus != "WARNING" {
+		t.Errorf("Check(changed OK) = %+v ok=%v, want status OK, prevStatus WARNING", got, ok)
+	}
+	got, ok = r.Check("Check Ping4 master.buetow.org")
+	if !ok || got.PrevStatus != "" {
+		t.Errorf("Check(unchanged OK) = %+v ok=%v, want no prevStatus", got, ok)
 	}
 }
 

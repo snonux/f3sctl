@@ -924,13 +924,15 @@ func TestParseGogiosArgsValidatesSpellings(t *testing.T) {
 // tests below: one unhandled CRITICAL, one stale WARNING (lifecycle stale,
 // severity WARNING), one suppressed UNKNOWN (lifecycle suppressed, severity
 // UNKNOWN -- the other lifecycle-vs-severity case gogiosChecksForStatus'
-// split exists for), and one OK. Mirrors the shape
+// split exists for), and one OK. The CRITICAL just changed, so -- as Gogios
+// writes it -- it is also listed in "statusChanged". Mirrors the shape
 // internal/gogios/gogios_test.go's own fixture documents.
 const gogiosReportJSON = `{
   "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:1 OK:1]",
   "lastUpdated": "2026-08-27T08:58:18+02:00",
   "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":1,"ok":1},
   "sections": {
+    "statusChanged": [{"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","prevStatus":"OK","output":"timed out","epoch":1}],
     "unhandled": [{"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","output":"timed out","epoch":1}],
     "stale": [{"name":"Check SWAP blowfish","status":"WARNING","output":"SWAP WARNING","epoch":2,"lastCheckedAgeSeconds":99999}],
     "suppressed": [{"name":"Check Disk fishfinger","status":"UNKNOWN","output":"no data","epoch":3}],
@@ -1015,6 +1017,23 @@ func TestGogiosLocalDrillsDownByCategory(t *testing.T) {
 	}
 }
 
+// TestGogiosLocalCriticalListsAChangedCheckOnce pins the local-path half of
+// the statusChanged regression: the CRITICAL in the fixture is listed in both
+// statusChanged and unhandled, and "gogios critical" must print it once,
+// matching summary.critical=1.
+func TestGogiosLocalCriticalListsAChangedCheckOnce(t *testing.T) {
+	srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+
+	out, _, err := runCLI(t, cfg, hostsUp(), "--local", "gogios", "critical")
+	if err != nil {
+		t.Fatalf("--local gogios critical: %v", err)
+	}
+	if n := strings.Count(out, "Check Ping6 r1.wg0.wan.buetow.org"); n != 1 {
+		t.Errorf("output lists the changed CRITICAL %d times, want 1:\n%s", n, out)
+	}
+}
+
 // TestGogiosLocalShowsOneChecksDetail pins the "detail <name>" verb,
 // including a name containing spaces reconstructed from multiple argv words.
 func TestGogiosLocalShowsOneChecksDetail(t *testing.T) {
@@ -1027,6 +1046,9 @@ func TestGogiosLocalShowsOneChecksDetail(t *testing.T) {
 	}
 	if !strings.Contains(out, "name:   Check Ping6 r1.wg0.wan.buetow.org") || !strings.Contains(out, "status: CRITICAL") {
 		t.Errorf("output = %q, want the check's detail", out)
+	}
+	if !strings.Contains(out, "prev:   OK") {
+		t.Errorf("output = %q, want the prevStatus carried over from statusChanged", out)
 	}
 }
 

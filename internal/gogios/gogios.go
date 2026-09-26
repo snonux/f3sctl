@@ -73,8 +73,10 @@ type Summary struct {
 // Sections mirrors the report's grouped sections. Every slice is a list of
 // checks; a non-OK check lives in exactly one of Unhandled, Stale or
 // Suppressed, and an OK check lives in Ok. StatusChanged is the transient
-// "changed since the last notification" view. ByStatus rebuilds a flat
-// per-status index from the union of these.
+// "changed since the last notification" view: a second copy (with
+// PrevStatus) of checks already listed in Unhandled or Ok, not a section of
+// its own. ByStatus rebuilds a flat per-status index from the lifecycle
+// sections only.
 type Sections struct {
 	StatusChanged []Check `json:"statusChanged"`
 	Unhandled     []Check `json:"unhandled"`
@@ -144,43 +146,72 @@ func ClearCache(cfg config.Config) error {
 
 // ByStatus indexes the report into a per-status map for drill-down: every
 // check, grouped by its Status (CRITICAL/WARNING/UNKNOWN/OK as Gogios spells
-// them), from the union of all sections. A "show me every CRITICAL" view is
-// the union of CRITICALs across Unhandled, Stale and Suppressed -- Gogios
-// groups by lifecycle, the caller wants them grouped by status, so this
-// re-indexes.
+// them), from the union of the lifecycle sections. A "show me every CRITICAL"
+// view is the union of CRITICALs across Unhandled, Stale and Suppressed --
+// Gogios groups by lifecycle, the caller wants them grouped by status, so
+// this re-indexes. Each check appears once: StatusChanged is not unioned in
+// (see lifecycleSections), only its PrevStatus is carried over.
 func (r *Report) ByStatus() map[string][]Check {
+	prev := r.prevStatuses()
 	out := map[string][]Check{}
-	for _, cs := range [][]Check{
-		r.Sections.StatusChanged,
-		r.Sections.Unhandled,
-		r.Sections.Stale,
-		r.Sections.Suppressed,
-		r.Sections.Ok,
-	} {
+	for _, cs := range r.lifecycleSections() {
 		for _, c := range cs {
+			c = withPrevStatus(c, prev)
 			out[c.Status] = append(out[c.Status], c)
 		}
 	}
 	return out
 }
 
-// Check finds one check by name across the whole report. ok is false when no
-// check has that name. Names are unique across the report.
+// Check finds one check by name across the lifecycle sections, with its
+// PrevStatus filled in when it changed since the last notification. ok is
+// false when no check has that name. Names are unique across the lifecycle
+// sections.
 func (r *Report) Check(name string) (Check, bool) {
-	for _, cs := range [][]Check{
-		r.Sections.StatusChanged,
-		r.Sections.Unhandled,
-		r.Sections.Stale,
-		r.Sections.Suppressed,
-		r.Sections.Ok,
-	} {
+	for _, cs := range r.lifecycleSections() {
 		for _, c := range cs {
 			if c.Name == name {
-				return c, true
+				return withPrevStatus(c, r.prevStatuses()), true
 			}
 		}
 	}
 	return Check{}, false
+}
+
+// lifecycleSections returns the sections that partition the report: every
+// check lives in exactly one of them. StatusChanged is deliberately absent --
+// Gogios writes a changed check into StatusChanged AND into its lifecycle
+// section (Unhandled or Ok; a stale or suppressed check is never listed as
+// changed), so unioning it in would list every changed check twice.
+func (r *Report) lifecycleSections() [][]Check {
+	return [][]Check{
+		r.Sections.Unhandled,
+		r.Sections.Stale,
+		r.Sections.Suppressed,
+		r.Sections.Ok,
+	}
+}
+
+// prevStatuses maps each StatusChanged check's name to its PrevStatus. Only
+// the StatusChanged copy of a changed check carries PrevStatus; its lifecycle
+// twin omits it.
+func (r *Report) prevStatuses() map[string]string {
+	prev := make(map[string]string, len(r.Sections.StatusChanged))
+	for _, c := range r.Sections.StatusChanged {
+		if c.PrevStatus != "" {
+			prev[c.Name] = c.PrevStatus
+		}
+	}
+	return prev
+}
+
+// withPrevStatus returns c with PrevStatus taken from prev when c does not
+// carry one itself. c is a copy, so the report's own sections are untouched.
+func withPrevStatus(c Check, prev map[string]string) Check {
+	if c.PrevStatus == "" {
+		c.PrevStatus = prev[c.Name]
+	}
+	return c
 }
 
 // fetch HTTP-GETs the report at cfg.GogiosURL, bounded by cfg.GogiosFetchTimeout

@@ -45,13 +45,20 @@ func testSurface() *Surface {
 // gogiosSample is a small, representative Gogios report for handler tests:
 // one unhandled CRITICAL, one stale WARNING (its lifecycle is stale, but its
 // own severity stays WARNING), one suppressed UNKNOWN, and two OK checks.
-// Mirrors the shape internal/gogios/gogios_test.go's own fixture describes.
+// The CRITICAL and one OK changed since the last notification, so -- exactly
+// as Gogios writes it -- each is also listed in StatusChanged with its
+// PrevStatus. Mirrors the shape internal/gogios/gogios_test.go's own fixture
+// describes.
 func gogiosSample() *gogios.Report {
 	return &gogios.Report{
 		LastUpdated: "2026-08-27T08:58:18+02:00",
 		Subject:     "GOGIOS Report [C:1 W:1 U:1 S:1 SU:1 OK:2]",
 		Summary:     gogios.Summary{Critical: 1, Warning: 1, Unknown: 1, Stale: 1, Suppressed: 1, Ok: 2},
 		Sections: gogios.Sections{
+			StatusChanged: []gogios.Check{
+				{Name: "Check Ping6 r1.wg0.wan.buetow.org", Status: "CRITICAL", PrevStatus: "OK", Output: "timed out", Epoch: 1},
+				{Name: "Check HTTP IPv4 foo.zone", Status: "OK", PrevStatus: "WARNING", Output: "HTTP OK", Epoch: 5},
+			},
 			Unhandled: []gogios.Check{
 				{Name: "Check Ping6 r1.wg0.wan.buetow.org", Status: "CRITICAL", Output: "timed out", Epoch: 1},
 			},
@@ -127,7 +134,8 @@ func TestHandleGogiosReportsAFetchErrorAsAProperty(t *testing.T) {
 
 // TestHandleGogiosStatusFiltersBySeverity pins the four severity categories:
 // each is the union, across every lifecycle section, of checks with that
-// Status -- see checksForStatus.
+// Status -- see checksForStatus. A check also listed in StatusChanged must
+// appear once, not twice.
 func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 	sf := testSurface()
 	state := contract.State{Gogios: gogiosSample()}
@@ -157,6 +165,27 @@ func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 				t.Errorf("%s checks = %v, want %v", tc.status, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHandleGogiosCriticalListsAChangedCheckOnce pins the /gogios/critical
+// regression: a CRITICAL listed in both StatusChanged and Unhandled is one
+// entity (matching summary.critical), and it keeps the PrevStatus only the
+// StatusChanged copy carries.
+func TestHandleGogiosCriticalListsAChangedCheckOnce(t *testing.T) {
+	sf := testSurface()
+	state := contract.State{Gogios: gogiosSample()}
+
+	e, _, err := sf.statusHandle("critical")(context.Background(), state, contract.Request{})
+	if err != nil {
+		t.Fatalf("statusHandle(critical): %v", err)
+	}
+	if len(e.Entities) != state.Gogios.Summary.Critical {
+		t.Fatalf("critical entities = %d, want %d (summary.critical): %+v",
+			len(e.Entities), state.Gogios.Summary.Critical, e.Entities)
+	}
+	if got := e.Entities[0].Properties["prevStatus"]; got != "OK" {
+		t.Errorf("critical[0].prevStatus = %v, want OK", got)
 	}
 }
 
