@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
 	"syscall"
@@ -45,6 +46,27 @@ func waitForNotice(t *testing.T, notice *lockedBuffer) {
 	}
 }
 
+// skipIfIgnored skips a test that needs sig caught when the test binary was
+// started with it ignored (`nohup go test`, a `trap "" INT` shell):
+// signalContext rightly leaves such a signal alone, so there is nothing to
+// catch, and raising it would test nothing.
+func skipIfIgnored(t *testing.T, sig syscall.Signal) {
+	t.Helper()
+	if signal.Ignored(sig) {
+		t.Skipf("%v was ignored when the test started; signalContext does not catch it", sig)
+	}
+}
+
+// awaitCancel waits, boundedly, for ctx to be cancelled by sig.
+func awaitCancel(t *testing.T, ctx context.Context, sig syscall.Signal) {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatalf("context not cancelled by %v", sig)
+	}
+}
+
 // raise sends sig to this test process.
 func raise(t *testing.T, sig syscall.Signal) {
 	t.Helper()
@@ -62,16 +84,13 @@ func raise(t *testing.T, sig syscall.Signal) {
 func TestSignalContextCancelsOnSignal(t *testing.T) {
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
 		t.Run(sig.String(), func(t *testing.T) {
+			skipIfIgnored(t, sig)
 			var notice lockedBuffer
 			ctx, stop := signalContext(&notice)
 			defer stop()
 
 			raise(t, sig)
-			select {
-			case <-ctx.Done():
-			case <-time.After(5 * time.Second):
-				t.Fatalf("context not cancelled by %v", sig)
-			}
+			awaitCancel(t, ctx, sig)
 			if !errors.Is(ctx.Err(), context.Canceled) {
 				t.Errorf("ctx.Err() = %v, want context.Canceled", ctx.Err())
 			}
@@ -84,12 +103,13 @@ func TestSignalContextCancelsOnSignal(t *testing.T) {
 // kills the process nor repeats the notice: the run is already winding down,
 // and the restore it may be doing must be allowed to finish.
 func TestSignalContextAbsorbsLaterSignals(t *testing.T) {
+	skipIfIgnored(t, syscall.SIGINT)
 	var notice lockedBuffer
 	ctx, stop := signalContext(&notice)
 	defer stop()
 
 	raise(t, syscall.SIGINT)
-	<-ctx.Done()
+	awaitCancel(t, ctx, syscall.SIGINT)
 	waitForNotice(t, &notice)
 	raise(t, syscall.SIGINT)
 	time.Sleep(100 * time.Millisecond)

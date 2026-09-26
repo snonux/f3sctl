@@ -88,8 +88,8 @@ func withSignals(fn func(ctx context.Context) error) error {
 }
 
 // signalContext returns a context cancelled by the first SIGINT, SIGTERM or
-// SIGHUP, and a stop function that restores default signal behaviour.
-// A signal that was already ignored at startup stays ignored: see
+// SIGHUP, and a stop function that restores default signal behaviour. A
+// SIGHUP or SIGINT the process was started with ignored stays ignored: see
 // terminationSignals.
 //
 // Catching them, rather than leaving the default action to kill the process,
@@ -99,26 +99,32 @@ func withSignals(fn func(ctx context.Context) error) error {
 // one state nothing remote can wake it from. SIGHUP is here because an SSH
 // session dropping mid-run sends it.
 //
-// The first signal prints a notice to notice and cancels; every later one is
-// ignored until stop, so an impatient second Ctrl-C cannot kill the restore.
+// The first signal cancels and then prints a notice to notice; every later
+// one is ignored until stop, so an impatient second Ctrl-C cannot kill the
+// restore.
 //
 // SIGPIPE is caught and discarded rather than cancelling anything: with it
 // caught, a write to a closed stdout/stderr (the `| tee` a Ctrl-C also
 // killed) fails with EPIPE instead of killing the process, and a lost log
 // reader is no reason to abandon a shutdown. It is caught rather than
 // signal.Ignore'd because an ignored disposition is inherited by the ssh(1)
-// and ping(8) children, a caught one is reset to default for them.
+// and ping(8) children, a caught one is reset to default for them. It has a
+// channel of its own because os/signal drops a signal when the channel is
+// full: sharing the one-slot channel, a burst of broken-pipe writes could
+// crowd out the Ctrl-C that follows.
 func signalContext(notice io.Writer) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, terminationSignals()...)
+	pipes := make(chan os.Signal, 1)
+	signal.Notify(pipes, syscall.SIGPIPE)
 	done := make(chan struct{})
 
 	go func() {
 		for {
 			select {
 			case sig := <-sigs:
-				if sig == syscall.SIGPIPE || ctx.Err() != nil {
+				if ctx.Err() != nil {
 					continue
 				}
 				// Cancel first: a blocked notice writer (a stalled
@@ -126,6 +132,8 @@ func signalContext(notice io.Writer) (context.Context, func()) {
 				cancel()
 				fmt.Fprintf(notice, "f3sctl: %v received, winding down (an interrupted "+
 					"power cycle restores f-host AC first); please wait...\n", sig)
+			case <-pipes:
+				// Discarded: catching it is the whole point.
 			case <-done:
 				return
 			}
@@ -134,23 +142,25 @@ func signalContext(notice io.Writer) (context.Context, func()) {
 
 	return ctx, func() {
 		signal.Stop(sigs)
+		signal.Stop(pipes)
 		close(done)
 		cancel()
 	}
 }
 
-// terminationSignals is the list signalContext catches: SIGINT, SIGTERM,
-// SIGHUP and SIGPIPE, minus any the process was started with ignored.
+// terminationSignals is the list signalContext cancels on: SIGTERM always,
+// SIGINT and SIGHUP unless the process was started with them ignored.
 //
-// signal.Notify would un-ignore them, and an ignored disposition is a choice
-// the caller made: `nohup f3sctl power all cycle` ignores SIGHUP, and a shell
-// running it in the background with `&` (no job control) ignores SIGINT.
-// Catching those anyway would let the very hang-up or Ctrl-C the caller opted
-// out of cancel the run. A SIGPIPE ignored at startup needs no catching
-// either: writes to a closed pipe already fail with EPIPE.
+// Those two are the only ones an inherited SIG_IGN survives for -- the Go
+// runtime keeps it for SIGHUP and SIGINT and installs its own handler for
+// the rest -- and signal.Notify would un-ignore them. An ignored one is a
+// choice the caller made: `nohup f3sctl power all cycle` ignores SIGHUP, and
+// a shell running it in the background with `&` (no job control) ignores
+// SIGINT. Catching those anyway would let the very hang-up or Ctrl-C the
+// caller opted out of cancel the run.
 func terminationSignals() []os.Signal {
-	var sigs []os.Signal
-	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE} {
+	sigs := []os.Signal{syscall.SIGTERM}
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGHUP} {
 		if !signal.Ignored(sig) {
 			sigs = append(sigs, sig)
 		}

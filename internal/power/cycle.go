@@ -99,7 +99,7 @@ func (e *Engine) cycleAC(ctx context.Context, log io.Writer) error {
 	fmt.Fprintf(log, "AC is off; waiting %s before restoring it...\n", e.acDwell())
 	dwellErr := sleepCtx(ctx, e.acDwell())
 	if err := e.restoreAC(ctx, log); err != nil {
-		return err
+		return e.restoreACAfter(err)
 	}
 	if dwellErr != nil {
 		return cycleInterrupted(dwellErr)
@@ -126,7 +126,7 @@ func (e *Engine) cutAC(ctx context.Context, log io.Writer) error {
 		return nil
 	}
 	if rerr := e.restoreAC(ctx, log); rerr != nil {
-		return fmt.Errorf("cutting f-host AC failed: %w; and then: %w", err, rerr)
+		return e.acStateUnknown(ctx, err, rerr)
 	}
 	return fmt.Errorf("cutting f-host AC failed, AC switched back on and the hosts left "+
 		"powered off: %w. Wake them with `f3sctl power all on`", err)
@@ -138,10 +138,14 @@ func (e *Engine) cutAC(ctx context.Context, log io.Writer) error {
 // The Set goes out before anything is logged. After an interrupt the log's
 // reader may be gone (a Ctrl-C that also killed a `| tee`), and nothing may
 // stand between a run being torn down and mains coming back.
+//
+// It returns the plug's error as is: what that failure means for the rack
+// depends on whether the cut before it is known to have worked, which only
+// the caller knows.
 func (e *Engine) restoreAC(ctx context.Context, log io.Writer) error {
 	_, err := e.acBackend().Set(context.WithoutCancel(ctx), true)
 	if err != nil {
-		return e.restoreACAfter(err)
+		return err
 	}
 	e.reporter().Step("f-host mains AC restored")
 	fmt.Fprintln(log, "Restored f-host mains AC.")
@@ -163,6 +167,25 @@ func cycleInterrupted(err error) error {
 func (e *Engine) restoreACAfter(err error) error {
 	return fmt.Errorf("f-host AC is still OFF, the hosts cannot be woken: %w. "+
 		"Restore it with `f3sctl ac on`, then `f3sctl power all on`", err)
+}
+
+// acStateUnknown is the error for a cut that failed followed by a restore
+// that failed too. Unlike restoreACAfter, nothing here shows AC is off: both
+// usually fail for one reason -- the plug unreachable, the password wrong --
+// in which case it never switched at all. So the plug is asked once more (on
+// a detached context, like the switches), and the error says what it
+// answered, or that its state is unknown, rather than claiming either.
+func (e *Engine) acStateUnknown(ctx context.Context, cutErr, restoreErr error) error {
+	state := "unknown (it may be OFF, and then the hosts cannot be woken)"
+	if st, err := e.acBackend().Status(context.WithoutCancel(ctx)); err == nil {
+		state = "reported ON"
+		if !st.On {
+			state = "reported OFF, the hosts cannot be woken"
+		}
+	}
+	return fmt.Errorf("cutting f-host AC failed: %w; switching it back on failed too: %w. "+
+		"f-host AC is %s: check with `f3sctl ac status`, restore it with `f3sctl ac on` "+
+		"if needed, then `f3sctl power all on`", cutErr, restoreErr, state)
 }
 
 // acDwell and acSettle are the cycle's two waits, falling back to their

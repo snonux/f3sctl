@@ -28,13 +28,14 @@ type fakeAC struct {
 	state     bool
 	setErr    map[bool]error
 	switchErr map[bool]error
+	statusErr error
 	onSet     func(on bool)
 }
 
 func (a *fakeAC) Status(context.Context) (ACState, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return ACState{On: a.state}, nil
+	return ACState{On: a.state}, a.statusErr
 }
 
 func (a *fakeAC) Set(ctx context.Context, on bool) (ACState, error) {
@@ -226,7 +227,11 @@ func cancelOnCut(cancel context.CancelFunc) func(bool) {
 func assertACBackWithoutWake(t *testing.T, rig *cycleRig) {
 	t.Helper()
 	steps := rig.seq.get()
-	if !rig.ac.state || indexOf(steps, "ac:true") < indexOf(steps, "ac:false") {
+	acOff := indexOf(steps, "ac:false")
+	if acOff < 0 {
+		t.Errorf("AC was never cut: %v", steps)
+	}
+	if !rig.ac.state || indexOf(steps, "ac:true") < acOff {
 		t.Errorf("AC not switched back on after the cut: %v", steps)
 	}
 	for _, s := range steps {
@@ -269,28 +274,50 @@ func TestCycleAllRestoresACWhenTheCutFails(t *testing.T) {
 }
 
 // TestCycleAllReportsACutAndRestoreFailure covers the worst branch of
-// cutAC: the cut fails (the relay having switched anyway) and the restore
-// that follows fails too. The error must say AC is still off, name the fix,
-// and keep both causes reachable with errors.Is.
+// cutAC: the cut fails and the restore that follows fails too. Nothing then
+// proves AC is off -- usually both fail because the plug is unreachable --
+// so the error must report what the plug says, or that its state is
+// unknown, name `f3sctl ac status` before `f3sctl ac on`, and keep both
+// causes reachable with errors.Is.
 func TestCycleAllReportsACutAndRestoreFailure(t *testing.T) {
-	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
-	cutErr := errors.New("read-back timed out")
-	restoreErr := errors.New("plug unreachable")
-	rig.ac.switchErr = map[bool]error{false: cutErr}
-	rig.ac.setErr = map[bool]error{true: restoreErr}
+	cases := []struct {
+		name      string
+		statusErr error
+		want      string
+	}{
+		{"plug unreachable", errors.New("no route to host"), "f-host AC is unknown"},
+		// The relay did switch before the cut's read-back failed.
+		{"plug answers", nil, "f-host AC is reported OFF"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newCycleRig(t, "f0", "f1", "f2", "f3")
+			cutErr := errors.New("read-back timed out")
+			restoreErr := errors.New("plug unreachable")
+			rig.ac.switchErr = map[bool]error{false: cutErr}
+			rig.ac.setErr = map[bool]error{true: restoreErr}
+			rig.ac.statusErr = tc.statusErr
 
-	err := rig.eng.CycleAll(context.Background(), &rig.log)
-	if err == nil || !strings.Contains(err.Error(), "AC is still OFF") ||
-		!strings.Contains(err.Error(), "f3sctl ac on") {
-		t.Fatalf("err = %v, want a loud AC-still-off error naming `f3sctl ac on`", err)
-	}
-	if !errors.Is(err, cutErr) || !errors.Is(err, restoreErr) {
-		t.Errorf("err = %v, want both the cut and the restore failure wrapped", err)
-	}
-	for _, s := range rig.seq.get() {
-		if strings.HasPrefix(s, "wake:") {
-			t.Errorf("woke a host with AC off: %v", rig.seq.get())
-		}
+			err := rig.eng.CycleAll(context.Background(), &rig.log)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to say %q", err, tc.want)
+			}
+			msg := err.Error()
+			if i, j := strings.Index(msg, "f3sctl ac status"), strings.Index(msg, "f3sctl ac on"); i < 0 || j < i {
+				t.Errorf("err = %v, want `f3sctl ac status` named before `f3sctl ac on`", err)
+			}
+			if strings.Contains(msg, "still OFF") {
+				t.Errorf("err = %v, must not claim AC is still off", err)
+			}
+			if !errors.Is(err, cutErr) || !errors.Is(err, restoreErr) {
+				t.Errorf("err = %v, want both the cut and the restore failure wrapped", err)
+			}
+			for _, s := range rig.seq.get() {
+				if strings.HasPrefix(s, "wake:") {
+					t.Errorf("woke a host with AC in doubt: %v", rig.seq.get())
+				}
+			}
+		})
 	}
 }
 
