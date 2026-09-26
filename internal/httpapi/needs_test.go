@@ -113,16 +113,13 @@ func (needsJobs) Read() *coordination.Job     { return nil }
 
 // needsServer is a Server whose every collaborator a handler can reach is a
 // fake -- the plug engine, the gateway mute, an empty peer set, a job starter
-// that spawns nothing, a report cache in a temp dir, an unreachable Gogios
-// URL -- so every route's Handle can be called directly, side effects
-// included, without touching the network, a real gateway or a real job.
+// that spawns nothing, a report source with no report -- so every route's
+// Handle can be called directly, side effects included, without touching the
+// network, a real gateway or a real job.
 func needsServer(t *testing.T) *Server {
 	t.Helper()
 
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
-	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
-	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	jobs := coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0)
 	peers := coordination.NewPeerSet(nil, "")
 	gw := &gatewayRecorder{gws: []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}}
@@ -133,7 +130,7 @@ func needsServer(t *testing.T) *Server {
 		return powerapi.New("test", href, inv, &plugRecorder{}, needsJobs{}, peers, a)
 	}
 	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, cfg, gw, a)
+		return gogiosapi.New("test", href, unreachableReports(), gw, a)
 	}
 	return (&Server{
 		cfg: cfg, jobs: jobs, peers: peers, siren: NewSirenRenderer(), node: "test",
@@ -277,13 +274,13 @@ func TestNeedsGuardSeesEachNeed(t *testing.T) {
 // fakes standing in for the machines they would reach.
 type fetchCounts struct {
 	peer, mute int32
-	report     *int32 // the fake Gogios upstream's own hit counter
+	reports    *fakeReports // the report source, counting its own fetches
 }
 
 // counts is fc's totals so far: peer job fetches, gateway mute reads, and
-// Gogios upstream fetches.
+// Gogios report fetches.
 func (fc *fetchCounts) counts() [3]int32 {
-	return [3]int32{atomic.LoadInt32(&fc.peer), atomic.LoadInt32(&fc.mute), atomic.LoadInt32(fc.report)}
+	return [3]int32{atomic.LoadInt32(&fc.peer), atomic.LoadInt32(&fc.mute), fc.reports.fetches.Load()}
 }
 
 // countingMonitor is a gatewayRecorder that counts its gateway reads into
@@ -299,12 +296,12 @@ func (m *countingMonitor) MonitoringStatus(ctx context.Context) []gogios.Gateway
 	return m.gatewayRecorder.MonitoringStatus(ctx)
 }
 
-// fetchCountingServer serves the real pipeline against a fake peer node and a
-// fake Gogios upstream over real HTTP, and a counting gateway mute read -- so
+// fetchCountingServer serves the real pipeline against a fake peer node over
+// real HTTP, a counting report source and a counting gateway mute read -- so
 // a test can tell exactly which round trips one request paid for, including
 // the ones a handler makes itself (the /job and /status peer merge, the cache
-// clear's re-fetch). The report cache starts empty, so a report read is an
-// upstream hit.
+// clear's re-fetch). The report source has no cache, so every report read
+// counts.
 func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 	t.Helper()
 	fc := &fetchCounts{}
@@ -322,19 +319,13 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 		_, _ = w.Write(peerBody)
 	}))
 	t.Cleanup(peer.Close)
-	upstream, hits := gogiosE2EUpstream(t, gogiosE2EReportJSON, http.StatusOK)
-	fc.report = hits
+	fc.reports = &fakeReports{report: needsReport}
 
 	keyFile := filepath.Join(t.TempDir(), "apikey")
 	if err := os.WriteFile(keyFile, []byte("sekrit\n"), 0o600); err != nil {
 		t.Fatalf("writing the API key file: %v", err)
 	}
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
-	cfg.GogiosURL = upstream.URL
-	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
-	cfg.GogiosCacheTTL = config.Duration(time.Minute)
-
 	jobs := coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0)
 	peers := coordination.NewPeerSet([]string{strings.TrimPrefix(peer.URL, "http://")}, "/job")
 	inv := inventory.Default()
@@ -349,7 +340,7 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 	}).assemble(inv, func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", href, inv, &plugRecorder{}, jobs, peers, a)
 	}, func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, cfg, gw, a)
+		return gogiosapi.New("test", href, fc.reports, gw, a)
 	}, ""), fc
 }
 

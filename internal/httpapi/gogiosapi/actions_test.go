@@ -7,7 +7,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 )
@@ -61,7 +60,20 @@ func TestNewRejectsANilActionRenderer(t *testing.T) {
 			t.Error("New with a nil ActionRenderer returned a Surface; want a panic")
 		}
 	}()
-	New("test", contract.Hrefs(""), config.Default(), nil, nil)
+	New("test", contract.Hrefs(""), &fakeReports{}, nil, nil)
+}
+
+// TestNewRejectsANilReportSource pins the other constructor guard: the
+// composition root reads every NeedReport route's report through the
+// surface's source, so a Surface without one would only fail later, on the
+// first report request, with a nil dereference.
+func TestNewRejectsANilReportSource(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("New with a nil ReportSource returned a Surface; want a panic")
+		}
+	}()
+	New("test", contract.Hrefs(""), nil, nil, echoActions{})
 }
 
 // TestConstructedSurfaceRendersActionsThroughItsRenderer serves every
@@ -76,7 +88,7 @@ func TestConstructedSurfaceRendersActionsThroughItsRenderer(t *testing.T) {
 		"POST /monitoring/unmute": mutePair,
 		"GET /gogios":             append([]string{"gogios-cache-clear"}, mutePair...),
 	}
-	sf := New("test", contract.Hrefs(""), config.Default(), fakeMonitor{}, echoActions{})
+	sf := New("test", contract.Hrefs(""), &fakeReports{}, fakeMonitor{}, echoActions{})
 	// An unreachable report: the folder still renders, controls included.
 	state := contract.State{GogiosErr: errFake{}}
 

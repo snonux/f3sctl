@@ -1,7 +1,11 @@
 package httpapi
 
 import (
-	"github.com/snonux/f3sctl/internal/config"
+	"context"
+	"errors"
+	"sync/atomic"
+
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
@@ -28,12 +32,45 @@ func testPowerSurface(inv inventory.Inventory, base string) powerSurfaceFunc {
 }
 
 // testGogiosSurface returns a factory for the Gogios surface with inert
-// collaborators (see testPowerSurface).
+// collaborators (see testPowerSurface): no Monitor, and a report source that
+// has no report (unreachableReports), so no test serving a report route
+// through it can reach the real Gogios.
 func testGogiosSurface(base string) gogiosSurfaceFunc {
 	return func(actions contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(base), config.Default(), nil, actions)
+		return gogiosapi.New("test", contract.Hrefs(base), unreachableReports(), nil, actions)
 	}
 }
+
+// fakeReports is a gogiosapi.ReportSource that serves a fixed report (or a
+// fixed error) and counts its calls, so a test can tell which reads and
+// clears one request paid for without real HTTP or an on-disk cache.
+type fakeReports struct {
+	report   *gogios.Report
+	err      error // returned by Fetch instead of report, when set
+	clearErr error // returned by Clear, when set
+
+	fetches, clears atomic.Int32
+}
+
+func (f *fakeReports) Fetch(context.Context) (*gogios.Report, error) {
+	f.fetches.Add(1)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.report, nil
+}
+
+func (f *fakeReports) Clear() error {
+	f.clears.Add(1)
+	return f.clearErr
+}
+
+// errNoReport is the fetch error unreachableReports answers with.
+var errNoReport = errors.New("gogios report unavailable in tests")
+
+// unreachableReports is a report source whose every fetch fails, standing in
+// for a Gogios upstream that cannot be reached.
+func unreachableReports() *fakeReports { return &fakeReports{err: errNoReport} }
 
 // testRouter builds a Server for inv mounted at base, through Server.build
 // exactly as newServer does, and returns its Router -- the very Router the

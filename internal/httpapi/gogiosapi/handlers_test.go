@@ -2,18 +2,11 @@ package gogiosapi
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 )
@@ -39,7 +32,7 @@ func hasRel(links []contract.Link, rel string) bool {
 // renderer: the read-side handlers under test here render only from state, so
 // no Monitor is needed to serve them.
 func testSurface() *Surface {
-	return New("test", contract.Hrefs(""), config.Default(), nil, echoActions{})
+	return reportSurface(&fakeReports{})
 }
 
 // gogiosSample is a small, representative Gogios report for handler tests:
@@ -331,50 +324,41 @@ func TestHandleGogiosCheckFailsHardOnAFetchError(t *testing.T) {
 	}
 }
 
-// gogiosCacheTestSurface returns a Surface whose config points at an
-// httptest server serving body, with the cache in a fresh temp dir -- the
-// same hermetic setup internal/gogios/gogios_test.go uses. handleClearCache
-// calls gogios.ClearCache/gogios.Fetch directly against sf.Config (there is
-// no mockable seam for them, unlike the composition root's probe seams), so
-// exercising it for real is the only way to pin its behaviour.
-func gogiosCacheTestSurface(t *testing.T, body string) (*Surface, *int32) {
-	t.Helper()
-	var hits int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, body)
-	}))
-	t.Cleanup(upstream.Close)
-
-	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
-	cfg.GogiosURL = upstream.URL
-	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
-	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
-
-	return New("test", contract.Hrefs(""), cfg, nil, echoActions{}), &hits
+// fakeReports is a ReportSource serving a fixed report (or a fixed error)
+// that records its calls in order, so a test can pin what a handler asked
+// its source for, and when, without real HTTP or an on-disk cache.
+type fakeReports struct {
+	report   *gogios.Report
+	err      error // returned by Fetch instead of report, when set
+	clearErr error // returned by Clear, when set
+	calls    []string
 }
 
-// gogiosReportJSON is a minimal, valid Gogios report body for
-// gogiosCacheTestSurface.
-const gogiosReportJSON = `{"subject":"GOGIOS Report [C:0 W:0 U:0 S:0 SU:0 OK:1]",` +
-	`"lastUpdated":"2026-08-27T08:58:18+02:00","summary":{"critical":0,"warning":0,"unknown":0,"stale":0,"suppressed":0,"ok":1},` +
-	`"sections":{"ok":[{"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":1}]}}`
+func (f *fakeReports) Fetch(context.Context) (*gogios.Report, error) {
+	f.calls = append(f.calls, "fetch")
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.report, nil
+}
+
+func (f *fakeReports) Clear() error {
+	f.calls = append(f.calls, "clear")
+	return f.clearErr
+}
+
+// reportSurface returns a Surface reading its report from reports.
+func reportSurface(reports ReportSource) *Surface {
+	return New("test", contract.Hrefs(""), reports, nil, echoActions{})
+}
 
 // TestHandleGogiosClearCacheClearsAndRefetches pins the whole point of the
-// action: after it runs, even a cache well within its TTL must not be served
-// -- the very next read has to see a real fetch.
+// action: it clears the source's cache and then re-reads the report through
+// the same source -- in that order, so the re-read cannot be served from the
+// cache just cleared -- and renders what that re-read returned.
 func TestHandleGogiosClearCacheClearsAndRefetches(t *testing.T) {
-	sf, hits := gogiosCacheTestSurface(t, gogiosReportJSON)
-
-	// Prime the cache so ClearCache has something to remove.
-	if _, err := gogios.Fetch(context.Background(), sf.Config); err != nil {
-		t.Fatalf("priming the cache: %v", err)
-	}
-	if got := atomic.LoadInt32(hits); got != 1 {
-		t.Fatalf("hits after priming = %d, want 1", got)
-	}
+	reports := &fakeReports{report: gogiosSample()}
+	sf := reportSurface(reports)
 
 	e, status, err := sf.handleClearCache(context.Background(), contract.State{}, contract.Request{})
 	if err != nil {
@@ -383,14 +367,11 @@ func TestHandleGogiosClearCacheClearsAndRefetches(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want %d", status, http.StatusOK)
 	}
-	if got := atomic.LoadInt32(hits); got != 2 {
-		t.Errorf("hits after clear+refetch = %d, want 2 (the cache must have been cleared, forcing a re-fetch)", got)
+	if want := []string{"clear", "fetch"}; !equalLists(reports.calls, want) {
+		t.Errorf("source calls = %v, want %v", reports.calls, want)
 	}
-	if e.Properties["subject"] == "" {
-		t.Error("the re-fetched overview has an empty subject")
-	}
-	if _, err := os.Stat(filepath.Join(sf.Config.StateDir, "gogios-report.json")); err != nil {
-		t.Errorf("no cache file after clear+refetch: %v", err)
+	if e.Properties["subject"] != gogiosSample().Subject {
+		t.Errorf("subject = %v, want the re-read report's %q", e.Properties["subject"], gogiosSample().Subject)
 	}
 }
 
@@ -400,17 +381,7 @@ func TestHandleGogiosClearCacheClearsAndRefetches(t *testing.T) {
 // property -- handleClearCache delegates to handleOverview for
 // rendering, so it inherits that convention rather than needing its own.
 func TestHandleGogiosClearCacheSurfacesAFetchErrorAfterClearing(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	}))
-	t.Cleanup(upstream.Close)
-
-	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
-	cfg.GogiosURL = upstream.URL
-	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
-	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
-	sf := New("test", contract.Hrefs(""), cfg, nil, echoActions{})
+	sf := reportSurface(&fakeReports{err: errFake{}})
 
 	e, status, err := sf.handleClearCache(context.Background(), contract.State{}, contract.Request{})
 	if err != nil {
@@ -419,8 +390,28 @@ func TestHandleGogiosClearCacheSurfacesAFetchErrorAfterClearing(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want %d (clearing succeeded; only the re-fetch failed)", status, http.StatusOK)
 	}
-	if e.Properties["error"] == nil {
-		t.Error("no error property despite the re-fetch failing")
+	if e.Properties["error"] != (errFake{}).Error() {
+		t.Errorf("error property = %v, want %q", e.Properties["error"], errFake{}.Error())
+	}
+}
+
+// TestHandleGogiosClearCacheFailsOnAClearError pins the other negative case:
+// a cache that cannot be cleared is a server fault (500), and the report is
+// not re-read -- it would come from the very cache the clear failed to drop,
+// presented as if the clear had worked.
+func TestHandleGogiosClearCacheFailsOnAClearError(t *testing.T) {
+	reports := &fakeReports{report: gogiosSample(), clearErr: errFake{}}
+	sf := reportSurface(reports)
+
+	_, status, err := sf.handleClearCache(context.Background(), contract.State{}, contract.Request{})
+	if status != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", status, http.StatusInternalServerError)
+	}
+	if err == nil || !strings.Contains(err.Error(), (errFake{}).Error()) {
+		t.Errorf("err = %v, want it to carry the clear error", err)
+	}
+	if want := []string{"clear"}; !equalLists(reports.calls, want) {
+		t.Errorf("source calls = %v, want %v (no re-read after a failed clear)", reports.calls, want)
 	}
 }
 

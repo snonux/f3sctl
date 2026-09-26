@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
@@ -94,12 +93,9 @@ func TestHandlersRequestOnlyDeclaredActions(t *testing.T) {
 func runEveryHandler(t *testing.T, actions contract.ActionRenderer) {
 	t.Helper()
 	o := docOpts{}.withDefaults()
-	cfg := config.Default()
-	cfg.StateDir = t.TempDir()
-	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
 	inv := inventory.Default()
 	pw := powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, actions)
-	gg := gogiosapi.New("test", contract.Hrefs(""), cfg, o.monitor, actions)
+	gg := gogiosapi.New("test", contract.Hrefs(""), unreachableReports(), o.monitor, actions)
 
 	state := contract.State{
 		Fans: power.FansState{On: true}, AC: power.ACState{On: true},

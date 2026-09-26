@@ -10,13 +10,11 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
-	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
@@ -562,10 +560,6 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		t.Fatalf("writing the API key file: %v", err)
 	}
 	cfg := config.Default()
-	cfg.StateDir = t.TempDir()           // the Gogios report cache, cleared by gogios-cache-clear
-	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
-	cfg.GogiosFetchTimeout = config.Duration(time.Second)
-	cfg.GogiosCacheTTL = config.Duration(time.Minute)
 	return (&Server{
 		cfg:   cfg,
 		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
@@ -583,12 +577,10 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 			return power.ACState{On: true}, nil
 		},
 		monitorStatus: monitor,
-		// The Gogios surface carries this cfg rather than config.Default(), so
-		// the report cache it reads -- and gogios-cache-clear removes -- lives
-		// in the temp StateDir above, never the real /var/db/f3sctl.
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), cfg, nil, a)
-	}, "")
+		// The Gogios surface's report source is a fake with no report, so
+		// neither a report read nor gogios-cache-clear touches the real Gogios
+		// or a real cache dir.
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:

@@ -144,14 +144,12 @@ func docServer(t *testing.T, o docOpts) *Server {
 
 	cfg := config.Default()
 	cfg.StateDir = dir
-	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
-	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	inv := inventory.Default()
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, a)
 	}
 	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), cfg, o.monitor, a)
+		return gogiosapi.New("test", contract.Hrefs(""), unreachableReports(), o.monitor, a)
 	}
 	return (&Server{
 		cfg: cfg, jobs: coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0),

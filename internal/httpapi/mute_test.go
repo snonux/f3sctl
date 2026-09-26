@@ -89,7 +89,7 @@ func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 		node:          "test",
 		monitorStatus: gw.MonitoringStatus,
 	}).assemble(inv, testPowerSurface(inv, ""), func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), cfg, gw, a)
+		return gogiosapi.New("test", contract.Hrefs(""), unreachableReports(), gw, a)
 	}, "")
 }
 

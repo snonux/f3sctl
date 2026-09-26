@@ -129,17 +129,19 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 	cfg.GogiosFetchTimeout = config.Duration(5 * time.Second)
 	cfg.GogiosCacheTTL = config.Duration(60 * time.Second)
 
-	// The Gogios surface carries the real cfg (GogiosURL points at the fake
-	// upstream, the cache is in the temp StateDir), because the clear-cache
-	// action and the report reads run for real against it; the power surface's
-	// collaborators stay nil, since every route this suite serves is either a
-	// /gogios* route or never dereferences the engine.
+	// The Gogios surface reads through the real production report source
+	// (gogios.NewSource: GogiosURL points at the fake upstream, the cache is
+	// in the temp StateDir) -- the one suite that does, so the clear-cache
+	// action and the report reads run for real against it; everywhere else a
+	// fake source stands in. The power surface's collaborators stay nil,
+	// since every route this suite serves is either a /gogios* route or never
+	// dereferences the engine.
 	href := contract.Hrefs("")
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("e2e", href, cfg.Inventory, nil, nil, nil, a)
 	}
 	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("e2e", href, cfg, nil, a)
+		return gogiosapi.New("e2e", href, gogios.NewSource(cfg), nil, a)
 	}
 	srv := (&Server{
 		cfg:   cfg,

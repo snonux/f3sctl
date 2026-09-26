@@ -22,7 +22,6 @@ import (
 	"context"
 	"io"
 
-	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 )
@@ -32,10 +31,10 @@ import (
 //
 // Everything here is injected by the composition root (internal/httpapi) when
 // it assembles a Server: the node name and href builder identify this
-// deployment, Config reaches the report's URL/TTL/cache knobs, and Monitor is
-// the one slice of the power engine the mute drives. Nil Href/collaborators
-// are safe at table-declaration time -- the closures dereference them only
-// while serving the route that needs them.
+// deployment, Reports is where the alert report comes from, and Monitor is
+// the one slice of the power engine the mute drives. Nil Href/Monitor are
+// safe at table-declaration time -- the closures dereference them only while
+// serving the route that needs them.
 type Surface struct {
 	// Node is this node's hostname, reported on every entity ("node"
 	// property) so a client can tell which of pi0/pi1 answered.
@@ -43,9 +42,12 @@ type Surface struct {
 	// Href builds the absolute href for a route path, under the CGI mount
 	// this node answers on. See contract.Href.
 	Href func(string) string
-	// Config carries the Gogios report's fetch/cache configuration (the same
-	// cfg.Config the report itself is read with).
-	Config config.Config
+	// Reports reads and clears the Gogios alert report. In production this
+	// is a *gogios.Source (the cached-or-fetched report over its own HTTP
+	// client); the composition root also reads the report through this same
+	// source for the routes that declare contract.NeedReport, so the handlers
+	// and the state they are handed never disagree on where it came from.
+	Reports ReportSource
 	// Monitor changes and reads the Gogios mute marker on the gateways. In
 	// production this is the power engine's Monitor; a subset interface of
 	// it, because mute/unmute are the only engine powers this surface needs.
@@ -69,20 +71,36 @@ type Monitor interface {
 	MonitoringStatus(ctx context.Context) []gogios.GatewayMute
 }
 
-// New returns a Surface bound to its collaborators, rendering every actions
-// list through actions.
+// ReportSource is where the Gogios alert report comes from. Satisfied by
+// *gogios.Source in production and by fakes in tests, so neither this
+// surface nor the composition root is tied to the on-disk cache or to real
+// HTTP.
+type ReportSource interface {
+	// Fetch returns the current report: cached while fresh, re-fetched
+	// otherwise. An error means no report could be obtained.
+	Fetch(ctx context.Context) (*gogios.Report, error)
+	// Clear drops any cached report, so the next Fetch re-fetches.
+	Clear() error
+}
+
+// New returns a Surface bound to its collaborators, reading the alert report
+// from reports and rendering every actions list through actions.
 //
-// It panics on a nil actions: unlike Monitor, which a test serving only the
-// report routes may leave nil, every resource with controls renders through
-// it, and a Surface without one is a wiring bug in the caller, not a state to
-// serve in. In production actions resolves the composition root's Router
-// lazily, since the Router is built from the very route table this Surface
-// declares.
-func New(node string, href func(string) string, cfg config.Config, monitor Monitor, actions contract.ActionRenderer) *Surface {
+// It panics on a nil reports or actions: unlike Monitor, which a test serving
+// only the report routes may leave nil, the composition root reads the report
+// through reports for every route declaring contract.NeedReport, and every
+// resource with controls renders through actions -- a Surface without either
+// is a wiring bug in the caller, not a state to serve in. In production
+// actions resolves the composition root's Router lazily, since the Router is
+// built from the very route table this Surface declares.
+func New(node string, href func(string) string, reports ReportSource, monitor Monitor, actions contract.ActionRenderer) *Surface {
+	if reports == nil {
+		panic("gogiosapi: New called with a nil ReportSource")
+	}
 	if actions == nil {
 		panic("gogiosapi: New called with a nil ActionRenderer")
 	}
-	return &Surface{Node: node, Href: href, Config: cfg, Monitor: monitor, actions: actions}
+	return &Surface{Node: node, Href: href, Reports: reports, Monitor: monitor, actions: actions}
 }
 
 // Muted reports whether Gogios is muted on at least one gateway.

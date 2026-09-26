@@ -105,36 +105,12 @@ type Check struct {
 // is fresher than cfg.GogiosCacheTTL; otherwise it HTTP-GETs cfg.GogiosURL,
 // writes the body to the cache atomically, and returns the parsed report.
 //
-// The cache lives in cfg.StateDir so it survives across CGI processes (the
-// f3sctl API is a fresh process per request, so an in-memory cache would not
-// persist). A fetch failure is an error: the cache is fresh-or-fetch, not
-// stale-on-error, so an operator always knows whether they are looking at a
-// current report or a failure.
+// It is NewSource(cfg).Fetch for a one-shot caller (the local CLI); a
+// long-lived caller that fetches more than once, or wants to inject the
+// report as a dependency, holds a Source instead. See Source.Fetch for the
+// cache semantics.
 func Fetch(ctx context.Context, cfg config.Config) (*Report, error) {
-	p := cachePath(cfg)
-	if r, ok := readCache(p, cfg.GogiosCacheTTL.D()); ok {
-		return r, nil
-	}
-
-	raw, err := fetch(ctx, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse before caching: a 200 with a malformed body must not be written to
-	// disk as if it were a good report, or the next read would fail to parse it
-	// too and every call would re-fetch until the upstream body recovers.
-	r, err := parse(raw)
-	if err != nil {
-		return nil, err
-	}
-
-	// Caching is best-effort: a write failure must not stop a successful fetch
-	// from being returned, only stop the next call from being served from the
-	// cache.
-	_ = writeCache(p, raw)
-
-	return r, nil
+	return NewSource(cfg).Fetch(ctx)
 }
 
 // ClearCache removes the cached report so the next Fetch call re-fetches, and
@@ -305,9 +281,9 @@ func withPrevStatus(c Check, prev map[string]string) Check {
 	return c
 }
 
-// fetch HTTP-GETs the report at cfg.GogiosURL, bounded by cfg.GogiosFetchTimeout
-// and the caller's context.
-func fetch(ctx context.Context, cfg config.Config) ([]byte, error) {
+// fetch HTTP-GETs the report at cfg.GogiosURL through client, bounded by
+// cfg.GogiosFetchTimeout and the caller's context.
+func fetch(ctx context.Context, client *http.Client, cfg config.Config) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, cfg.GogiosFetchTimeout.D())
 	defer cancel()
 
@@ -316,7 +292,7 @@ func fetch(ctx context.Context, cfg config.Config) ([]byte, error) {
 		return nil, fmt.Errorf("building the Gogios request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching the Gogios report from %s: %w", cfg.GogiosURL, err)
 	}

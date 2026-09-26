@@ -225,20 +225,22 @@ func (sf *Surface) handleCheck(_ context.Context, state contract.State, req cont
 	return e, http.StatusOK, nil
 }
 
-// handleClearCache clears the on-disk Gogios cache and re-reads it, so
-// the very next read anywhere in the API sees a fresh fetch rather than
-// waiting out cfg.GogiosCacheTTL. Mirrors setMute's shape: mutate, then
-// re-populate state and re-render the overview, rather than assuming success.
+// handleClearCache clears the cached Gogios report and re-reads it, both
+// through sf.Reports, so the very next read anywhere in the API sees a fresh
+// fetch rather than waiting out the cache TTL. Mirrors setMute's shape:
+// mutate, then re-populate state and re-render the overview, rather than
+// assuming success. A failed clear is a server fault (500) and skips the
+// re-read; a failed re-read renders as the overview's "error" property.
 //
 // Only the report is re-read: clearing it does not touch the gateway mute, so
 // state.Monitoring -- fetched because the route declares NeedMonitoring -- is
 // passed through as-is, and the re-rendered folder advertises the mute pair
 // exactly as GET /gogios does.
 func (sf *Surface) handleClearCache(ctx context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
-	if err := gogios.ClearCache(sf.Config); err != nil {
-		return contract.Entity{}, http.StatusInternalServerError, err
+	if err := sf.Reports.Clear(); err != nil {
+		return contract.Entity{}, http.StatusInternalServerError, fmt.Errorf("clearing the Gogios report cache: %w", err)
 	}
 
-	state.Gogios, state.GogiosErr = gogios.Fetch(ctx, sf.Config)
+	state.Gogios, state.GogiosErr = sf.Reports.Fetch(ctx)
 	return sf.handleOverview(ctx, state, contract.Request{})
 }
