@@ -91,6 +91,10 @@ func TestActivityFromJudgesTheInventorysGroups(t *testing.T) {
 // and through Hosts() as well as Busy(), because the CLI's fan and AC guards
 // and the shutdown's fans-off step read Hosts(). All f-hosts standalone leaves
 // the fan guard's group empty while the AC guard still has hosts to judge.
+//
+// config.Load rejects both inventories (inventory.validateHosts), so they are
+// built directly here: the guard is the second line of defence, for an
+// Inventory assembled in code rather than read from a file.
 func TestAnEmptyGroupFailsSafe(t *testing.T) {
 	allStandalone := inventory.Inventory{Hosts: []inventory.Host{
 		{Name: "f0", Role: inventory.RoleF, Standalone: true},

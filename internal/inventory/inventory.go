@@ -147,28 +147,48 @@ func hostsFromWire(wire []wireHost) ([]Host, error) {
 }
 
 // validateHosts rejects a host list f3sctl cannot act on sensibly: empty, with
-// no f-host to power, with a name used twice (every lookup is by name), or
-// with the standalone flag on a host it means nothing for.
+// an invalid host (see validateHost), with a name used twice (every lookup is
+// by name), or without a single f-host in the power group -- a bare
+// `power on|off` would then have nothing to act on, and the fan guard nothing
+// to judge.
 func validateHosts(hosts []Host) error {
 	if len(hosts) == 0 {
 		return fmt.Errorf("%w: hosts is empty", ErrInvalid)
 	}
 	seen := make(map[string]bool, len(hosts))
-	fHosts := 0
 	for i, h := range hosts {
+		if err := validateHost(h); err != nil {
+			return fmt.Errorf("%w: hosts[%d] (%s): %w", ErrInvalid, i, h.Name, err)
+		}
 		if seen[h.Name] {
 			return fmt.Errorf("%w: hosts[%d]: duplicate name %q", ErrInvalid, i, h.Name)
 		}
 		seen[h.Name] = true
-		if h.Role == RoleF {
-			fHosts++
-		} else if h.Standalone {
-			return fmt.Errorf(`%w: hosts[%d] (%s): "standalone" is only meaningful for role "f", not %q`,
-				ErrInvalid, i, h.Name, h.Role)
-		}
 	}
-	if fHosts == 0 {
-		return fmt.Errorf(`%w: hosts has no role "f" host`, ErrInvalid)
+	if len(Inventory{Hosts: hosts}.PowerGroup()) == 0 {
+		return fmt.Errorf(`%w: hosts has no role "f" host with "standalone": false, `+
+			"so the power group would be empty", ErrInvalid)
+	}
+	return nil
+}
+
+// validateHost rejects a host that would silently fall out of every group: no
+// name, or a role f3sctl does not know (a typo such as "F" matches neither
+// RoleF nor anything else). The standalone flag is refused on a non-f host,
+// where it means nothing.
+func validateHost(h Host) error {
+	if h.Name == "" {
+		return errors.New("empty name")
+	}
+	switch h.Role {
+	case RoleF:
+		return nil
+	case RoleCluster, RoleGateway:
+	default:
+		return fmt.Errorf(`unknown role %q (want %q, %q or %q)`, h.Role, RoleF, RoleCluster, RoleGateway)
+	}
+	if h.Standalone {
+		return fmt.Errorf(`"standalone" is only meaningful for role "f", not %q`, h.Role)
 	}
 	return nil
 }

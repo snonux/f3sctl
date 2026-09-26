@@ -270,7 +270,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 //
 // Both are withheld while a power job runs. `power all cycle` cuts and
 // restores this plug itself, and its hosts are silent during the standby
-// wait, so without the job check ac-off would pass the ACBusy guard with no
+// wait, so without the job check ac-off would pass the acBusy guard with no
 // confirmation and cut mains under the wake half; during the AC-off dwell
 // ac-on would race the cycle's own restore.
 //

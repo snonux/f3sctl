@@ -249,9 +249,14 @@ async function selftest() {
   check((() => { try { follow(entry, 'monitoring'); return false; } catch { return true; } })(),
     'monitoring is not a root section (reached through Gogios)');
 
-  const hosts = entities(status, 'host').map((h) => h.properties);
+  // Which hosts each action covers is the server's knowledge, not a naming
+  // convention: `powerGroup` marks the hosts power-on/power-off act on, and a
+  // host's second class is its role ("f" for every f-host, standalone ones
+  // included).
+  const hosts = entities(status, 'host').map((h) => ({ ...h.properties, fHost: (h.class ?? []).includes('f') }));
   check(hosts.length > 0, 'status embeds host entities');
   check(hosts.every((h) => 'ping' in h && 'ssh' in h), 'hosts report ping and ssh separately');
+  check(hosts.every((h) => typeof h.powerGroup === 'boolean'), 'hosts say whether they are in the power group');
 
   // Host power actions live on the power folder; Shelly plugs on AC control.
   const power = await request(follow(entry, 'power'));
@@ -263,19 +268,19 @@ async function selftest() {
 
   // The heart of the design: offered actions must match observed state. A
   // running job (jobRunning, above) withholds all of them.
-  const allUp = hosts.filter((h) => h.name !== 'f3' && h.name.startsWith('f')).every((h) => h.ping);
+  const allUp = hosts.filter((h) => h.powerGroup).every((h) => h.ping);
   check(!!action(power, 'power-on') === (!jobRunning && !allUp),
     'power-on is offered exactly when something is down and no job is running');
-  check(!!action(power, 'power-off') === (!jobRunning && hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && h.ssh)),
+  check(!!action(power, 'power-off') === (!jobRunning && hosts.some((h) => h.powerGroup && h.ssh)),
     'power-off is offered exactly when something answers SSH and no job is running');
 
   // "all" covers f3 as well, so it is judged against a different host set than
   // power-on -- with only f3 down, power-on is correctly absent and all-on is
   // not.
-  const everyFUp = hosts.filter((h) => h.name.startsWith('f')).every((h) => h.ping);
+  const everyFUp = hosts.filter((h) => h.fHost).every((h) => h.ping);
   check(!!action(power, 'all-on') === (!jobRunning && !everyFUp),
     'all-on is offered exactly when any f-host is down and no job is running');
-  check(!!action(power, 'all-off') === (!jobRunning && hosts.some((h) => h.name.startsWith('f') && h.ssh)),
+  check(!!action(power, 'all-off') === (!jobRunning && hosts.some((h) => h.fHost && h.ssh)),
     'all-off is offered exactly when an f-host answers SSH and no job is running');
 
   const fans = entities(status, 'fans')[0]?.properties ?? {};
@@ -291,13 +296,13 @@ async function selftest() {
   // server's rule, so it is the one to check against. Fan guard excludes f3;
   // AC guard includes it.
   const off = action(acControl, 'fans-off');
-  const mayBeUpFans = hosts.some((h) => h.name.startsWith('f') && h.name !== 'f3' && (h.ping || h.pingKnown === false));
+  const mayBeUpFans = hosts.some((h) => h.powerGroup && (h.ping || h.pingKnown === false));
   if (off) {
     check((off.fields?.length > 0) === mayBeUpFans,
       'fans-off carries a confirmation field exactly while an f0-f2 host may be running');
   }
   const acOff = action(acControl, 'ac-off');
-  const mayBeUpAC = hosts.some((h) => h.name.startsWith('f') && (h.ping || h.pingKnown === false));
+  const mayBeUpAC = hosts.some((h) => h.fHost && (h.ping || h.pingKnown === false));
   if (acOff) {
     check((acOff.fields?.length > 0) === mayBeUpAC,
       'ac-off carries a confirmation field exactly while any f-host may be running');

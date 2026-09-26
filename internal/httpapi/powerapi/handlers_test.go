@@ -169,7 +169,7 @@ func TestHostEntityReportsWhetherTheProbeRan(t *testing.T) {
 		{name: "not probed", host: fState("f0", false, false)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := hostEntity(tc.host).Properties["pingKnown"].(bool)
+			got, ok := hostEntity(tc.host, true).Properties["pingKnown"].(bool)
 			if !ok {
 				t.Fatal("the host entity carries no pingKnown property")
 			}

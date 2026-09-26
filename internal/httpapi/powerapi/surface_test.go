@@ -1,6 +1,9 @@
 package powerapi
 
 import (
+	"context"
+	"maps"
+	"slices"
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
@@ -65,5 +68,56 @@ func TestGuardsNeedTheInventory(t *testing.T) {
 	s.Hosts[0].Ping = true
 	if !configured.rackBusy(s).Busy() || !configured.acBusy(s).Busy() {
 		t.Error("rackBusy/acBusy with the default inventory ignore a running f0")
+	}
+}
+
+// TestStatusMarksThePowerGroupOnHostEntities pins the powerGroup property of
+// /status's host entities: true exactly for the members of the configured
+// inventory's power group, so a client can judge power-on/power-off without
+// re-deriving the group from host names (docs/client-reference.js relies on
+// it). The custom inventory flags f1 standalone and leaves f3 unflagged, so
+// the property must follow the flag, not the name.
+func TestStatusMarksThePowerGroupOnHostEntities(t *testing.T) {
+	custom := inventory.Default()
+	for i := range custom.Hosts {
+		h := &custom.Hosts[i]
+		h.Standalone = h.Name == "f1"
+	}
+	snapshot := []power.HostStatus{
+		{Name: "f0", Role: "f"}, {Name: "f1", Role: "f"}, {Name: "f2", Role: "f"},
+		{Name: "f3", Role: "f"}, {Name: "r0", Role: "cluster"}, {Name: "pi0", Role: "f"},
+	}
+
+	for _, tc := range []struct {
+		name string
+		inv  inventory.Inventory
+		want map[string]bool
+	}{
+		{"default", inventory.Default(),
+			map[string]bool{"f0": true, "f1": true, "f2": true, "f3": false, "r0": false, "pi0": false}},
+		{"f1 standalone", custom,
+			map[string]bool{"f0": true, "f1": false, "f2": true, "f3": true, "r0": false, "pi0": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sf := &Surface{Inv: tc.inv, Href: contract.Hrefs("")}
+			e, _, err := sf.handleStatus(context.Background(), contract.State{Hosts: snapshot}, contract.Request{})
+			if err != nil {
+				t.Fatalf("handleStatus: %v", err)
+			}
+			got := map[string]bool{}
+			for _, sub := range e.Entities {
+				if !slices.Contains(sub.Class, "host") {
+					continue
+				}
+				member, ok := sub.Properties["powerGroup"].(bool)
+				if !ok {
+					t.Fatalf("host %v carries no boolean powerGroup property", sub.Properties["name"])
+				}
+				got[sub.Properties["name"].(string)] = member
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("powerGroup = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -149,7 +150,7 @@ func TestJobStartedDuringTheProbeOutranksTheProbesVerdict(t *testing.T) {
 						peerRunning.Store(true)
 					}
 					// The job's wake is under way: the probe hears f1.
-					return power.RackActivityFrom([]power.HostStatus{fState("f1", true, true)})
+					return power.RackActivityFrom(inventory.Default(), []power.HostStatus{fState("f1", true, true)})
 				})
 				sf.Jobs = coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), 0)
 				sf.Peers = peers

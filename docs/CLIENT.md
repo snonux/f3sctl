@@ -109,6 +109,14 @@ there means "not measured", not "silent". Show **"unknown"**, never "off". The
 server treats it the same way: an unmeasured host keeps the rack fans on. A
 server too old to send the field omits it; absent means "the probe ran".
 
+Each host entity also says which power actions cover it. Its `class` is
+`["host", "<role>"]`, where the role is `f` for every f-host (f0–f3, the set
+`all-on` / `all-off` act on) and `cluster` for the k3s VMs. The boolean
+`powerGroup` is `true` exactly for the hosts `power-on` / `power-off` act on
+(f0–f2 by default — see "Two power groups" below). Both come from the server's
+configured inventory: use them rather than matching host names, which will be
+wrong the moment the inventory changes.
+
 The second row is genuinely directionless: a host answering ICMP with no sshd
 is either coming up or going down, and one observation cannot tell which. If a
 job is running, `job.properties.action` says which way — use that to pick the
@@ -158,7 +166,7 @@ the plugs" under the power cycle below.
 
 `power-on` / `power-off` act on **f0, f1, f2** — the k3s cluster. f3 is
 excluded deliberately: it runs a standalone VM and is usually wanted
-independently.
+independently. These are the hosts whose entity has `powerGroup: true`.
 
 `all-on` / `all-off` act on **every f-host, f3 included**. Same sequence
 otherwise: same pre-flight, same Gogios mute, same storage-master-last
@@ -743,7 +751,8 @@ project assumes — you will never see the refusal anyway.
   `gogios-cache-clear` — advertised where their section folder puts them
   (host power on `/power`; Shelly plug switches on `/ac-control`; the mute
   pair on `/monitoring` and on the `/gogios` folder), never on the root
-- `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`), fans and ac (`on`,
+- `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`,
+  `powerGroup`) and their role class (`f`, `cluster`), fans and ac (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,
   `node`, `error`)
 - job `state` values: `running`, `done`, `failed`

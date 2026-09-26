@@ -259,6 +259,15 @@ func TestUnmarshalRejectsInvalidHostLists(t *testing.T) {
 		{"standalone on a non-f host",
 			`{"hosts":[` + f + `,{"name":"r0","role":"cluster","standalone":true}]}`,
 			`hosts[1] (r0): "standalone" is only meaningful for role "f"`},
+		{"role with wrong case", `{"hosts":[` + f + `,{"name":"f1","role":"F","standalone":false}]}`,
+			`hosts[1] (f1): unknown role "F"`},
+		{"unknown role", `{"hosts":[` + f + `,{"name":"f1","role":"fhost"}]}`,
+			`hosts[1] (f1): unknown role "fhost"`},
+		{"empty role", `{"hosts":[` + f + `,{"name":"x"}]}`, `hosts[1] (x): unknown role ""`},
+		{"empty name", `{"hosts":[` + f + `,{"name":"","role":"cluster"}]}`, `hosts[1] (): empty name`},
+		{"every f-host standalone",
+			`{"hosts":[{"name":"f3","role":"f","standalone":true},{"name":"r0","role":"cluster"}]}`,
+			"power group would be empty"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := Default()

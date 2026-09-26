@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal/coordination"
@@ -37,9 +38,7 @@ func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req c
 		Actions: sf.allActions(state),
 	}
 
-	for _, h := range state.Hosts {
-		e.Entities = append(e.Entities, hostEntity(h))
-	}
+	e.Entities = append(e.Entities, sf.hostEntities(state.Hosts)...)
 	e.Entities = append(e.Entities, sf.fansEntity(state))
 	e.Entities = append(e.Entities, sf.acEntity(state))
 
@@ -121,6 +120,22 @@ func (sf *Surface) handleACControlFolder(_ context.Context, state contract.State
 	}, http.StatusOK, nil
 }
 
+// hostEntities renders the snapshot's hosts, marking which are in the power
+// group -- the hosts power-on/power-off act on and the fan guard judges.
+//
+// The membership is decided here, from the configured inventory through the
+// same selector the availability predicates use (power.PowerGroupStatuses),
+// so a client never needs its own copy of the rule (docs/CLIENT.md §4).
+func (sf *Surface) hostEntities(hosts []power.HostStatus) []contract.Entity {
+	group := power.PowerGroupStatuses(sf.Inv, hosts)
+	out := make([]contract.Entity, 0, len(hosts))
+	for _, h := range hosts {
+		member := slices.ContainsFunc(group, func(g power.HostStatus) bool { return g.Name == h.Name })
+		out = append(out, hostEntity(h, member))
+	}
+	return out
+}
+
 // hostEntity renders one probed host.
 //
 // Both signals are reported rather than a single "up", because their
@@ -133,7 +148,10 @@ func (sf *Surface) handleACControlFolder(_ context.Context, state contract.State
 // the fans-off confirmation appear over what looks to it like a cold rack. It
 // is also the honest answer to "is that host off?", which is what the rest of
 // the response is for.
-func hostEntity(h power.HostStatus) contract.Entity {
+//
+// powerGroup says whether the host is one power-on/power-off act on (see
+// hostEntities); the host's role is its second class.
+func hostEntity(h power.HostStatus, powerGroup bool) contract.Entity {
 	return contract.Entity{
 		Class: []string{"host", h.Role},
 		Rel:   []string{"item"},
@@ -144,6 +162,9 @@ func hostEntity(h power.HostStatus) contract.Entity {
 			"pingKnown": h.PingKnown,
 			"ssh":       h.SSH,
 			"ms":        h.MS,
+			// Derived from the inventory, never from the name: a client
+			// must not re-derive the power group itself.
+			"powerGroup": powerGroup,
 		},
 	}
 }
