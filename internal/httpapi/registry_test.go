@@ -451,8 +451,8 @@ func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
 
 // TestMonitoringActionsFollowEachGatewaysState pins which of mute and un-mute
 // is offered for each gateway mute state: un-mute while any readable gateway
-// is muted, mute while any readable gateway is alerting. A uniform state gets
-// exactly one; a partial mute gets both.
+// is muted, mute unless every gateway is known muted. A uniform readable state
+// gets exactly one; a partial mute gets both.
 //
 // The partial case is the regression (task ka): mute used to key on "nothing
 // muted", so a mute that reached one gateway but not the other could never be
@@ -469,11 +469,14 @@ func TestMonitoringActionsFollowEachGatewaysState(t *testing.T) {
 		{"all muted", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, false, true},
 		{"all alerting", []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger"}}, true, false},
 		{"partial mute", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, true, true},
-		// An unreadable gateway is neither muted nor alerting: it neither
-		// earns the action nor blocks the one the other gateway earns.
-		{"muted and unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: down}}, false, true},
+		// An unreadable gateway is not known to be muted: it earns the
+		// (idempotent) mute, never the un-mute. {muted, unreachable} is the
+		// usual aftermath of a partial mute, and must offer both.
+		{"muted and unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: down}}, true, true},
 		{"alerting and unreadable", []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: down}}, true, false},
-		{"all unreadable", []power.GatewayMute{{Name: "blowfish", Err: down}, {Name: "fishfinger", Err: down}}, false, false},
+		{"all unreadable", []power.GatewayMute{{Name: "blowfish", Err: down}, {Name: "fishfinger", Err: down}}, true, false},
+		// Read, but no gateway configured: nothing to mute or un-mute.
+		{"no gateways", []power.GatewayMute{}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := contract.State{Monitoring: tc.gateways}

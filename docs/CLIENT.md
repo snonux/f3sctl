@@ -254,14 +254,17 @@ means a shutdown muted alerting and the un-mute never completed — the fleet is
 running with nobody watching it. The top-level `muted` is true when **any**
 gateway is muted, so read the gateway entities for the detail.
 
-The two actions are judged per gateway, and only on gateways that answered:
-`monitoring-unmute` is offered while any gateway is muted, `monitoring-mute`
-while any gateway is still alerting. A uniform state gets exactly one of them;
-a **partial mute** (one gateway muted, the other alerting — the mute keeps
-going past a gateway it could not reach) gets **both**, so a client must not
-assume they are mutually exclusive. Offer whichever the user is after: mute to
-finish the job, un-mute to back it out. An unreachable gateway counts as
-neither, so with no gateway readable neither action is offered.
+The two actions are judged per gateway. `monitoring-unmute` is offered while
+any gateway **answered** muted. `monitoring-mute` is offered unless every
+gateway answered muted — an unreachable gateway is not known to be muted, so
+it earns the mute (which is idempotent) but never the un-mute. A uniform,
+readable state gets exactly one of them. A **partial** state gets **both**:
+one gateway muted and the other alerting or unreachable. Either operation can
+leave it partial, because each runs on every gateway and keeps going past one
+it cannot reach — a mute that silenced only one, or an un-mute that restored
+only one. So a client must not assume the two are mutually exclusive; offer
+both by direction: mute to silence both, un-mute to restore both. With no
+gateways at all, neither is offered.
 
 ### Gogios alerting
 

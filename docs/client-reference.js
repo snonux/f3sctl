@@ -308,10 +308,23 @@ async function selftest() {
   // once the fleet is up and power-on has been withheld.
   const gogios = await request(follow(entry, 'gogios'));
   const mon = await request(follow(gogios, 'monitoring'));
+  //
+  // The pair is judged per gateway, and is not mutually exclusive: after a
+  // partial mute both are offered. A gateway carrying `error` is unknown -- it
+  // never earns the un-mute (no mute was seen), and it does earn the mute
+  // (silence was not seen either; muting is idempotent).
   const muted = mon.properties.muted;
   check(typeof muted === 'boolean', 'monitoring reports a mute state');
-  check(!!action(mon, 'monitoring-unmute') === muted, 'unmute is offered exactly when muted');
-  check(!!action(mon, 'monitoring-mute') === !muted, 'mute is offered exactly when alerting');
+  const gateways = entities(mon, 'gateway').map((g) => g.properties ?? {});
+  check(gateways.every((g) => g.error || typeof g.muted === 'boolean'),
+    'every readable gateway reports a boolean mute state');
+  const someMuted = gateways.some((g) => !g.error && g.muted === true);
+  const notAllMuted = gateways.some((g) => g.error || g.muted !== true);
+  check(muted === someMuted, 'monitoring is muted exactly while some readable gateway is');
+  check(!!action(mon, 'monitoring-unmute') === someMuted,
+    'unmute is offered exactly while some readable gateway is muted');
+  check(!!action(mon, 'monitoring-mute') === notAllMuted,
+    'mute is offered unless every gateway is known muted');
 }
 
 const commands = {

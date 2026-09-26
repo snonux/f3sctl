@@ -82,10 +82,10 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/monitoring/mute", Action: true,
 			CLIVerb:    "monitoring mute",
 			SkipsProbe: true,
-			// Not !Muted: a partial mute leaves a gateway alerting, and the
-			// mute is what finishes it -- so both actions can be offered
-			// at once (see Alerting).
-			Available: Alerting,
+			// Not !Muted: a partial mute leaves a gateway alerting (or
+			// unknown), and the mute is what finishes it -- so both
+			// actions can be offered at once (see NotAllMuted).
+			Available: NotAllMuted,
 			Handle:    sf.handleMute,
 		},
 	}

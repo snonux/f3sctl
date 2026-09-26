@@ -101,19 +101,27 @@ func New(node string, href func(string) string, cfg config.Config, monitor Monit
 // over the gateways) -- so it is a plain function here.
 func Muted(s contract.State) bool { return power.AnyMuted(s.Monitoring) }
 
-// Alerting reports whether Gogios is still alerting on at least one gateway
-// that answered -- i.e. whether a mute would change anything.
+// NotAllMuted reports whether some gateway is not known to be muted -- i.e.
+// whether a mute might still change anything. False when no gateway was read
+// at all (nil Monitoring: the route skipped the lookup) or every gateway
+// answered "muted".
 //
 // It is deliberately not !Muted: after a partial mute (one gateway muted, the
 // other alerting -- the mute runs on every gateway and keeps going past a
 // failure) both are true, and both actions are then worth offering. Keying
 // the mute on "nothing muted" would withhold the one call that finishes the
-// job. An unreadable gateway counts as neither: unknown is not alerting, the
-// same rule power.AnyMuted applies to muted, so with no gateway readable
-// neither action is offered.
-func Alerting(s contract.State) bool {
+// job.
+//
+// An unreadable gateway is not known to be muted, so it earns the mute here
+// just as it does not earn the un-mute in Muted: un-mute is offered only for
+// a mute actually seen, mute unless silence is actually seen on every
+// gateway. Neither can leave a client believing it is monitored when it is
+// not. Muting is idempotent, so offering it on an unknown state costs at most
+// a no-op -- and {muted, unreachable} is exactly what a partial mute usually
+// leaves behind.
+func NotAllMuted(s contract.State) bool {
 	for _, gw := range s.Monitoring {
-		if gw.Err == nil && !gw.Muted {
+		if gw.Err != nil || !gw.Muted {
 			return true
 		}
 	}

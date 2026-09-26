@@ -50,6 +50,13 @@ func (f *fakeMonitoringAPI) handle(w http.ResponseWriter, r *http.Request) {
 		writeEntity(w, f.monitoring())
 	case "/monitoring/mute", "/monitoring/unmute":
 		f.posts = append(f.posts, r.URL.Path)
+		if !f.advertises(r.URL.Path) {
+			// The real server's serve() backstop: an action it is not
+			// currently offering is refused before any handler runs.
+			w.WriteHeader(http.StatusConflict)
+			writeEntity(w, Entity{Properties: map[string]any{"message": "not available right now"}})
+			return
+		}
 		if f.failPost {
 			w.WriteHeader(http.StatusBadGateway)
 			writeEntity(w, Entity{Properties: map[string]any{"message": "could not gogios-unmute Gogios on: [blowfish]"}})
@@ -69,27 +76,40 @@ func (f *fakeMonitoringAPI) handle(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeMonitoringAPI) monitoring() Entity {
 	e := Entity{}
-	anyMuted, anyAlerting := false, false
+	anyMuted, notAllMuted := false, false
 	for _, name := range []string{"blowfish", "fishfinger"} {
 		props := map[string]any{"name": name}
 		if msg := f.gwErr[name]; msg != "" {
 			props["error"] = msg
+			notAllMuted = true
 		} else {
 			props["muted"] = f.muted[name]
 			anyMuted = anyMuted || f.muted[name]
-			anyAlerting = anyAlerting || !f.muted[name]
+			notAllMuted = notAllMuted || !f.muted[name]
 		}
 		e.Entities = append(e.Entities, Entity{Properties: props})
 	}
-	// Both are offered after a partial mute, as the server does
-	// (gogiosapi.Alerting).
+	// The server's rule (gogiosapi.Muted / NotAllMuted): un-mute for a mute
+	// actually read, mute unless every gateway reads muted -- both after a
+	// partial mute.
 	if anyMuted {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-unmute", Method: "POST", Href: "/monitoring/unmute", CLIVerb: "monitoring unmute"})
 	}
-	if anyAlerting {
+	if notAllMuted {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-mute", Method: "POST", Href: "/monitoring/mute", CLIVerb: "monitoring mute"})
 	}
 	return e
+}
+
+// advertises reports whether the monitoring resource currently offers the
+// action at href.
+func (f *fakeMonitoringAPI) advertises(href string) bool {
+	for _, a := range f.monitoring().Actions {
+		if a.Href == href {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSetMuteUnmutesAndReturnsTheServersState(t *testing.T) {
@@ -188,11 +208,11 @@ func TestSetMuteReportsAPartialSuccess(t *testing.T) {
 }
 
 // TestRunMonitoringStatusListsTheAvailableActions drives showMonitoring end
-// to end: the line lists the mute half the server currently offers, by CLI
+// to end: the line lists the mute actions the server currently offers, by CLI
 // verb. An unreadable gateway does not withhold mute -- the real server
-// offers it whenever no readable gateway is muted (gogiosapi.Muted, via
-// power.AnyMuted, skips errored gateways) -- so that case still lists
-// "monitoring mute". The no-actions branch of printAvailable is covered by
+// offers it unless every gateway reads muted (gogiosapi.NotAllMuted) -- so
+// that case still lists "monitoring mute", and a partial mute lists both.
+// The no-actions branch of printAvailable is covered by
 // TestRunStatusWithNoActionsPrintsNoAvailableLine.
 func TestRunMonitoringStatusListsTheAvailableActions(t *testing.T) {
 	cases := []struct {
@@ -201,8 +221,13 @@ func TestRunMonitoringStatusListsTheAvailableActions(t *testing.T) {
 		want  string
 	}{
 		{"nothing muted", func(*fakeMonitoringAPI) {}, "available now: monitoring mute\n"},
-		{"a gateway muted", func(f *fakeMonitoringAPI) { f.muted["blowfish"] = true }, "available now: monitoring unmute\n"},
+		{"all muted", func(f *fakeMonitoringAPI) { f.muted["blowfish"], f.muted["fishfinger"] = true, true }, "available now: monitoring unmute\n"},
+		{"partial mute", func(f *fakeMonitoringAPI) { f.muted["blowfish"] = true }, "available now: monitoring unmute, monitoring mute\n"},
 		{"a gateway unreadable", func(f *fakeMonitoringAPI) { f.gwErr["fishfinger"] = "ssh: timeout" }, "available now: monitoring mute\n"},
+		{"muted and unreadable", func(f *fakeMonitoringAPI) {
+			f.muted["blowfish"] = true
+			f.gwErr["fishfinger"] = "ssh: timeout"
+		}, "available now: monitoring unmute, monitoring mute\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,5 +262,45 @@ func TestSetMuteFinishesAPartialMute(t *testing.T) {
 	}
 	if len(states) != 2 || !states[0].Muted || !states[1].Muted {
 		t.Errorf("states = %+v, want both muted", states)
+	}
+}
+
+// `f3sctl --remote monitoring mute` after a partial mute: Run finds the mute
+// among both advertised actions by its CLI verb and POSTs it, rather than
+// printing "not available right now" (task ka).
+func TestRunMonitoringMuteFinishesAPartialMute(t *testing.T) {
+	api := newFakeMonitoringAPI(t)
+	api.muted["blowfish"], api.muted["fishfinger"] = true, false
+	c, out := newCapturingClient(t, api.srv.URL, "k")
+
+	if err := Run(context.Background(), c, []string{"monitoring", "mute"}, false); err != nil {
+		t.Fatalf("Run(monitoring mute): %v", err)
+	}
+	if len(api.posts) != 1 || api.posts[0] != "/monitoring/mute" {
+		t.Errorf("posts = %v, want one POST /monitoring/mute", api.posts)
+	}
+	got := out.String()
+	if strings.Contains(got, "not available") || !strings.Contains(got, "fishfinger: MUTED") {
+		t.Errorf("output = %q, want the mute performed and fishfinger shown muted", got)
+	}
+}
+
+// Negative: with every gateway already muted the mute is withheld, so Run
+// reports it unavailable and posts nothing -- and the fake refuses a POST it
+// is not advertising, as the server does, so a client that posted anyway
+// would fail here rather than pass by accident.
+func TestRunMonitoringMuteWithEverythingMutedPostsNothing(t *testing.T) {
+	api := newFakeMonitoringAPI(t)
+	api.muted["blowfish"], api.muted["fishfinger"] = true, true
+	c, out := newCapturingClient(t, api.srv.URL, "k")
+
+	if err := Run(context.Background(), c, []string{"monitoring", "mute"}, false); err != nil {
+		t.Fatalf("Run(monitoring mute): %v", err)
+	}
+	if len(api.posts) != 0 {
+		t.Errorf("posts = %v, want none", api.posts)
+	}
+	if !strings.Contains(out.String(), `"monitoring mute" is not available right now`) {
+		t.Errorf("output = %q, want the mute reported unavailable", out.String())
 	}
 }
