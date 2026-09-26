@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
-	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/powertest"
 )
 
@@ -53,11 +52,12 @@ func TestOffInterruptedWhileConfirmingIsNotAShutdownFailure(t *testing.T) {
 	rig.power.onPowerOff = nil // hosts keep answering: the wait never ends by itself
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	rig.power.onPowerOffEnd = func(h inventory.Host) {
-		if h.Name == inventory.StorageMaster {
-			go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+	// Cancel as the wait begins: every shutdown accepted, none confirmed.
+	rig.eng.WithReporter(&hookReporter{onStep: func(name string) {
+		if name == "confirming the hosts actually powered down" {
+			cancel()
 		}
-	}
+	}})
 
 	err := rig.eng.OffAll(ctx, &rig.log)
 	if !errors.Is(err, context.Canceled) {

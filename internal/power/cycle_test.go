@@ -1,15 +1,15 @@
 package power
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/snonux/f3sctl/internal/inventory"
 )
 
 // fakeAC fakes ACBackend, recording each Set into a shared sequence so a test
@@ -183,32 +183,62 @@ func TestCycleAllReportsAnACRestoreFailureLoudly(t *testing.T) {
 	}
 }
 
+// hookWriter forwards every write to w and then hands it to onWrite, so a
+// test can act at the moment a given log line goes out.
+type hookWriter struct {
+	w       io.Writer
+	onWrite func(p []byte)
+}
+
+func (h *hookWriter) Write(p []byte) (int, error) {
+	n, err := h.w.Write(p)
+	h.onWrite(p)
+	return n, err
+}
+
+// dwellStarted is the start of the line cycleAC logs between a successful cut
+// and the dwell.
+const dwellStarted = "AC is off; waiting"
+
 // TestCycleAllRestoresACEvenWhenCancelledMidDwell pins that tearing a run
 // down while AC is off still brings AC back: a rack without mains is the one
 // state nothing remote can recover from.
+//
+// The cancel lands at a fixed point rather than after a guessed delay: when
+// the dwell begins, i.e. once the cut has returned and before the restore. A
+// cancel that landed any earlier would leave AC untouched and prove nothing;
+// the hour-long dwell means only the cancel can end the wait.
 func TestCycleAllRestoresACEvenWhenCancelledMidDwell(t *testing.T) {
 	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
 	rig.eng.acOffDwell = time.Hour
-
 	ctx, cancel := context.WithCancel(context.Background())
-	rig.power.onPowerOffEnd = func(h inventory.Host) {
-		if h.Name == inventory.StorageMaster {
-			// The master goes last; cancel shortly after, once the run is
-			// inside the dwell.
-			go func() { time.Sleep(200 * time.Millisecond); cancel() }()
-		}
-	}
+	defer cancel()
 
-	err := rig.eng.CycleAll(ctx, &rig.log)
+	// Written to from the run's goroutines, but serially (off() serializes
+	// its log), and read only after CycleAll has returned.
+	inDwell := false
+	log := &hookWriter{w: &rig.log, onWrite: func(p []byte) {
+		if inDwell || !bytes.Contains(p, []byte(dwellStarted)) {
+			return
+		}
+		inDwell = true
+		if st, _ := rig.ac.Status(ctx); st.On {
+			t.Errorf("dwell began with AC still on: %v", rig.seq.get())
+		}
+		cancel()
+	}}
+
+	err := rig.eng.CycleAll(ctx, log)
+	if !inDwell {
+		t.Fatalf("the run never reached the dwell (err = %v)\n%s", err, rig.log.String())
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	if !strings.Contains(err.Error(), "interrupted") || !strings.Contains(err.Error(), "f3sctl power all on") {
+	if !strings.Contains(err.Error(), "power cycle interrupted") || !strings.Contains(err.Error(), "f3sctl power all on") {
 		t.Errorf("err = %v, want it to say the cycle was interrupted and name `f3sctl power all on`", err)
 	}
-	if !rig.ac.state {
-		t.Errorf("AC left off after a cancelled cycle: %v", rig.seq.get())
-	}
+	assertACBackWithoutWake(t, rig)
 }
 
 // TestCycleAllReportsTheRestoreBeforeSwitching pins what a client polling
