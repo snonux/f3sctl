@@ -29,7 +29,8 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 	if _, err := e.fansBackend().Set(ctx, true); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// Interrupted, not refused: the plug was never judged.
-			return fmt.Errorf("wake interrupted before any host was woken: %w", ctxErr)
+			return fmt.Errorf("wake interrupted before any host was woken; Gogios may still "+
+				"be muted from the shutdown. Re-run `f3sctl power on` (or `power all on`): %w", ctxErr)
 		}
 		return fmt.Errorf("refusing to wake hosts with the fans off: %w", err)
 	}
@@ -60,20 +61,39 @@ func (e *Engine) on(ctx context.Context, log io.Writer, hosts []inventory.Host) 
 		e.reporter().Step("waiting for the k3s nodes, then un-muting Gogios")
 	}
 	if err := e.UnmuteGogios(ctx, log, rewake); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			// UnmuteGogios leaves the marker on a cancel; "woke, but" would
-			// claim a wake nobody saw finish.
-			return fmt.Errorf("wake interrupted before every k3s node answered; Gogios left "+
-				"muted, clear it with `f3sctl monitoring unmute` once the nodes are up: %w", ctxErr)
-		}
-		if errors.Is(err, ErrClusterIncomplete) {
-			return fmt.Errorf("wake incomplete: %w", err)
-		}
-		return fmt.Errorf("woke, but Gogios is not fully un-muted: %w", err)
+		return wakeUnmuteError(ctx, err)
 	}
 
 	fmt.Fprintln(log, "All k3s nodes answer; Gogios monitoring is un-muted.")
 	return nil
+}
+
+// wakeUnmuteError words on()'s UnmuteGogios failure by what actually
+// happened, most specific first:
+//
+//   - the wait was abandoned (errWaitAbandoned): the marker is untouched and
+//     not every node was seen; "woke, but" would claim a wake nobody saw
+//     finish;
+//   - cancelled during the un-mute itself, after the wait ended: some
+//     gateways may be un-muted, some not, and the cluster may or may not be
+//     complete -- ErrClusterIncomplete stays in the chain when it applies;
+//   - the cluster never came back (ErrClusterIncomplete);
+//   - every node answered but a gateway could not be un-muted.
+func wakeUnmuteError(ctx context.Context, err error) error {
+	switch {
+	case errors.Is(err, errWaitAbandoned):
+		return fmt.Errorf("wake interrupted before every k3s node answered; Gogios left "+
+			"muted, clear it with `f3sctl monitoring unmute` once the nodes are up: %w", err)
+	case ctx.Err() != nil:
+		if !errors.Is(err, ctx.Err()) {
+			err = fmt.Errorf("%w: %w", err, ctx.Err())
+		}
+		return fmt.Errorf("wake interrupted while un-muting Gogios; check `f3sctl monitoring "+
+			"status` and clear what is left with `f3sctl monitoring unmute`: %w", err)
+	case errors.Is(err, ErrClusterIncomplete):
+		return fmt.Errorf("wake incomplete: %w", err)
+	}
+	return fmt.Errorf("woke, but Gogios is not fully un-muted: %w", err)
 }
 
 // rewake re-sends a magic packet to every host of a wake. Hosts already up

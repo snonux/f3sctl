@@ -245,8 +245,9 @@ func (m *Monitor) Unmute(ctx context.Context, log io.Writer) error {
 //
 // Only a cancelled context leaves the marker, since then the caller abandoned
 // the wake and nobody asked for monitoring to resume yet; it prints how to
-// clear it by hand. This is what an operator's Ctrl-C (or a SIGTERM to the
-// API's detached job) reaches: main binds the run's context to both signals.
+// clear it by hand, and returns an error wrapping errWaitAbandoned. This is
+// what an operator's Ctrl-C (or a SIGTERM to the API's detached job) reaches:
+// main binds the run's context to both signals.
 //
 // Gogios does expire the marker itself after PrometheusOnlyIfNotExistsMaxS
 // (24h). Relying on that expiry is what hid a two-day audiobookshelf outage in
@@ -263,12 +264,12 @@ func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()
 			// No local key to SSH with; the same route the wake would have
 			// used is the one to suggest.
 			fmt.Fprintln(log, "    f3sctl monitoring unmute")
-			return waitErr
+			return fmt.Errorf("%w: %w", errWaitAbandoned, waitErr)
 		}
 		for _, gw := range m.gateways {
 			fmt.Fprintf(log, "    ssh -p %d %s@%s gogios-unmute\n", gw.SSHPort, gw.SSHUser, gw.IP)
 		}
-		return waitErr
+		return fmt.Errorf("%w: %w", errWaitAbandoned, waitErr)
 	}
 	if waitErr != nil {
 		fmt.Fprintf(log, "  %v\n", waitErr)
@@ -293,6 +294,12 @@ func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()
 // tells the two apart: the first is an incomplete wake, the second a complete
 // wake with a monitoring problem.
 var ErrClusterIncomplete = errors.New("k3s nodes still unreachable")
+
+// errWaitAbandoned marks an UnmuteGogios error for a cancel during the wait
+// for the cluster: the marker was left untouched. Engine.on tells it apart
+// from a cancel that landed during the un-mute itself, after the wait ended,
+// when some gateways may already be un-muted.
+var errWaitAbandoned = errors.New("abandoned the wait for the k3s nodes")
 
 // waitForCluster polls r0/r1/r2 until all three answer or the timeout expires,
 // calling rewake (if non-nil) every rewakeGap while any node is still down.

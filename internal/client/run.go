@@ -137,7 +137,7 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 	result, err := c.Perform(ctx, action, force)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return c.interruptedInFlight(action.Name, ctxErr)
+			return c.interruptedInFlight(action.Name, holderRel, ctxErr)
 		}
 		return err
 	}
@@ -339,17 +339,26 @@ func (c *Client) reportStillRunning(id string) {
 // interruptedInFlight is runAction's error for a Ctrl-C while the action's
 // request was on the wire. The server may have received it and acted -- for
 // a power action, started a job that now runs regardless -- so "cannot reach
-// the API" would be wrong, and so would "nothing happened".
-func (c *Client) interruptedInFlight(action string, err error) error {
+// the API" would be wrong, and so would "nothing happened". The hint follows
+// holderRel: a monitoring or Gogios action is checked where its state shows.
+func (c *Client) interruptedInFlight(action, holderRel string, err error) error {
 	fmt.Fprintf(c.stdout, "\nInterrupted while the %s request was in flight: the API may "+
 		"already have acted on it, and a job it started runs on regardless.\n", action)
-	fmt.Fprintln(c.stdout, checkRackHint)
+	switch holderRel {
+	case "monitoring", "gogios":
+		fmt.Fprintln(c.stdout, checkMonitoringHint)
+	default:
+		fmt.Fprintln(c.stdout, checkRackHint)
+	}
 	return fmt.Errorf("%s interrupted in flight: %w", action, err)
 }
 
-// checkRackHint is how an interrupted client points the operator at the
-// rack's real state.
-const checkRackHint = "Check the rack with `f3sctl --remote power status`."
+// checkRackHint and checkMonitoringHint are how an interrupted client points
+// the operator at the real state of what it was changing.
+const (
+	checkRackHint       = "Check the rack with `f3sctl --remote power status`."
+	checkMonitoringHint = "Check the mute with `f3sctl --remote monitoring status`."
+)
 
 // errJobNotDone is what waitForJob returns (wrapped, with the job's state and
 // error) for a job that finished in any state but done, so the CLI exits

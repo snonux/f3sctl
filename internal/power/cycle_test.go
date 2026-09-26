@@ -394,6 +394,35 @@ func TestCutACHonoursACancelJustBeforeTheSwitch(t *testing.T) {
 	}
 }
 
+// TestCycleAllInterruptedWhileWakingSaysACIsBack pins a cancel during the
+// cycle's closing wake: AC was restored before it, and the error must say so
+// on top of the wake's own interrupted wording.
+func TestCycleAllInterruptedWhileWakingSaysACIsBack(t *testing.T) {
+	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fans := &fakeFans{seq: rig.seq, state: true, onSet: func(on bool) {
+		if on {
+			cancel() // the wake has begun: fans first
+		}
+	}}
+	rig.eng.fans = fans
+	verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+	rig.eng.monitor = newTestMonitor(t, verb, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1", "r2"}, time.Minute)
+	rig.eng.monitor.poll = time.Millisecond
+
+	err := rig.eng.CycleAll(ctx, &rig.log)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "AC is back on") || !strings.Contains(err.Error(), "monitoring unmute") {
+		t.Errorf("err = %v, want it to say AC is back on and how to clear the mute", err)
+	}
+	if !rig.ac.state {
+		t.Errorf("AC off after an interrupted wake: %v", rig.seq.get())
+	}
+}
+
 // TestCycleACCancelledBeforeTheCutLeavesACOn: a cancel between the shutdown
 // and the cut must not cut, and must not be misreported as a busy rack (the
 // dark check's probes, cut short, read as "unknown", which counts as busy).

@@ -2,6 +2,7 @@ package power
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -62,7 +63,15 @@ func (e *Engine) CycleAll(ctx context.Context, log io.Writer) error {
 	if err := sleepCtx(ctx, e.acSettle()); err != nil {
 		return cycleInterrupted(err)
 	}
-	return e.OnAll(ctx, log)
+	if err := e.OnAll(ctx, log); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			// The wake's own error says how far it got and what to run;
+			// the cycle adds what only it knows: mains is back.
+			return fmt.Errorf("power cycle interrupted while waking: f-host AC is back on; %w", err)
+		}
+		return err
+	}
+	return nil
 }
 
 // cycleAC is CycleAll's middle: confirm the rack is dark, cut AC, wait, and

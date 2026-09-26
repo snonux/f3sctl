@@ -174,6 +174,9 @@ type fakeFans struct {
 
 	state bool
 	calls []bool // the requested state of every Set call, in order
+
+	// onSet, if set, runs at the start of every Set, outside f.mu.
+	onSet func(on bool)
 }
 
 func (f *fakeFans) Status(context.Context) (FansState, error) {
@@ -183,6 +186,9 @@ func (f *fakeFans) Status(context.Context) (FansState, error) {
 }
 
 func (f *fakeFans) Set(_ context.Context, on bool) (FansState, error) {
+	if f.onSet != nil {
+		f.onSet(on)
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, on)
 	err := f.setErr
@@ -665,11 +671,58 @@ func TestOnInterruptedWhileWaitingForTheCluster(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "woke") {
 		t.Fatalf("On err = %v, want a wrapped context.Canceled that does not claim a wake", err)
 	}
+	if !errors.Is(err, errWaitAbandoned) || !strings.Contains(err.Error(), "before every k3s node answered") {
+		t.Errorf("On err = %v, want the abandoned-wait wording", err)
+	}
 	if !strings.Contains(err.Error(), "f3sctl monitoring unmute") {
 		t.Errorf("On err = %v, want it to name `f3sctl monitoring unmute`", err)
 	}
 	if got := verb.callsList(); len(got) != 0 {
 		t.Errorf("gateway calls = %v, want Gogios left muted", got)
+	}
+}
+
+// TestOnInterruptedWhileUnmuting covers a cancel that lands during the
+// un-mute itself, after the cluster wait ended: the wait was not abandoned,
+// so "before every k3s node answered" would be false. The error must say the
+// un-mute was interrupted and how to check, and keep ErrClusterIncomplete in
+// the chain when the wait had timed out with a node missing.
+func TestOnInterruptedWhileUnmuting(t *testing.T) {
+	cases := []struct {
+		name       string
+		probe      func(context.Context, []inventory.Host) []HostStatus
+		budget     time.Duration
+		incomplete bool
+	}{
+		{"every node up", allNodesUp, time.Minute, false},
+		{"after the wait timed out", oneNodeDown, -time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shelly := powertest.NewFakeShelly(t, false)
+			eng := testEngine(t, shelly)
+			eng.fans = &fakeFans{}
+			eng.power = &fakePower{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{}}
+			verb.onCall = func(string) { cancel() } // Ctrl-C mid un-mute
+			verb.err["gogios-unmute:blowfish"] = context.Canceled
+			eng.monitor = newTestMonitor(t, verb, tc.probe, []string{"blowfish"}, []string{"r0", "r1", "r2"}, tc.budget)
+
+			err := eng.On(ctx, &bytes.Buffer{})
+			if !errors.Is(err, context.Canceled) || errors.Is(err, errWaitAbandoned) {
+				t.Fatalf("On err = %v, want context.Canceled and not an abandoned wait", err)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "while un-muting Gogios") || !strings.Contains(msg, "f3sctl monitoring status") ||
+				strings.Contains(msg, "before every k3s node answered") {
+				t.Errorf("On err = %v, want the interrupted-un-mute wording", err)
+			}
+			if got := errors.Is(err, ErrClusterIncomplete); got != tc.incomplete {
+				t.Errorf("errors.Is(err, ErrClusterIncomplete) = %v, want %v: %v", got, tc.incomplete, err)
+			}
+		})
 	}
 }
 
@@ -686,6 +739,9 @@ func TestOnInterruptedBeforeTheFansIsNotARefusal(t *testing.T) {
 	err := eng.On(ctx, &bytes.Buffer{})
 	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "refusing") {
 		t.Fatalf("On err = %v, want a wrapped context.Canceled, not a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "f3sctl power on") {
+		t.Errorf("On err = %v, want it to name the command to re-run", err)
 	}
 	if got := power.wakeCalls(); len(got) != 0 {
 		t.Errorf("Wake calls = %v, want none", got)

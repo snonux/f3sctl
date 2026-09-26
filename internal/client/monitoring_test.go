@@ -2,12 +2,14 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeMonitoringAPI serves the discovery chain SetMute follows (root ->
@@ -28,6 +30,9 @@ type fakeMonitoringAPI struct {
 	// failPost answers the action with 502, as the server does when the
 	// engine's SSH round trips fail outright.
 	failPost bool
+	// hangPost holds an action POST until the client gives up on it -- a
+	// request still in flight when the operator hits Ctrl-C.
+	hangPost bool
 	posts    []string
 }
 
@@ -40,6 +45,10 @@ func newFakeMonitoringAPI(t *testing.T) *fakeMonitoringAPI {
 }
 
 func (f *fakeMonitoringAPI) handle(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && f.hangs() {
+		<-r.Context().Done()
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	switch r.URL.Path {
@@ -121,6 +130,13 @@ func (f *fakeMonitoringAPI) monitoring() Entity {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-mute", Method: "POST", Href: "/monitoring/mute", CLIVerb: "monitoring mute"})
 	}
 	return e
+}
+
+// hangs reports whether action POSTs are to be held (hangPost).
+func (f *fakeMonitoringAPI) hangs() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hangPost
 }
 
 // advertises reports whether the monitoring resource currently offers the
@@ -345,5 +361,27 @@ func TestRunMonitoringMuteWithEverythingMutedPostsNothing(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"monitoring mute" is not available right now`) {
 		t.Errorf("output = %q, want the mute reported unavailable", out.String())
+	}
+}
+
+// TestMonitoringActionInterruptedInFlightPointsAtMonitoringStatus: a Ctrl-C
+// during a monitoring action's POST is checked where the mute shows, not in
+// the rack's power status.
+func TestMonitoringActionInterruptedInFlightPointsAtMonitoringStatus(t *testing.T) {
+	api := newFakeMonitoringAPI(t)
+	api.muted["blowfish"], api.muted["fishfinger"] = true, true
+	api.hangPost = true
+	c, out := newCapturingClient(t, api.srv.URL, "k")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(100*time.Millisecond, cancel)
+
+	err := Run(ctx, c, []string{"monitoring", "unmute"}, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want a wrapped context.Canceled", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "f3sctl --remote monitoring status") || strings.Contains(got, "power status") {
+		t.Errorf("output %q, want the monitoring status hint and not the power one", got)
 	}
 }

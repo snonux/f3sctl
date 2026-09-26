@@ -28,9 +28,15 @@ type fakeGatewayVerb struct {
 
 	out map[string]string // "verb:host" -> stdout
 	err map[string]error  // "verb:host" -> error
+
+	// onCall, if set, runs at the start of every call, outside f.mu.
+	onCall func(verb string)
 }
 
 func (f *fakeGatewayVerb) AgentVerb(_ context.Context, h inventory.Host, verb string) (string, error) {
+	if f.onCall != nil {
+		f.onCall(verb)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, verb+":"+h.Name)
