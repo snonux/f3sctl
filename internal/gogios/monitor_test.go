@@ -284,6 +284,58 @@ func TestMonitorUnmuteGogiosLeavesTheMarkerWhenTheWakeIsCancelled(t *testing.T) 
 	}
 }
 
+// TestMonitorUnmuteGogiosCancelledDuringTheUnmute covers a cancel that lands
+// during the un-mute itself, after the wait ended: the wait was not
+// abandoned, so the error must not carry ErrWaitAbandoned (power.Engine's
+// wake would then claim the marker was left untouched), the un-mute must
+// have been attempted, and a timed-out wait keeps ErrClusterIncomplete in
+// the chain.
+//
+// The SSH route's eachGateway reports the failed gateways in a fresh error
+// that does not wrap the per-gateway cause, so context.Canceled is not in
+// this error's chain; power.Engine's wake adds ctx.Err() itself (see
+// wakeUnmuteError). Only the GatewaySwitch route's error wraps its cause
+// (TestMonitorUnmuteGogiosTimeoutKeepsTheSwitchErrorMatchable).
+func TestMonitorUnmuteGogiosCancelledDuringTheUnmute(t *testing.T) {
+	cases := []struct {
+		name       string
+		probe      NodeProbe
+		budget     time.Duration
+		incomplete bool
+	}{
+		{"every node up", allNodesUp, time.Minute, false},
+		{"after the wait timed out", oneNodeDown, -time.Second, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			verb := &fakeGatewayVerb{out: map[string]string{}, err: map[string]error{
+				"gogios-unmute:blowfish": context.Canceled,
+			}}
+			verb.onCall = func(string) { cancel() } // Ctrl-C mid un-mute
+			m := newTestMonitor(t, verb, tc.probe, []string{"blowfish"}, []string{"r0", "r1", "r2"}, tc.budget)
+
+			err := m.UnmuteGogios(ctx, &bytes.Buffer{}, nil)
+			if err == nil || !strings.Contains(err.Error(), "blowfish") {
+				t.Fatalf("UnmuteGogios err = %v, want the failed un-mute naming blowfish", err)
+			}
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("ctx.Err() = %v, want the cancel to have landed during the un-mute", ctx.Err())
+			}
+			if errors.Is(err, ErrWaitAbandoned) {
+				t.Errorf("UnmuteGogios err = %v, want no ErrWaitAbandoned: the wait had ended", err)
+			}
+			if got := errors.Is(err, ErrClusterIncomplete); got != tc.incomplete {
+				t.Errorf("errors.Is(err, ErrClusterIncomplete) = %v, want %v: %v", got, tc.incomplete, err)
+			}
+			if got := verb.callsList(); len(got) != 1 || got[0] != "gogios-unmute:blowfish" {
+				t.Errorf("calls = %v, want the un-mute attempted once", got)
+			}
+		})
+	}
+}
+
 // downForProbes is a probe on which r0 stays down for the first n probes and
 // then answers; it counts the probes it served.
 type downForProbes struct {
