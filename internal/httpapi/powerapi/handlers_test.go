@@ -85,7 +85,11 @@ func testSurface(t *testing.T, plug *fakePlug, confirm func(context.Context) pow
 	if err != nil {
 		t.Fatalf("power.New: %v", err)
 	}
-	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, nil, nil)
+	// Real, idle job state on both sides: the off handlers re-read it before
+	// switching (jobStartedMeanwhile), and a nil here would panic -- which is
+	// the point, since production always wires both.
+	jobs := coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0)
+	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, jobs, coordination.NewPeerSet(nil, ""))
 	sf.RackConfirm = confirm
 	sf.ACConfirm = confirm
 	return sf

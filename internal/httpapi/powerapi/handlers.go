@@ -212,19 +212,21 @@ func (sf *Surface) handleFansOff(ctx context.Context, state contract.State, req 
 // serve() refuses a plug switch while a job runs, but it judges that once, up
 // front, and the off handlers then probe for the better part of a minute. A
 // power-on or all-cycle started on either node inside that window would have
-// its plug flipped under it. This narrows the gap to the few milliseconds
-// between this read and the write; it is a re-check, not a lock -- the plug
+// its plug flipped under it. This narrows the gap to what remains between
+// this read and the plug actually switching -- the peer answer's own travel
+// time plus FansSet/ACSet's digest-authenticated Shelly round trip, so well
+// under a second rather than a minute. It is a re-check, not a lock: the plug
 // has no lock to take, and Manager.Start's flock only serialises jobs. The
 // switches without a probe (on, and off with force) have no such window
 // beyond serve()'s own check, so they are not re-checked.
+//
+// The peer half costs one more round trip to the other node, bounded by the
+// peer client's 3s timeout. A peer that is down or does not answer in time
+// counts as idle, the same fail-open PeerSet.Busy applies everywhere else: if
+// one node is down the other must still be able to switch the plugs.
 func (sf *Surface) jobStartedMeanwhile(ctx context.Context, apiKey string) bool {
-	if sf.Jobs != nil {
-		if j := sf.Jobs.Read(); j != nil && j.State == coordination.JobRunning {
-			return true
-		}
-	}
-	if sf.Peers == nil {
-		return false
+	if j := sf.Jobs.Read(); j != nil && j.State == coordination.JobRunning {
+		return true
 	}
 	busy, _ := sf.Peers.Busy(ctx, sf.Node, apiKey)
 	return busy

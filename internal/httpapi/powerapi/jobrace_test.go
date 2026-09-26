@@ -104,3 +104,24 @@ func TestPlugOffRefusedWhenAJobStartsDuringTheProbe(t *testing.T) {
 		}
 	}
 }
+
+// TestPlugOffReCheckTreatsADownPeerAsIdle pins the re-check's fail-open: a
+// peer that cannot be reached counts as idle, as everywhere else PeerSet.Busy
+// is asked, so one node being down never stops the other switching the plugs.
+func TestPlugOffReCheckTreatsADownPeerAsIdle(t *testing.T) {
+	down := httptest.NewServer(http.NotFoundHandler())
+	addr := down.Listener.Addr().String()
+	down.Close() // connection refused from here on
+
+	plug := newFakePlug(t)
+	sf := testSurface(t, plug, func(context.Context) power.RackActivity { return power.RackActivity{} })
+	sf.Peers = &coordination.PeerSet{Nodes: []string{addr}, JobPath: "/job"}
+
+	_, status, err := sf.handleACOff(context.Background(), coldSnapshot(), contract.Request{})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status = %d, err = %v, want 200: an unreachable peer is idle", status, err)
+	}
+	if got := plug.setCalls(); len(got) != 1 || got[0] {
+		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
+	}
+}

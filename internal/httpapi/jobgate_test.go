@@ -23,12 +23,14 @@ import (
 	"github.com/snonux/f3sctl/internal/power"
 )
 
-// plugRecorder is a powerapi.Engine that records every plug write and reports
-// an idle rack, so a handler that is reached goes straight through to the
-// write -- which is what lets a test tell "refused" from "performed".
+// plugRecorder is a powerapi.Engine that records every plug write and every
+// confirming probe, and reports an idle rack, so a handler that is reached
+// goes straight through to the write. The writes tell "refused" from
+// "performed"; the probes tell serve()'s refusal from the handler's own.
 type plugRecorder struct {
 	mu        sync.Mutex
 	fans, acs []bool
+	probes    int
 }
 
 func (p *plugRecorder) FansSet(_ context.Context, on bool) (power.FansState, error) {
@@ -45,13 +47,26 @@ func (p *plugRecorder) ACSet(_ context.Context, on bool) (power.ACState, error) 
 	return power.ACState{On: on}, nil
 }
 
-func (p *plugRecorder) RackActivity(context.Context) power.RackActivity { return power.RackActivity{} }
-func (p *plugRecorder) ACActivity(context.Context) power.RackActivity   { return power.RackActivity{} }
+func (p *plugRecorder) RackActivity(context.Context) power.RackActivity { return p.probe() }
+func (p *plugRecorder) ACActivity(context.Context) power.RackActivity   { return p.probe() }
+
+func (p *plugRecorder) probe() power.RackActivity {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.probes++
+	return power.RackActivity{}
+}
 
 func (p *plugRecorder) writes() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.fans) + len(p.acs)
+}
+
+func (p *plugRecorder) probeCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.probes
 }
 
 // jobSource says where a running job lives for jobGateServer.
@@ -162,23 +177,34 @@ func postStatus(t *testing.T, srv *Server, path string) int {
 // from cutting mains under the wake half.
 //
 // The no-job rows are the control: the same request against the same fleet
-// is performed, so a 409 in the job rows can only come from the job.
+// is performed, so a 409 in the job rows can only come from the job. Zero
+// confirming probes in the job rows (against one per off in the control)
+// proves it was serve() that refused, not the handler's own later re-check
+// (jobStartedMeanwhile) -- that one would also 409 with no write, so without
+// this the routes' !JobRunning could be dropped and nothing here would notice.
 func TestPlugSwitchesRefusedWhileAJobRuns(t *testing.T) {
 	paths := []string{"/fans/on", "/fans/off", "/ac/on", "/ac/off"}
 	for _, src := range []jobSource{noJob, localJob, peerJob} {
 		for _, path := range paths {
 			t.Run(string(src)+" "+path, func(t *testing.T) {
 				// Each switch is judged in the plug state that would offer it.
-				srv, eng := jobGateServer(t, strings.HasSuffix(path, "/off"), src)
-				want, wantWrites := http.StatusConflict, 0
+				off := strings.HasSuffix(path, "/off")
+				srv, eng := jobGateServer(t, off, src)
+				want, wantWrites, wantProbes := http.StatusConflict, 0, 0
 				if src == noJob {
 					want, wantWrites = http.StatusOK, 1
+					if off {
+						wantProbes = 1
+					}
 				}
 				if got := postStatus(t, srv, path); got != want {
 					t.Errorf("POST %s status = %d, want %d", path, got, want)
 				}
 				if got := eng.writes(); got != wantWrites {
 					t.Errorf("POST %s made %d plug writes, want %d", path, got, wantWrites)
+				}
+				if got := eng.probeCount(); got != wantProbes {
+					t.Errorf("POST %s ran %d confirming probes, want %d", path, got, wantProbes)
 				}
 			})
 		}

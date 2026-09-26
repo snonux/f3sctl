@@ -530,6 +530,19 @@ only avoids a second round trip for a "yes" the user already gave. Never
 fabricate `force=true` when the user has not actually confirmed it; that would
 skip the confirmation this whole field exists to get.
 
+That advice is for the probe's 409 only. A non-forced `fans-off` / `ac-off` can
+also come back `409` because a power job started (on either node) while the
+confirming probe ran: the plug switches are withheld during any job, and the
+server re-checks just before switching. The two are told apart by the message:
+
+- `the rack may still be drawing power (…)` / `hosts may still be drawing
+  power (…)` — the probe heard a host. `force=true` is the answer, as above.
+- `"fans-off" is not available right now; re-fetch the resource and read its
+  actions` (or `"ac-off"`) — the state changed. This is the ordinary §7/§8
+  409: re-fetch and re-render. **Never** answer it with `force=true`; `force`
+  overrides the probe, not a running job, and the re-fetched response will
+  not offer the action until the job is over.
+
 ---
 
 ## 7. Errors
