@@ -41,7 +41,10 @@ func (c *Client) runGogios(ctx context.Context, args []string, force bool) error
 }
 
 // showGogios renders the Gogios alert report overview, followed from the
-// root's "gogios" link.
+// root's "gogios" link, then what the gogios entity offers right now (cache
+// clear, monitoring mute/unmute) -- also when the report itself is
+// unreachable, since clearing the cache is exactly what an operator may want
+// to try then.
 func (c *Client) showGogios(ctx context.Context) error {
 	root, err := c.Root(ctx)
 	if err != nil {
@@ -52,6 +55,7 @@ func (c *Client) showGogios(ctx context.Context) error {
 		return err
 	}
 	printGogiosOverview(c.stdout, e)
+	c.printAvailable(e.Actions)
 	return nil
 }
 

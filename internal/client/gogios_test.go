@@ -320,3 +320,38 @@ func TestRunGogiosRejectsAnUnknownCommand(t *testing.T) {
 		t.Errorf("err = %v, want it to name the unknown command", err)
 	}
 }
+
+// TestRunGogiosOverviewListsTheAvailableActions pins that the overview ends
+// with what the gogios entity offers right now, by CLI verb -- the real
+// /gogios renders cache clear and the monitoring mute pair there.
+func TestRunGogiosOverviewListsTheAvailableActions(t *testing.T) {
+	api := newFakeGogiosAPI(t)
+	c := newTestClient(t, api.srv.URL, "k")
+	var out bytes.Buffer
+	c.stdout = &out
+
+	if err := c.runGogios(context.Background(), nil, false); err != nil {
+		t.Fatalf("runGogios(nil): %v", err)
+	}
+	if want := "available now: gogios cache clear\n"; !strings.Contains(out.String(), want) {
+		t.Errorf("output = %q, want it to contain %q", out.String(), want)
+	}
+}
+
+// TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine is the negative
+// case: the fake's broken report advertises no actions, so no
+// "available now" line may be printed.
+func TestRunGogiosOverviewWithNoActionsPrintsNoAvailableLine(t *testing.T) {
+	api := newFakeGogiosAPI(t)
+	api.broken = true
+	c := newTestClient(t, api.srv.URL, "k")
+	var out bytes.Buffer
+	c.stdout = &out
+
+	if err := c.runGogios(context.Background(), nil, false); err != nil {
+		t.Fatalf("runGogios(nil): %v", err)
+	}
+	if strings.Contains(out.String(), "available now") {
+		t.Errorf("output = %q, want no available-now line when /gogios advertises nothing", out.String())
+	}
+}

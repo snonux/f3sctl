@@ -191,7 +191,9 @@ func (e Entity) Action(name string) (Action, bool) {
 // Absent (both paths exhausted) still means what it always meant for Action:
 // either verb names nothing the server knows, or it names something currently
 // withheld -- the two are indistinguishable here on purpose, since only
-// possible actions are ever advertised (see httpapi.Router.Actions).
+// possible actions are ever advertised (the server renders them from its
+// route table, filtered by each route's Available predicate -- see
+// powerapi.Surface.Actions).
 func (e Entity) ActionForVerb(verb string) (Action, bool) {
 	for _, a := range e.Actions {
 		if a.CLIVerb != "" && a.CLIVerb == verb {

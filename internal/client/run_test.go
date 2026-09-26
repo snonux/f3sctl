@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -137,7 +138,7 @@ func newCapturingClient(t *testing.T, base, key string) (*Client, *bytes.Buffer)
 }
 
 // statusFixtureActions is what the fake /status advertises: two actions
-// possible right now, in the order the line must list them.
+// possible right now, in the order the line must list them by CLI verb.
 var statusFixtureActions = []Action{
 	{Name: "power-on", Method: http.MethodPost, Href: "/power/on", CLIVerb: "power on"},
 	{Name: "fans-off", Method: http.MethodPost, Href: "/fans/off", CLIVerb: "fans off"},
@@ -158,7 +159,7 @@ func TestRunStatusListsTheStatusEntitysActions(t *testing.T) {
 			if err := Run(context.Background(), c, cmd, false); err != nil {
 				t.Fatalf("Run(%v): %v", cmd, err)
 			}
-			if want := "available now: power-on, fans-off\n"; !strings.Contains(out.String(), want) {
+			if want := "available now: power on, fans off\n"; !strings.Contains(out.String(), want) {
 				t.Errorf("output = %q, want it to contain %q", out.String(), want)
 			}
 			if strings.Contains(out.String(), "root-decoy") {
@@ -169,21 +170,32 @@ func TestRunStatusListsTheStatusEntitysActions(t *testing.T) {
 }
 
 // TestRunRefusedActionListsWhatIsAvailable pins the refused-action path of
-// runAction: a verb nothing advertises is reported as unavailable, and the
-// status it was judged against -- including what IS possible -- follows.
+// runAction: a verb its holder does not advertise is reported as
+// unavailable, and the status it was judged against -- including what IS
+// possible -- follows.
+//
+// The holder is the /power section folder, reached through the root's
+// "power" link as on the real server, and it withholds power off. The root
+// carries a decoy power-off that would be performed (a POST the fake 404s)
+// if runAction fell back to the root instead of reading the folder.
 func TestRunRefusedActionListsWhatIsAvailable(t *testing.T) {
 	api := newFakeAPI(t, "key")
+	api.rootActions = []Action{{Name: "power-off", Method: http.MethodPost, Href: "/power/off", CLIVerb: "power off"}}
+	api.powerActions = statusFixtureActions[:1] // power on only: power off is withheld
 	api.statusActions = statusFixtureActions
 	c, out := newCapturingClient(t, api.srv.URL, "key")
 
 	if err := Run(context.Background(), c, []string{"power", "off"}, false); err != nil {
 		t.Fatalf("Run(power off): %v", err)
 	}
+	if !slices.Contains(api.getPaths(), "/power") {
+		t.Errorf("GETs = %v, want the /power section folder resolved as the holder", api.getPaths())
+	}
 	got := out.String()
 	if !strings.Contains(got, `"power off" is not available right now.`) {
 		t.Errorf("output = %q, want the refusal", got)
 	}
-	if !strings.Contains(got, "available now: power-on, fans-off\n") {
+	if !strings.Contains(got, "available now: power on, fans off\n") {
 		t.Errorf("output = %q, want the actions /status advertises", got)
 	}
 }
@@ -200,5 +212,20 @@ func TestRunStatusWithNoActionsPrintsNoAvailableLine(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "available now") {
 		t.Errorf("output = %q, want no available-now line when /status advertises nothing", out.String())
+	}
+}
+
+// TestPrintAvailableFallsBackToTheActionName pins the legacy half of the
+// line: an action without a CLIVerb (a server predating the field) is shown
+// by its name, while one carrying a CLIVerb is shown as the command to type.
+func TestPrintAvailableFallsBackToTheActionName(t *testing.T) {
+	var out bytes.Buffer
+	c := &Client{stdout: &out}
+	c.printAvailable([]Action{
+		{Name: "power-on", CLIVerb: "power on"},
+		{Name: "fans-off"},
+	})
+	if got, want := out.String(), "\navailable now: power on, fans-off\n"; got != want {
+		t.Errorf("printAvailable = %q, want %q", got, want)
 	}
 }

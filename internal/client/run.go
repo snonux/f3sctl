@@ -120,9 +120,10 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 	if !ok {
 		// Either cmd names nothing the server has ever heard of, or it names
 		// something currently withheld -- the two look identical from here,
-		// since only possible actions are advertised (see
-		// httpapi.Router.Actions). Either way, showing the state it was
-		// judged against is more useful than a bare error.
+		// since only possible actions are advertised (the server renders
+		// them from its route table, filtered by each route's Available
+		// predicate -- see powerapi.Surface.Actions). Either way, showing
+		// the state it was judged against is more useful than a bare error.
 		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
 		switch holderRel {
 		case "monitoring":
@@ -239,17 +240,26 @@ func (c *Client) showMonitoring(ctx context.Context) error {
 // printAvailable lists the actions an entity advertises as possible right
 // now, or prints nothing when it advertises none. Showing what can be done
 // next is the point of a hypermedia client: this list is the server's, not a
-// guess -- only possible actions are ever advertised (see
-// httpapi.Router.Actions).
+// guess -- only possible actions are ever advertised (the server renders them
+// from its route table, filtered by each route's Available predicate -- see
+// powerapi.Surface.Actions and gogiosapi.Surface.ActionsFor).
+//
+// Each action is shown by its CLIVerb, the command the operator actually
+// types ("power on"), falling back to its name for a server that predates
+// the field (see ActionForVerb's legacy path).
 func (c *Client) printAvailable(actions []Action) {
 	if len(actions) == 0 {
 		return
 	}
-	names := make([]string, 0, len(actions))
+	verbs := make([]string, 0, len(actions))
 	for _, a := range actions {
-		names = append(names, a.Name)
+		if a.CLIVerb != "" {
+			verbs = append(verbs, a.CLIVerb)
+		} else {
+			verbs = append(verbs, a.Name)
+		}
 	}
-	fmt.Fprintf(c.stdout, "\navailable now: %s\n", strings.Join(names, ", "))
+	fmt.Fprintf(c.stdout, "\navailable now: %s\n", strings.Join(verbs, ", "))
 }
 
 // waitForJob polls the job resource until the job with the given id stops

@@ -16,8 +16,8 @@ import (
 
 // fakeAPI is a minimal stand-in for the httpapi server, wired just well enough
 // to drive the client's --remote path end to end over real HTTP: GET /
-// (root, with links to "ac-control" and "status"), GET /ac-control (linking
-// to "fans"), GET /fans (advertising the fans-off action with its force
+// (root, with links to "power", "ac-control" and "status"), GET /power (the
+// power section folder), GET /ac-control (linking to "fans"), GET /fans (advertising the fans-off action with its force
 // checkbox), POST /fans/off (the action itself), and GET /status (so
 // runAction's post-action showStatus has somewhere to land).
 //
@@ -41,15 +41,19 @@ type fakeAPI struct {
 	// advertised and never enforced without being offered first.
 	coldSnapshot bool
 
-	// rootActions and statusActions are what GET / and GET /status
-	// advertise. Both are empty unless a test sets them: the real root
-	// renders no actions since the section folders, while the real /status
-	// renders every action possible right now -- see TestRunStatusLists*.
+	// rootActions, powerActions and statusActions are what GET /, GET
+	// /power and GET /status advertise. All are empty unless a test sets
+	// them: the real root renders no actions since the section folders, the
+	// real /power folder renders its possible host power actions, and the
+	// real /status renders every action possible right now -- see
+	// TestRunStatusLists*.
 	rootActions   []Action
+	powerActions  []Action
 	statusActions []Action
 
 	mu        sync.Mutex
 	forceSent []string // the "force" form value on every POST /fans/off, in order
+	gets      []string // the path of every GET, in order
 }
 
 func newFakeAPI(t *testing.T, wantKey string) *fakeAPI {
@@ -73,9 +77,17 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodGet {
+		f.mu.Lock()
+		f.gets = append(f.gets, r.URL.Path)
+		f.mu.Unlock()
+	}
+
 	switch {
 	case r.URL.Path == "/" && r.Method == http.MethodGet:
 		f.handleRoot(w)
+	case r.URL.Path == "/power" && r.Method == http.MethodGet:
+		writeEntity(w, Entity{Class: []string{"power", "section"}, Actions: f.powerActions})
 	case r.URL.Path == "/ac-control" && r.Method == http.MethodGet:
 		f.handleACControl(w)
 	case r.URL.Path == "/fans" && r.Method == http.MethodGet:
@@ -90,12 +102,14 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleRoot answers GET / with the section-folder link runAction needs to
-// reach fans-off ("ac-control") and "status" for the post-action showStatus.
+// handleRoot answers GET / with the section-folder links runAction needs to
+// reach the power actions ("power") and fans-off ("ac-control"), and "status"
+// for the post-action showStatus.
 func (f *fakeAPI) handleRoot(w http.ResponseWriter) {
 	writeEntity(w, Entity{
 		Properties: map[string]any{"apiVersion": float64(SupportedAPIVersion)},
 		Links: []Link{
+			{Rel: []string{"power"}, Href: "/power"},
 			{Rel: []string{"ac-control"}, Href: "/ac-control"},
 			{Rel: []string{"status"}, Href: "/status"},
 		},
@@ -166,6 +180,13 @@ func (f *fakeAPI) forceValues() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.forceSent...)
+}
+
+// getPaths returns the path of every GET served so far, in order.
+func (f *fakeAPI) getPaths() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.gets...)
 }
 
 func writeEntity(w http.ResponseWriter, e Entity) {
