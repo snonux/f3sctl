@@ -50,6 +50,11 @@ type Client struct {
 	// trace, when set, receives a line per request showing what was called,
 	// where, and which node answered. Nil disables tracing.
 	trace io.Writer
+
+	// poll overrides waitForJob's gaps and deadline buffer. The zero value
+	// means the production defaults (see jobPolling.withDefaults); tests set
+	// it so the job-poll loop runs in milliseconds rather than minutes.
+	poll jobPolling
 }
 
 // Verbose turns on request tracing, writing to w.

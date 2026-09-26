@@ -53,7 +53,7 @@ func (c *Client) jobWaitTimeout() time.Duration {
 	if unmute <= 0 {
 		unmute = config.Default().UnmuteTimeout.D()
 	}
-	return unmute + jobWaitBuffer
+	return unmute + c.poll.withDefaults().waitBuffer
 }
 
 // Run executes a CLI command against the remote API.
@@ -259,62 +259,78 @@ func (c *Client) showMonitoring(ctx context.Context) error {
 // a wake in one job, which outlasts the wake-only budget jobWaitTimeout
 // derives from this side's UnmuteTimeout.
 func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverCeiling time.Duration) error {
+	poll := c.poll.withDefaults()
 	timeout := c.jobWaitTimeout()
-	if serverCeiling+jobWaitBuffer > timeout {
-		timeout = serverCeiling + jobWaitBuffer
+	if serverCeiling+poll.waitBuffer > timeout {
+		timeout = serverCeiling + poll.waitBuffer
 	}
 	// Bound the wait by BOTH the caller's ctx and the server's worst-case
 	// runtime: a Ctrl-C (runRemote wires signal.NotifyContext) cancels ctx, and
 	// a caller that handed over an unbounded context still gives up after
 	// jobWaitTimeout rather than looping forever. Whichever fires first wins.
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	// The cause tells the two apart below: a deadline the caller's own ctx
+	// carried is the caller's, not this function's "gave up".
+	ctx, cancel := context.WithTimeoutCause(ctx, timeout, errJobWaitTimeout)
 	defer cancel()
 
 	for {
 		select {
 		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
-				return fmt.Errorf("gave up waiting for the job after %s", timeout)
+			if errors.Is(context.Cause(ctx), errJobWaitTimeout) {
+				return fmt.Errorf("%w after %s", errJobWaitTimeout, timeout)
 			}
 			// The caller cancelled (Ctrl-C, or the request that drove this went
 			// home). Surface that rather than reporting a synthetic "gave up".
 			return ctx.Err()
-		case <-time.After(jobPollInterval):
+		case <-time.After(poll.interval):
 		}
 
-		job, err := c.pollJob(ctx, root, id)
-		if err != nil {
-			// A transient network blip mid-shutdown is expected -- the
-			// cluster is, after all, being taken apart.
-			fmt.Fprintf(c.stdout, "  (cannot read the job right now: %v)\n", err)
-			continue
-		}
-		if job == nil {
-			// Every attempt this cycle reached the other node. Say so plainly
-			// rather than reporting someone else's outcome as this one's.
-			fmt.Fprintln(c.stdout, "  (polled the other API node; still waiting)")
-			continue
-		}
-
-		switch state, _ := job.Properties["state"].(string); state {
-		case "running":
-			// Show the stage rather than a bare "still running": a shutdown
-			// takes minutes, and knowing which host it is on is the
-			// difference between waiting patiently and wondering if it hung.
-			if step, _ := job.Properties["step"].(string); step != "" {
-				fmt.Fprintf(c.stdout, "  %s\n", step)
-			} else {
-				fmt.Fprintln(c.stdout, "  still running...")
-			}
-		default:
-			if msg, _ := job.Properties["error"].(string); msg != "" {
-				fmt.Fprintf(c.stdout, "job %s: %s\n", state, msg)
-			} else {
-				fmt.Fprintf(c.stdout, "job %s\n", state)
-			}
+		if c.reportPoll(ctx, root, id) {
 			return c.showStatus(ctx)
 		}
 	}
+}
+
+// errJobWaitTimeout is what waitForJob returns (wrapped, with the deadline it
+// used) when the job outlived the client's patience, as opposed to the caller
+// cancelling the wait.
+var errJobWaitTimeout = errors.New("gave up waiting for the job")
+
+// reportPoll runs one polling cycle for the job with the given id and prints
+// what it learned. It reports true once the job has stopped running.
+func (c *Client) reportPoll(ctx context.Context, root Entity, id string) bool {
+	job, err := c.pollJob(ctx, root, id)
+	if err != nil {
+		// A transient network blip mid-shutdown is expected -- the
+		// cluster is, after all, being taken apart.
+		fmt.Fprintf(c.stdout, "  (cannot read the job right now: %v)\n", err)
+		return false
+	}
+	if job == nil {
+		// Every attempt this cycle reached the other node. Say so plainly
+		// rather than reporting someone else's outcome as this one's.
+		fmt.Fprintln(c.stdout, "  (polled the other API node; still waiting)")
+		return false
+	}
+
+	state, _ := job.Properties["state"].(string)
+	if state == "running" {
+		// Show the stage rather than a bare "still running": a shutdown
+		// takes minutes, and knowing which host it is on is the
+		// difference between waiting patiently and wondering if it hung.
+		if step, _ := job.Properties["step"].(string); step != "" {
+			fmt.Fprintf(c.stdout, "  %s\n", step)
+		} else {
+			fmt.Fprintln(c.stdout, "  still running...")
+		}
+		return false
+	}
+	if msg, _ := job.Properties["error"].(string); msg != "" {
+		fmt.Fprintf(c.stdout, "job %s: %s\n", state, msg)
+	} else {
+		fmt.Fprintf(c.stdout, "job %s\n", state)
+	}
+	return true
 }
 
 // serverStaleCeiling reads the staleness ceiling a job entity advertises
@@ -334,6 +350,32 @@ const (
 	jobRetryGap     = time.Second
 )
 
+// jobPolling holds the timings waitForJob and pollJob wait on. It exists as a
+// seam: production always runs with the defaults, while tests shrink them so
+// the retry, id-matching and deadline paths can run against a real HTTP
+// server in milliseconds.
+type jobPolling struct {
+	interval   time.Duration // gap between polling cycles
+	retryGap   time.Duration // gap between reads within one cycle
+	waitBuffer time.Duration // added to the server's worst case for the deadline
+}
+
+// withDefaults fills every unset (zero or negative) timing with its
+// production value, so a Client built without New -- or a test that only
+// cares about one gap -- still polls sensibly.
+func (p jobPolling) withDefaults() jobPolling {
+	if p.interval <= 0 {
+		p.interval = jobPollInterval
+	}
+	if p.retryGap <= 0 {
+		p.retryGap = jobRetryGap
+	}
+	if p.waitBuffer <= 0 {
+		p.waitBuffer = jobWaitBuffer
+	}
+	return p
+}
+
 // pollJob reads this job, retrying briefly when the read lands on the other
 // API node. It returns nil, nil when every attempt did.
 //
@@ -349,6 +391,7 @@ const (
 // The retries are deliberately bounded and slow enough to stay polite: this is
 // a CGI on a Raspberry Pi, and the job it is reporting on takes minutes.
 func (c *Client) pollJob(ctx context.Context, root Entity, id string) (*Entity, error) {
+	retryGap := c.poll.withDefaults().retryGap
 	var lastErr error
 
 	for attempt := 0; attempt < jobPollRetries; attempt++ {
@@ -359,7 +402,7 @@ func (c *Client) pollJob(ctx context.Context, root Entity, id string) (*Entity, 
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(jobRetryGap):
+			case <-time.After(retryGap):
 			}
 		}
 
