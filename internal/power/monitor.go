@@ -12,7 +12,9 @@ package power
 // The transport is the same allowlisted-agent-verb SSH call the shutdown and
 // zusb paths make, narrowed to the one method this concern uses (gatewayVerb,
 // below) so a fake standing in for the Monitor does not have to satisfy the
-// whole PowerBackend. The cluster wait reuses Engine.Probe through a func
+// whole PowerBackend. Mute and un-mute can instead go through a GatewaySwitch
+// (the pi0/pi1 API) when this process holds no key the gateways accept -- a
+// local wake from a laptop. The cluster wait reuses Engine.Probe through a func
 // field rather than reaching back into Engine, so the Monitor is testable
 // without an Engine at all.
 
@@ -36,6 +38,27 @@ import (
 // wakes a host or powers one off.
 type gatewayVerb interface {
 	AgentVerb(ctx context.Context, h inventory.Host, verb string) (string, error)
+}
+
+// GatewaySwitch sets or clears the Gogios mute on every gateway by some route
+// other than this process's own SSH key -- in production, the pi0/pi1 HTTP
+// API, which reaches the gateways with the key that is pinned to those two
+// hosts.
+//
+// It exists because the wake path runs where the magic packet can be sent
+// (any LAN host, e.g. a laptop) but the gateways only accept the restricted
+// f3sctl key from pi0/pi1 (README "Security model"). Without it a local
+// "power on" from a laptop woke the rack and then failed to un-mute with "no
+// readable SSH identity", while "monitoring unmute" -- routed through the API
+// -- worked moments later (task 5l2). The power package cannot import the
+// API client (the client imports power), so the CLI's composition root
+// supplies the implementation and Engine.WithGatewaySwitch installs it.
+//
+// SetMute returns an error naming the gateways left in the wrong state, in
+// the same "could not gogios-<verb> Gogios on: [...]" shape eachGateway uses,
+// and logs one line per gateway like eachGateway does.
+type GatewaySwitch interface {
+	SetMute(ctx context.Context, log io.Writer, mute bool) error
 }
 
 // Monitor mutes, un-mutes and reports the Gogios alerting state on the
@@ -77,6 +100,11 @@ type Monitor struct {
 	// and rewakeGap.
 	poll        time.Duration
 	rewakeEvery time.Duration
+	// via, when set, replaces the per-gateway SSH verb for mute and un-mute
+	// (not for Status, which only the API server and a --local run on a Pi
+	// call -- both hold the key). Nil means the SSH verb, which is right
+	// wherever the pinned key is readable. See GatewaySwitch.
+	via GatewaySwitch
 }
 
 // clusterPollInterval is how often waitForCluster re-probes r0/r1/r2.
@@ -120,7 +148,22 @@ func NewMonitor(cfg config.Config, verb gatewayVerb, probe func(ctx context.Cont
 //
 // Without it, deliberately taking the cluster down pages as if it had failed.
 func (m *Monitor) Mute(ctx context.Context, log io.Writer) error {
-	return m.eachGateway(ctx, log, "gogios-mute", "muted")
+	return m.setMute(ctx, log, true)
+}
+
+// setMute is the one place mute and un-mute pick their transport: the
+// GatewaySwitch when one is installed, otherwise the allowlisted SSH verb on
+// each gateway. An inventory without gateways has nothing to mute, so the
+// switch is not consulted either -- the same no-op eachGateway makes of an
+// empty list, rather than an API round trip about gateways nobody listed.
+func (m *Monitor) setMute(ctx context.Context, log io.Writer, mute bool) error {
+	if m.via != nil && len(m.gateways) > 0 {
+		return m.via.SetMute(ctx, log, mute)
+	}
+	if mute {
+		return m.eachGateway(ctx, log, "gogios-mute", "muted")
+	}
+	return m.eachGateway(ctx, log, "gogios-unmute", "un-muted")
 }
 
 // GatewayMute is one gateway's monitoring state.
@@ -183,7 +226,7 @@ func AnyMuted(states []GatewayMute) bool {
 // mid-wait, or a gateway that could not be reached for the un-mute. Without it
 // a stranded mute can only be cleared by hand over SSH.
 func (m *Monitor) Unmute(ctx context.Context, log io.Writer) error {
-	return m.eachGateway(ctx, log, "gogios-unmute", "un-muted")
+	return m.setMute(ctx, log, false)
 }
 
 // UnmuteGogios waits for the k3s nodes to come back, then removes the marker.
@@ -218,6 +261,12 @@ func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()
 	if waitErr != nil && ctx.Err() != nil {
 		fmt.Fprintf(log, "  %v\n", waitErr)
 		fmt.Fprintf(log, "  Leaving Gogios muted. Clear it by hand once the nodes are up:\n")
+		if m.via != nil {
+			// No local key to SSH with; the same route the wake would have
+			// used is the one to suggest.
+			fmt.Fprintln(log, "    f3sctl monitoring unmute")
+			return waitErr
+		}
 		for _, gw := range m.gateways {
 			fmt.Fprintf(log, "    ssh -p %d %s@%s gogios-unmute\n", gw.SSHPort, gw.SSHUser, gw.IP)
 		}
@@ -228,7 +277,7 @@ func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()
 		fmt.Fprintln(log, "  Un-muting Gogios anyway, so the missing nodes alert.")
 	}
 
-	unmuteErr := m.eachGateway(ctx, log, "gogios-unmute", "un-muted")
+	unmuteErr := m.setMute(ctx, log, false)
 	switch {
 	case waitErr != nil && unmuteErr != nil:
 		// One line, like every other error this package returns; %w keeps
@@ -328,6 +377,17 @@ func (e *Engine) monitorBackend() *Monitor {
 		return e.monitor
 	}
 	return NewMonitor(e.cfg, e.powerBackend(), e.Probe)
+}
+
+// WithGatewaySwitch makes mute and un-mute reach the gateways through s
+// instead of this process's SSH key; nil restores the SSH verb. The CLI
+// installs the API route when no key is readable locally -- see GatewaySwitch.
+func (e *Engine) WithGatewaySwitch(s GatewaySwitch) *Engine {
+	if e.monitor == nil {
+		e.monitor = NewMonitor(e.cfg, e.powerBackend(), e.Probe)
+	}
+	e.monitor.via = s
+	return e
 }
 
 // MuteGogios creates the marker that suppresses Gogios alerting on both

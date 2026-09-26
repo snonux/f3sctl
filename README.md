@@ -25,8 +25,11 @@ pi0/pi1 can actually perform one â€” the restricted SSH key is pinned to them â€
 so routing through the API is what makes the same command work on a laptop.
 Waking, status and the fan/AC plugs stay local: a magic packet is an unprivileged
 broadcast any LAN host may send, which also leaves a way to wake the rack when
-the API itself is unreachable. `--local` overrides the routing and `--remote`
-forces the API for everything.
+the API itself is unreachable. The Gogios mute is the exception inside a local
+wake: the gateways only accept the pinned key, so where no such key is readable
+(a laptop) the closing un-mute goes through the API, exactly like
+`f3sctl monitoring unmute`. `--local` overrides the routing (the un-mute then
+uses SSH or fails) and `--remote` forces the API for everything.
 
 Add `--verbose` to trace every API call:
 

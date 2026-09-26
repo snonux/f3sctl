@@ -140,7 +140,7 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 		fmt.Fprint(stdout, usage)
 		return nil
 	case "power":
-		return runPower(cfg, args[1:], stdout, stderr, reporter)
+		return runPower(cfg, args[1:], flags.local, stdout, stderr, reporter)
 	case "fans":
 		return runFans(cfg, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "ac":
@@ -158,7 +158,10 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 	return fmt.Errorf("unknown command %q", args[0])
 }
 
-func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
+// runPower performs a power command locally. local is --local (or RunLocal):
+// it keeps the Gogios mute on the SSH verb even without a readable key,
+// rather than letting gatewaySwitchFor route it through the API.
+func runPower(cfg config.Config, args []string, local bool, stdout, stderr io.Writer, reporter power.Reporter) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
@@ -190,6 +193,9 @@ func runPower(cfg config.Config, args []string, stdout, stderr io.Writer, report
 		return err
 	}
 	eng.WithReporter(reporter)
+	// The wake's closing un-mute needs the key pinned to pi0/pi1; without one
+	// here, reach the gateways through the API like `monitoring unmute` does.
+	eng.WithGatewaySwitch(gatewaySwitchFor(cfg, local))
 	return act(context.Background(), eng, stdout)
 }
 
