@@ -234,10 +234,15 @@ first readable entry wins, which lets one shipped config serve both the
 
 Host inventory (IPs, MACs, the broadcast address, the Shelly plug) lives in
 `internal/inventory` and can be overridden by the same file. An
-`inventory.hosts` list replaces the compiled-in one wholesale; mark the f-host
-that is not part of the k3s cluster (f3 by default) with `"standalone": true`,
+`inventory.hosts` list replaces the compiled-in one wholesale, and every
+`"role": "f"` host in it must say `"standalone": true` or `false` explicitly:
+the f-host that is not part of the k3s cluster (f3 by default) is standalone,
 which keeps it out of a bare `power on|off` and the fan guard while
-`power all` still includes it.
+`power all` still includes it. A missing key is an error rather than a
+default, so an older config cannot quietly pull f3 into `power off`. The list
+must also be non-empty, contain at least one f-host, and use each name once.
+`"hosts": null` (or `"inventory": null`) keeps the compiled-in hosts;
+`"hosts": []` is rejected.
 
 `peer_nodes` are the API's own other CGI nodes (pi0 and pi1) that
 `internal/coordination.PeerSet` asks "are you mid-job?" before starting one,

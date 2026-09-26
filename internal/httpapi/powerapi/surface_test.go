@@ -42,23 +42,27 @@ func TestHostCountsFollowAConfiguredInventory(t *testing.T) {
 	}
 }
 
-// TestGuardsNeedTheInventory pins the documented requirement on Surface.Inv:
-// without it there are no groups, so nothing is counted and the snapshot
-// guards read a running rack as cold. The routes built by New always carry
-// the configured inventory; this is what a Surface without one would do.
+// TestGuardsNeedTheInventory pins the documented behaviour of a Surface
+// without an inventory: it fails closed. Nothing is counted, so no power
+// action is offered, and both snapshot guards read a silent rack as busy, so
+// cutting the fans or AC still asks for force.
 func TestGuardsNeedTheInventory(t *testing.T) {
 	s := contract.State{Hosts: []power.HostStatus{
-		{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
+		{Name: "f0", Role: "f", PingKnown: true},
 	}}
 	bare := &Surface{}
 	if up, sshUp, total := bare.everyFHostUp(s); up+sshUp+total != 0 {
 		t.Errorf("everyFHostUp with no inventory = (%d, %d, %d), want nothing counted", up, sshUp, total)
 	}
-	if bare.rackBusy(s).Busy() {
-		t.Error("rackBusy with no inventory is busy; expected the documented cold reading")
+	if !bare.rackBusy(s).Busy() || !bare.acBusy(s).Busy() {
+		t.Error("rackBusy/acBusy with no inventory read the rack as cold; they must fail safe")
 	}
 
 	configured := &Surface{Inv: inventory.Default()}
+	if configured.rackBusy(s).Busy() || configured.acBusy(s).Busy() {
+		t.Error("rackBusy/acBusy with the default inventory call a silent f0 busy")
+	}
+	s.Hosts[0].Ping = true
 	if !configured.rackBusy(s).Busy() || !configured.acBusy(s).Busy() {
 		t.Error("rackBusy/acBusy with the default inventory ignore a running f0")
 	}

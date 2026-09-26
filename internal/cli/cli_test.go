@@ -450,22 +450,22 @@ func TestMonitoringRejectsTrailingArgs(t *testing.T) {
 // It has to drive the exported Run, not runCLI: runCLI takes a *fakeLiveness
 // and always passes its non-nil method value, so it cannot express "nothing was
 // injected". The inventory is emptied so the real Engine.LiveHosts has no
-// f-host to probe: it returns nil without a single packet leaving the box, and
-// the guard then sees an idle rack and switches the plug off for real.
+// f-host to probe: no packet leaves the box, and the engine's guard fails safe
+// on an empty group, reporting the rack as running. That refusal can only come
+// from the engine fallback, so it proves the fallback ran -- and that the plug
+// was left alone proves the guard still guards.
 func TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	cfg := testConfig(t, shelly)
 	cfg.Inventory.Hosts = nil
 
 	var outBuf, errBuf bytes.Buffer
-	if err := Run(cfg, []string{"fans", "off"}, &outBuf, &errBuf); err != nil {
-		t.Fatalf("fans off with no liveness injected: %v", err)
+	err := Run(cfg, []string{"fans", "off"}, &outBuf, &errBuf)
+	if err == nil || !strings.Contains(err.Error(), "no hosts configured") {
+		t.Fatalf("fans off with no liveness injected: err = %v, want the engine guard's empty-group refusal", err)
 	}
-	if got := shelly.SetCalls(); len(got) != 1 || got[0] {
-		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
-	}
-	if !strings.Contains(outBuf.String(), "rack fans: off") {
-		t.Errorf("output = %q, want it to report the fans off", outBuf.String())
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Fatalf("Switch.Set calls = %v, want none: the guard refused", got)
 	}
 }
 

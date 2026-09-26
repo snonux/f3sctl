@@ -8,6 +8,7 @@ package inventory
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -46,8 +47,9 @@ type Host struct {
 	// runs a standalone Rocky VM, is racked apart from the others and the fan
 	// plug does not cool it). It is left out of PowerGroup -- and so out of a
 	// bare `power on|off` and the fan guard -- but stays in EveryFHost.
-	// Meaningful only for RoleF hosts.
-	Standalone bool `json:"standalone,omitempty"`
+	// Meaningful only for RoleF hosts, and required on every one of them in a
+	// configured host list (see UnmarshalJSON).
+	Standalone bool `json:"standalone"`
 }
 
 // Wakeable reports whether this host can be started with a magic packet.
@@ -74,25 +76,100 @@ type Inventory struct {
 	GogiosMuteFile string `json:"gogios_mute_file"`
 }
 
+// ErrInvalid is wrapped by every error UnmarshalJSON returns for a host list
+// that decodes but must not be used.
+var ErrInvalid = errors.New("invalid inventory")
+
+// wireHost is Host as a config file spells it. Standalone is a pointer so an
+// absent key can be told apart from an explicit false; it shadows the
+// embedded Host.Standalone for encoding/json.
+type wireHost struct {
+	Host
+	Standalone *bool `json:"standalone"`
+}
+
 // UnmarshalJSON overlays a configured inventory onto inv the way config.Load
 // overlays everything else -- absent keys keep their current value -- except
-// that a present "hosts" list replaces inv.Hosts wholesale.
+// that a present "hosts" list replaces inv.Hosts wholesale, and is validated.
 //
-// encoding/json decodes an array into the slice's existing elements, so
-// without this a configured host list would inherit, by index, every field it
-// leaves out from the compiled-in host that used to sit there: a Standalone
-// flag, or a MAC, silently landing on an unrelated host.
+// Wholesale, because encoding/json decodes an array into the slice's existing
+// elements: a configured host list would otherwise inherit, by index, every
+// field it leaves out from the compiled-in host that used to sit there -- a
+// Standalone flag, or a MAC, silently landing on an unrelated host.
+//
+// "hosts" absent or null keeps the current list; an empty list is an error.
+// Nothing is changed unless the whole inventory is accepted.
 func (inv *Inventory) UnmarshalJSON(data []byte) error {
 	type plain Inventory // no methods, so no recursion
-	p := plain(*inv)
-	p.Hosts = nil
-	if err := json.Unmarshal(data, &p); err != nil {
+	var wire struct {
+		plain
+		Hosts *[]wireHost `json:"hosts"` // shadows plain.Hosts
+	}
+	wire.plain = plain(*inv)
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return fmt.Errorf("decoding inventory: %w", err)
 	}
-	if p.Hosts == nil { // "hosts" absent (or null): keep the current list
-		p.Hosts = inv.Hosts
+	out := Inventory(wire.plain)
+	if wire.Hosts != nil {
+		hosts, err := hostsFromWire(*wire.Hosts)
+		if err != nil {
+			return err
+		}
+		out.Hosts = hosts
 	}
-	*inv = Inventory(p)
+	*inv = out
+	return nil
+}
+
+// hostsFromWire converts and validates a configured host list.
+//
+// Every f-host must say whether it is standalone. Defaulting an absent key to
+// false would fail open: a config written before the flag existed would
+// silently put f3 into the power group, and a bare `power off` would take it
+// down with the cluster.
+func hostsFromWire(wire []wireHost) ([]Host, error) {
+	hosts := make([]Host, 0, len(wire))
+	for i, w := range wire {
+		h := w.Host
+		if h.Role == RoleF && w.Standalone == nil {
+			return nil, fmt.Errorf(`%w: hosts[%d] (%s): role "f" needs an explicit "standalone"`,
+				ErrInvalid, i, h.Name)
+		}
+		if w.Standalone != nil {
+			h.Standalone = *w.Standalone
+		}
+		hosts = append(hosts, h)
+	}
+	if err := validateHosts(hosts); err != nil {
+		return nil, err
+	}
+	return hosts, nil
+}
+
+// validateHosts rejects a host list f3sctl cannot act on sensibly: empty, with
+// no f-host to power, with a name used twice (every lookup is by name), or
+// with the standalone flag on a host it means nothing for.
+func validateHosts(hosts []Host) error {
+	if len(hosts) == 0 {
+		return fmt.Errorf("%w: hosts is empty", ErrInvalid)
+	}
+	seen := make(map[string]bool, len(hosts))
+	fHosts := 0
+	for i, h := range hosts {
+		if seen[h.Name] {
+			return fmt.Errorf("%w: hosts[%d]: duplicate name %q", ErrInvalid, i, h.Name)
+		}
+		seen[h.Name] = true
+		if h.Role == RoleF {
+			fHosts++
+		} else if h.Standalone {
+			return fmt.Errorf(`%w: hosts[%d] (%s): "standalone" is only meaningful for role "f", not %q`,
+				ErrInvalid, i, h.Name, h.Role)
+		}
+	}
+	if fHosts == 0 {
+		return fmt.Errorf(`%w: hosts has no role "f" host`, ErrInvalid)
+	}
 	return nil
 }
 

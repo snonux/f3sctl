@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -172,8 +173,8 @@ func TestUnmarshalReplacesTheHostListWholesale(t *testing.T) {
 	inv := Default()
 	// Four hosts, so index 3 lands on the default f3 (Standalone, with a MAC).
 	raw := `{"hosts":[
-		{"name":"a0","role":"f","mac":"00:00:00:00:00:01"},
-		{"name":"a1","role":"f","mac":"00:00:00:00:00:02"},
+		{"name":"a0","role":"f","mac":"00:00:00:00:00:01","standalone":false},
+		{"name":"a1","role":"f","mac":"00:00:00:00:00:02","standalone":false},
 		{"name":"a2","role":"f","mac":"00:00:00:00:00:03","standalone":true},
 		{"name":"a3","role":"cluster"}]}`
 	if err := json.Unmarshal([]byte(raw), &inv); err != nil {
@@ -195,24 +196,42 @@ func TestUnmarshalReplacesTheHostListWholesale(t *testing.T) {
 	}
 }
 
-// TestUnmarshalKeepsTheHostsWhenAbsent pins the other half of the overlay: a
-// config that changes only a scalar keeps the compiled-in hosts, and the
-// Standalone flag survives a marshal/unmarshal round trip.
-func TestUnmarshalKeepsTheHostsWhenAbsent(t *testing.T) {
-	inv := Default()
-	if err := json.Unmarshal([]byte(`{"broadcast":"10.0.0.255"}`), &inv); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
+// TestUnmarshalKeepsTheHostsWhenAbsentOrNull pins the overlay cases that must
+// leave the compiled-in hosts alone: an overlay that does not mention them,
+// an explicit null, and a JSON null for the whole inventory.
+func TestUnmarshalKeepsTheHostsWhenAbsentOrNull(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw, broadcast string
+	}{
+		{"absent", `{"broadcast":"10.0.0.255"}`, "10.0.0.255"},
+		{"hosts null", `{"hosts":null,"broadcast":"10.0.0.255"}`, "10.0.0.255"},
+		{"inventory null", `null`, Default().Broadcast},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := Default()
+			if err := json.Unmarshal([]byte(tc.raw), &inv); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			if inv.Broadcast != tc.broadcast {
+				t.Errorf("Broadcast = %q, want %q", inv.Broadcast, tc.broadcast)
+			}
+			if !reflect.DeepEqual(inv.Hosts, Default().Hosts) {
+				t.Error("hosts changed although the overlay did not replace them")
+			}
+		})
 	}
-	if inv.Broadcast != "10.0.0.255" {
-		t.Errorf("Broadcast = %q, want the override", inv.Broadcast)
-	}
-	if !reflect.DeepEqual(inv.Hosts, Default().Hosts) {
-		t.Error("hosts changed although the overlay did not mention them")
-	}
+}
 
+// TestUnmarshalRoundTripsTheDefault pins that what json.Marshal writes -- the
+// standalone key included on every host -- is accepted back unchanged, so a
+// dumped config is a valid config.
+func TestUnmarshalRoundTripsTheDefault(t *testing.T) {
 	raw, err := json.Marshal(Default())
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
+	}
+	if n := strings.Count(string(raw), `"standalone":`); n != len(Default().Hosts) {
+		t.Errorf("marshalled %d standalone keys for %d hosts; the key must always be written", n, len(Default().Hosts))
 	}
 	var back Inventory
 	if err := json.Unmarshal(raw, &back); err != nil {
@@ -223,11 +242,42 @@ func TestUnmarshalKeepsTheHostsWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestUnmarshalRejectsInvalidHostLists pins the fail-closed validation of a
+// configured host list. Every rejection leaves the inventory untouched.
+func TestUnmarshalRejectsInvalidHostLists(t *testing.T) {
+	const f = `{"name":"f0","role":"f","standalone":false}`
+	for _, tc := range []struct {
+		name, raw, want string
+	}{
+		{"standalone missing on an f-host",
+			`{"hosts":[` + f + `,{"name":"f1","role":"f","standalone":false},
+				{"name":"f2","role":"f","standalone":false},{"name":"f3","role":"f"}]}`,
+			`hosts[3] (f3): role "f" needs an explicit "standalone"`},
+		{"empty list", `{"hosts":[]}`, "hosts is empty"},
+		{"no f-host", `{"hosts":[{"name":"r0","role":"cluster"}]}`, `no role "f" host`},
+		{"duplicate name", `{"hosts":[` + f + `,{"name":"f0","role":"cluster"}]}`, `duplicate name "f0"`},
+		{"standalone on a non-f host",
+			`{"hosts":[` + f + `,{"name":"r0","role":"cluster","standalone":true}]}`,
+			`hosts[1] (r0): "standalone" is only meaningful for role "f"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := Default()
+			err := json.Unmarshal([]byte(tc.raw), &inv)
+			if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want ErrInvalid mentioning %q", err, tc.want)
+			}
+			if !reflect.DeepEqual(inv, Default()) {
+				t.Error("a rejected Unmarshal modified the inventory")
+			}
+		})
+	}
+}
+
 // TestUnmarshalRejectsAMistypedField pins that a type error inside the
-// inventory is reported, not swallowed into a zero value.
+// inventory is reported, not swallowed into a zero value, and changes nothing.
 func TestUnmarshalRejectsAMistypedField(t *testing.T) {
 	inv := Default()
-	err := json.Unmarshal([]byte(`{"hosts":[{"name":"f0","standalone":"yes"}]}`), &inv)
+	err := json.Unmarshal([]byte(`{"hosts":[{"name":"f0","role":"f","standalone":"yes"}]}`), &inv)
 	var typeErr *json.UnmarshalTypeError
 	if !errors.As(err, &typeErr) {
 		t.Fatalf("err = %v, want a *json.UnmarshalTypeError", err)

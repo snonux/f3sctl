@@ -6,10 +6,12 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/powertest"
 )
 
 // groupsInventory is an inventory whose standalone host is not called f3, so
@@ -82,9 +84,53 @@ func TestActivityFromJudgesTheInventorysGroups(t *testing.T) {
 	if got := ACActivityFrom(inv, snapshot).Hosts(); !reflect.DeepEqual(got, []string{"f3", "f9"}) {
 		t.Errorf("ACActivityFrom hosts = %v, want [f3 f9]", got)
 	}
-	if RackActivityFrom(inventory.Inventory{}, snapshot).Busy() {
-		t.Error("RackActivityFrom with an empty inventory is busy; no host is in its power group")
+}
+
+// TestAnEmptyGroupFailsSafe pins that a guard with no hosts to judge reads the
+// rack as busy, not cold -- in the snapshot half and the probing half alike,
+// and through Hosts() as well as Busy(), because the CLI's fan and AC guards
+// and the shutdown's fans-off step read Hosts(). All f-hosts standalone leaves
+// the fan guard's group empty while the AC guard still has hosts to judge.
+func TestAnEmptyGroupFailsSafe(t *testing.T) {
+	allStandalone := inventory.Inventory{Hosts: []inventory.Host{
+		{Name: "f0", Role: inventory.RoleF, Standalone: true},
+	}}
+	silent := []HostStatus{{Name: "f0", Role: string(inventory.RoleF), PingKnown: true}}
+
+	for _, tc := range []struct {
+		name string
+		got  RackActivity
+	}{
+		{"RackActivityFrom/empty inventory", RackActivityFrom(inventory.Inventory{}, silent)},
+		{"ACActivityFrom/empty inventory", ACActivityFrom(inventory.Inventory{}, silent)},
+		{"RackActivityFrom/all standalone", RackActivityFrom(allStandalone, silent)},
+		{"Engine.RackActivity/empty inventory", emptyInventoryEngine(t).RackActivity(context.Background())},
+		{"Engine.ACActivity/empty inventory", emptyInventoryEngine(t).ACActivity(context.Background())},
+	} {
+		if !tc.got.Busy() || len(tc.got.Hosts()) == 0 {
+			t.Errorf("%s: Busy = %v, Hosts = %v; an empty group must read as busy", tc.name, tc.got.Busy(), tc.got.Hosts())
+		}
+		if !strings.Contains(tc.got.Why(), "no hosts") {
+			t.Errorf("%s: Why = %q, want it to say no hosts are configured", tc.name, tc.got.Why())
+		}
 	}
+
+	if ACActivityFrom(allStandalone, silent).Busy() {
+		t.Error("ACActivityFrom/all standalone is busy; f0 is in its group and silent")
+	}
+}
+
+// emptyInventoryEngine is a test engine whose inventory has no hosts. Its
+// probe must never run: there is nothing to probe.
+func emptyInventoryEngine(t *testing.T) *Engine {
+	t.Helper()
+	eng := testEngine(t, powertest.NewFakeShelly(t, true))
+	eng.cfg.Inventory.Hosts = nil
+	eng.isUp = func(context.Context, string) (bool, bool) {
+		t.Error("probed a host although the inventory has none")
+		return false, true
+	}
+	return eng
 }
 
 // TestSnapshotSelectorsMatchWhatTheEngineTouches is the cross-check behind

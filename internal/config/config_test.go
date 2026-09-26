@@ -2,12 +2,15 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/inventory"
 )
 
 // This file is the first test coverage for package config, which was at 0%.
@@ -488,8 +491,8 @@ func TestLoadRoundTripsTheInventoryStandaloneFlag(t *testing.T) {
 
 	override := filepath.Join(dir, "override.json")
 	body := `{"inventory":{"hosts":[
-		{"name":"f0","role":"f"},{"name":"f1","role":"f"},
-		{"name":"f2","role":"f","standalone":true},{"name":"f3","role":"f"}]}}`
+		{"name":"f0","role":"f","standalone":false},{"name":"f1","role":"f","standalone":false},
+		{"name":"f2","role":"f","standalone":true},{"name":"f3","role":"f","standalone":false}]}}`
 	if err := os.WriteFile(override, []byte(body), 0o600); err != nil {
 		t.Fatalf("writing fixture: %v", err)
 	}
@@ -506,5 +509,44 @@ func TestLoadRoundTripsTheInventoryStandaloneFlag(t *testing.T) {
 	}
 	if cfg.Inventory.ShellyIP != Default().Inventory.ShellyIP {
 		t.Errorf("ShellyIP = %q, want the default kept (absent key)", cfg.Inventory.ShellyIP)
+	}
+}
+
+// TestLoadInventoryOverlayCases pins how config.Load treats the inventory key
+// at the edges: null (for the inventory or its host list) is a no-op that
+// keeps the compiled-in hosts, while a host list that could silently change
+// what `power off` touches -- an f-host without an explicit "standalone", or
+// an empty list -- stops Load rather than starting with it.
+func TestLoadInventoryOverlayCases(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		wantErr    string // empty: Load must succeed with the default hosts
+	}{
+		{"inventory null", `{"inventory":null}`, ""},
+		{"hosts null", `{"inventory":{"hosts":null}}`, ""},
+		{"hosts empty", `{"inventory":{"hosts":[]}}`, "hosts is empty"},
+		{"standalone missing", `{"inventory":{"hosts":[
+			{"name":"f0","role":"f","standalone":false},{"name":"f3","role":"f"}]}}`,
+			`hosts[1] (f3): role "f" needs an explicit "standalone"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "f3sctl.json")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatalf("writing fixture: %v", err)
+			}
+			cfg, err := Load(path)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				if !reflect.DeepEqual(cfg.Inventory, Default().Inventory) {
+					t.Errorf("inventory = %+v, want the compiled-in default", cfg.Inventory)
+				}
+				return
+			}
+			if !errors.Is(err, inventory.ErrInvalid) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("Load err = %v, want inventory.ErrInvalid mentioning %q", err, tc.wantErr)
+			}
+		})
 	}
 }

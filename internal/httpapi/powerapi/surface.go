@@ -81,8 +81,9 @@ type Surface struct {
 	// serves or advertises anything power-related: the availability
 	// predicates (clusterHostsUp, everyFHostUp) and the snapshot halves of
 	// the fan and AC guards (rackBusy, acBusy) judge the snapshot against its
-	// groups. An empty Inventory has no groups, so those guards would read
-	// every rack as cold -- the unsafe answer -- rather than fail.
+	// groups. Without it both fail closed rather than guess: the counts are
+	// zero, so no power action is offered, and the guards read the rack as
+	// busy (see power.RackActivityFrom), so cutting fans or AC demands force.
 	Inv inventory.Inventory
 	// Engine is the fans-and-probes slice of the power engine this surface
 	// drives directly (the plug write, and the strict rack-activity probe the

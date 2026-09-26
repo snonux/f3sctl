@@ -87,6 +87,24 @@ type RackActivity struct {
 	// has no evidence that they are not, and a probe that cannot run must not
 	// read as a cold rack.
 	unknown []string
+	// unconfigured is set when the guard's group had no hosts at all (see
+	// unconfiguredActivity). running then holds a single placeholder, so
+	// every reader of Hosts() -- not just of Busy() -- sees a busy rack.
+	unconfigured bool
+}
+
+// unconfiguredRack is the placeholder a guard over an empty group reports as
+// still running.
+const unconfiguredRack = "the rack (no hosts configured)"
+
+// unconfiguredActivity is what a guard reports when its group is empty.
+//
+// An empty group means the inventory has nothing to judge, not that the rack
+// is cold, so it fails safe: busy, with a reason that says why. A guard that
+// read "no hosts" as "nothing running" would hand the fans or the mains plug
+// to whatever misconfiguration emptied the group.
+func unconfiguredActivity() RackActivity {
+	return RackActivity{running: []string{unconfiguredRack}, unconfigured: true}
 }
 
 // Busy reports whether anything in the rack may still be drawing power, and so
@@ -126,20 +144,25 @@ func (a *RackActivity) add(name string, l hostLiveness) {
 // Role f. The group is the same one Engine.RackActivity probes, so the two
 // halves of the guard cannot drift apart over which hosts count.
 func RackActivityFrom(inv inventory.Inventory, statuses []HostStatus) RackActivity {
-	return foldActivity(PowerGroupStatuses(inv, statuses))
+	return snapshotActivity(inv.PowerGroup(), statuses)
 }
 
 // ACActivityFrom is RackActivityFrom for the f-host AC plug: every f-host
 // counts (EveryFHostStatuses, f3 included), because shelly2 cuts mains to the
 // whole set.
 func ACActivityFrom(inv inventory.Inventory, statuses []HostStatus) RackActivity {
-	return foldActivity(EveryFHostStatuses(inv, statuses))
+	return snapshotActivity(inv.EveryFHost(), statuses)
 }
 
-// foldActivity folds already-selected statuses, in snapshot order.
-func foldActivity(statuses []HostStatus) RackActivity {
+// snapshotActivity folds the statuses of group's hosts, in snapshot order. An
+// empty group fails safe (unconfiguredActivity), exactly as the probing half
+// does in Engine.activityOf.
+func snapshotActivity(group []inventory.Host, statuses []HostStatus) RackActivity {
+	if len(group) == 0 {
+		return unconfiguredActivity()
+	}
 	var a RackActivity
-	for _, st := range statuses {
+	for _, st := range statusesIn(group, statuses) {
 		a.add(st.Name, st.liveness())
 	}
 	return a
@@ -182,6 +205,9 @@ func statusesIn(group []inventory.Host, statuses []HostStatus) []HostStatus {
 // machine cannot probe the rack and every other liveness answer it gives is
 // equally worthless.
 func (a RackActivity) Why() string {
+	if a.unconfigured {
+		return "the inventory configures no hosts for this guard, so the rack is assumed running"
+	}
 	var parts []string
 	if len(a.up) > 0 {
 		parts = append(parts, strings.Join(a.up, ", ")+" still running")
@@ -222,8 +248,11 @@ func (e *Engine) ACActivity(ctx context.Context) RackActivity {
 
 // activityOf is the shared probe loop behind RackActivity and ACActivity:
 // confirmed consecutive silences per host, in parallel, folded into a
-// RackActivity.
+// RackActivity. An empty group fails safe (unconfiguredActivity).
 func (e *Engine) activityOf(ctx context.Context, hosts []inventory.Host) RackActivity {
+	if len(hosts) == 0 {
+		return unconfiguredActivity()
+	}
 	state := make([]hostLiveness, len(hosts))
 	var wg sync.WaitGroup
 	for i, h := range hosts {
