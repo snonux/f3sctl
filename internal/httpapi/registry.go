@@ -76,7 +76,7 @@ func (s *Server) resourceRoutes() []contract.Route {
 			Name: "describedby", Title: "OpenAPI description",
 			Method: http.MethodGet, Path: openAPIPath,
 			// handleOpenAPI ignores State completely: OpenAPIBuilder renders
-			// every route's Fields against a synthetic widestState(), not
+			// every route's Fields against a synthetic widestState(inv), not
 			// the request's own state (see openapi.go).
 			Section:    contract.SectionAPI,
 			SkipsProbe: true,

@@ -17,8 +17,8 @@ import (
 // client (internal/client.showStatus) so the two surfaces cannot drift the
 // way they had before this was unified -- see ry0. This local path renders
 // with ShowRole: true because power.Engine.ProbeAll always populates
-// HostStatus.Role from the inventory; the remote client cannot, and says why
-// in presenter.Options.ShowRole's doc comment.
+// HostStatus.Role from the inventory; the remote client leaves it off by
+// choice (see presenter.Options.ShowRole).
 func printStatus(ctx context.Context, eng powerEngine, out io.Writer) error {
 	statuses := eng.ProbeAll(ctx)
 

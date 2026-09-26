@@ -7,6 +7,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -40,16 +41,21 @@ const openAPIPath = "/openapi.json"
 // on in a test without an engine, jobs or peers.
 type OpenAPIBuilder struct {
 	router *Router
+	// inv is the inventory the routes are served with; the widest state
+	// fields are judged against is built from its hosts (see widestState).
+	inv inventory.Inventory
 }
 
-// NewOpenAPIBuilder returns a builder that resolves hrefs through router.
-func NewOpenAPIBuilder(router *Router) *OpenAPIBuilder {
-	return &OpenAPIBuilder{router: router}
+// NewOpenAPIBuilder returns a builder that resolves hrefs through router and
+// judges state-dependent fields against inv, the served inventory.
+func NewOpenAPIBuilder(router *Router, inv inventory.Inventory) *OpenAPIBuilder {
+	return &OpenAPIBuilder{router: router, inv: inv}
 }
 
 // Build renders the complete OpenAPI document.
 func (b *OpenAPIBuilder) Build() map[string]any {
 	paths := map[string]any{}
+	widest := widestState(b.inv)
 
 	for _, r := range b.router.routes {
 		if r.Path == openAPIPath {
@@ -61,7 +67,7 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 		if entry == nil {
 			entry = map[string]any{}
 		}
-		entry[strings.ToLower(r.Method)] = operationFor(r)
+		entry[strings.ToLower(r.Method)] = operationFor(r, widest)
 		paths[key] = entry
 	}
 
@@ -148,7 +154,7 @@ func tagList() []any {
 }
 
 // operationFor renders one route's OpenAPI Operation Object.
-func operationFor(r contract.Route) map[string]any {
+func operationFor(r contract.Route, widest contract.State) map[string]any {
 	op := map[string]any{
 		"operationId": r.Name,
 		"summary":     r.Title,
@@ -172,7 +178,7 @@ func operationFor(r contract.Route) map[string]any {
 		op["responses"].(map[string]any)["202"] = map[string]any{"description": "accepted; poll the job resource"}
 		op["responses"].(map[string]any)["409"] = map[string]any{"description": "not available now, or another job is running"}
 
-		if fields := describeFields(r); len(fields) > 0 {
+		if fields := describeFields(r, widest); len(fields) > 0 {
 			op["requestBody"] = map[string]any{
 				"required": false,
 				"content": map[string]any{
@@ -193,13 +199,13 @@ func operationFor(r contract.Route) map[string]any {
 // one in which every conditional field appears. A static description should
 // list everything an action can ever accept, and say (as the operation
 // description does) that availability is decided at runtime.
-func describeFields(r contract.Route) map[string]any {
+func describeFields(r contract.Route, widest contract.State) map[string]any {
 	if r.Fields == nil {
 		return nil
 	}
 
 	out := map[string]any{}
-	for _, f := range r.FieldsFor(widestState()) {
+	for _, f := range r.FieldsFor(widest) {
 		typ := "string"
 		if f.Type == "checkbox" {
 			typ = "boolean"
@@ -210,12 +216,20 @@ func describeFields(r contract.Route) map[string]any {
 }
 
 // widestState is a synthetic state chosen to make every conditional field
-// appear: an f-host known to be up (which is what adds the fans-off
-// confirmation) and no job running.
-func widestState() contract.State {
-	return contract.State{
-		Hosts: []power.HostStatus{
-			{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true},
-		},
+// appear: every f-host of inv known to be up (which is what adds the fans-off
+// and ac-off confirmations) and no job running.
+//
+// The hosts come from the served inventory, not a fixed name: the plug guards
+// judge a snapshot by the inventory's groups (power.RackActivityFrom), so a
+// host the inventory does not have would read as a cold rack and drop the
+// `force` field from the document. Every f-host covers both guards -- the fan
+// guard's power group and the AC guard's full set.
+func widestState(inv inventory.Inventory) contract.State {
+	var s contract.State
+	for _, h := range inv.EveryFHost() {
+		s.Hosts = append(s.Hosts, power.HostStatus{
+			Name: h.Name, Role: string(h.Role), Ping: true, PingKnown: true, SSH: true,
+		})
 	}
+	return s
 }

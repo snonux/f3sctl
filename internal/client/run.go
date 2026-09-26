@@ -460,9 +460,9 @@ func (c *Client) pollJob(ctx context.Context, root Entity, id string) (*Entity, 
 //
 // The table itself is built by internal/presenter, shared with the local CLI
 // (internal/cli.printStatus) so the two cannot drift the way they had before
-// this was unified -- see ry0. ShowRole is deliberately false: see
-// presenter.Options.ShowRole for why the remote client does not reach into a
-// host entity's "class" array for the role hiding there.
+// this was unified -- see ry0. ShowRole is false: the host entity does carry
+// the role (the second entry of its "class"), but the remote client leaves the
+// ROLE column off by choice (see presenter.Options.ShowRole).
 func (c *Client) showStatus(ctx context.Context) error {
 	root, err := c.Root(ctx)
 	if err != nil {

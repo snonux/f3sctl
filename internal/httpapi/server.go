@@ -144,7 +144,7 @@ func newServer(cfg config.Config) (*Server, error) {
 func (s *Server) assemble(inv inventory.Inventory, pw *powerapi.Surface, gg *gogiosapi.Surface, base string) *Server {
 	router := NewRouter(base, s.buildRoutes(inv, pw, gg))
 	s.router = router
-	s.openapi = NewOpenAPIBuilder(router)
+	s.openapi = NewOpenAPIBuilder(router, inv)
 
 	pw.Actions, pw.ActionsFor, pw.SectionActions = router.actions, router.actionsFor, router.SectionActions
 	gg.ActionsFor = router.actionsFor

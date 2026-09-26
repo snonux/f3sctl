@@ -32,7 +32,7 @@ func TestDefaultPeerJobPathIsDerived(t *testing.T) {
 // neither inventing nor omitting an endpoint.
 func TestOpenAPICoversEveryRoute(t *testing.T) {
 	router := NewRouter("/cgi-bin/f3sctl", testRoutes(inventory.Default()))
-	doc := NewOpenAPIBuilder(router).Build()
+	doc := NewOpenAPIBuilder(router, inventory.Default()).Build()
 
 	paths, ok := doc["paths"].(map[string]any)
 	if !ok {
