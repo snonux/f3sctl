@@ -84,9 +84,10 @@ type Server struct {
 
 	// reports is where the Gogios alert report comes from, feeding
 	// State.Gogios and State.GogiosErr for the routes that declare
-	// contract.NeedReport (see enrichState). build takes it from the Gogios
-	// surface it constructs, so enrichState and that surface's own handlers
-	// (the cache clear's re-read) share one source by construction.
+	// contract.NeedReport (see enrichState). Set by build, which hands the
+	// same source to the Gogios surface it constructs, so enrichState and
+	// that surface's own handlers (the cache clear's re-read) share one
+	// source.
 	reports gogiosapi.ReportSource
 }
 
@@ -166,11 +167,10 @@ func newServer(cfg config.Config) (*Server, error) {
 	newPower := func(actions contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New(node, href, cfg.Inventory, eng, jobs, peers, actions)
 	}
-	reports := gogios.NewSource(cfg)
-	newGogios := func(actions contract.ActionRenderer) *gogiosapi.Surface {
+	newGogios := func(actions contract.ActionRenderer, reports gogiosapi.ReportSource) *gogiosapi.Surface {
 		return gogiosapi.New(node, href, reports, eng, actions)
 	}
-	return srv.build(cfg.Inventory, newPower, newGogios, base)
+	return srv.build(cfg.Inventory, gogios.NewSource(cfg), newPower, newGogios, base)
 }
 
 // build constructs both domain surfaces, builds this Server's route table
@@ -180,21 +180,22 @@ func newServer(cfg config.Config) (*Server, error) {
 // build owns the surfaces' construction, taking factories rather than
 // finished surfaces, so the renderer is always build's to supply: each
 // factory is handed this Server's own (see serverActions), which resolves the
-// Router built here, and must pass it through to its surface's New. It is
-// its own step so tests can construct a Server literal, supply the surfaces
-// they want, and go through exactly the same path production takes (their
-// assemble helper wraps this one). It also takes the report source from the
-// Gogios surface, so a test's fake source feeds enrichState too.
+// Router built here, and must pass it through to its surface's New. The
+// Gogios report source is build's to supply the same way: build keeps
+// reports for enrichState and hands the very same source to the Gogios
+// factory, which must pass it through too. It is its own step so tests can
+// construct a Server literal, supply the surfaces and report source they
+// want, and go through exactly the same path production takes (their
+// assemble helper wraps this one).
 //
 // It fails only on an ambiguous route table (see NewRouter).
-func (s *Server) build(inv inventory.Inventory, newPower powerSurfaceFunc, newGogios gogiosSurfaceFunc, base string) (*Server, error) {
+func (s *Server) build(inv inventory.Inventory, reports gogiosapi.ReportSource, newPower powerSurfaceFunc, newGogios gogiosSurfaceFunc, base string) (*Server, error) {
 	actions := s.actionRenderer()
-	gg := newGogios(actions)
-	router, err := NewRouter(base, s.buildRoutes(inv, newPower(actions), gg))
+	router, err := NewRouter(base, s.buildRoutes(inv, newPower(actions), newGogios(actions, reports)))
 	if err != nil {
 		return nil, err
 	}
-	s.reports = gg.Reports
+	s.reports = reports
 	s.router = router
 	s.openapi = NewOpenAPIBuilder(router, inv)
 	return s, nil

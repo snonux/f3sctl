@@ -140,8 +140,8 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("e2e", href, cfg.Inventory, nil, nil, nil, a)
 	}
-	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("e2e", href, gogios.NewSource(cfg), nil, a)
+	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
+		return gogiosapi.New("e2e", href, r, nil, a)
 	}
 	srv := (&Server{
 		cfg:   cfg,
@@ -161,7 +161,7 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 		monitorStatus: func(context.Context) []gogios.GatewayMute {
 			return nil
 		},
-	}).assemble(cfg.Inventory, pw, gg, "")
+	}).assemble(cfg.Inventory, gogios.NewSource(cfg), pw, gg, "")
 
 	e2e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

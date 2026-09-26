@@ -226,7 +226,7 @@ func (sf *Surface) handleCheck(_ context.Context, state contract.State, req cont
 }
 
 // handleClearCache clears the cached Gogios report and re-reads it, both
-// through sf.Reports, so the very next read anywhere in the API sees a fresh
+// through sf.reports, so the very next read anywhere in the API sees a fresh
 // fetch rather than waiting out the cache TTL. Mirrors setMute's shape:
 // mutate, then re-populate state and re-render the overview, rather than
 // assuming success. A failed clear is a server fault (500) and skips the
@@ -237,10 +237,10 @@ func (sf *Surface) handleCheck(_ context.Context, state contract.State, req cont
 // passed through as-is, and the re-rendered folder advertises the mute pair
 // exactly as GET /gogios does.
 func (sf *Surface) handleClearCache(ctx context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
-	if err := sf.Reports.Clear(); err != nil {
+	if err := sf.reports.Clear(); err != nil {
 		return contract.Entity{}, http.StatusInternalServerError, fmt.Errorf("clearing the Gogios report cache: %w", err)
 	}
 
-	state.Gogios, state.GogiosErr = sf.Reports.Fetch(ctx)
+	state.Gogios, state.GogiosErr = sf.reports.Fetch(ctx)
 	return sf.handleOverview(ctx, state, contract.Request{})
 }

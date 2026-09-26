@@ -3,10 +3,13 @@ package gogios
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,5 +131,105 @@ func TestSourceClearReportsAnUnremovableCache(t *testing.T) {
 
 	if err := NewSource(cfg).Clear(); err == nil {
 		t.Error("Clear of an unremovable cache succeeded, want an error")
+	}
+}
+
+// TestFetchTimeoutBoundsTheRequestWithoutAClientTimeout pins that
+// cfg.GogiosFetchTimeout bounds the request on its own, through the request
+// context, even for a client with no Timeout of its own: a stalled upstream
+// fails the fetch with a deadline error instead of hanging.
+func TestFetchTimeoutBoundsTheRequestWithoutAClientTimeout(t *testing.T) {
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-unblock:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	s := NewSource(testCfg(t, srv, func(c *config.Config) {
+		c.GogiosFetchTimeout = config.Duration(50 * time.Millisecond)
+	}))
+	s.client = NewHTTPClient(0) // no client Timeout: only the context bounds it
+
+	_, err := s.Fetch(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Fetch against a stalled upstream = %v, want a context deadline error", err)
+	}
+}
+
+// TestZeroFetchTimeoutMeansNone pins that a zero GogiosFetchTimeout disables
+// the bound -- on the request context as on the dedicated client -- rather
+// than expiring every request before it is sent.
+func TestZeroFetchTimeoutMeansNone(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateDir = t.TempDir()
+	cfg.GogiosURL = "http://gogios.invalid/index.json"
+	cfg.GogiosFetchTimeout = 0
+	s := NewSource(cfg)
+	if s.client.Timeout != 0 {
+		t.Errorf("client timeout = %v, want none for a zero GogiosFetchTimeout", s.client.Timeout)
+	}
+
+	s.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if d, ok := r.Context().Deadline(); ok {
+			t.Errorf("request carries a deadline (%v) despite a zero GogiosFetchTimeout", d)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK",
+			Body: io.NopCloser(strings.NewReader(reportJSON)), Request: r,
+		}, nil
+	})
+	if _, err := s.Fetch(context.Background()); err != nil {
+		t.Errorf("Fetch with a zero GogiosFetchTimeout: %v, want the report", err)
+	}
+}
+
+// TestPositiveFetchTimeoutSetsTheRequestDeadline is the counterpart: a
+// positive GogiosFetchTimeout puts a deadline on the request context no
+// later than that timeout from now.
+func TestPositiveFetchTimeoutSetsTheRequestDeadline(t *testing.T) {
+	cfg := config.Default()
+	cfg.StateDir = t.TempDir()
+	cfg.GogiosURL = "http://gogios.invalid/index.json"
+	cfg.GogiosFetchTimeout = config.Duration(7 * time.Second)
+	s := NewSource(cfg)
+
+	start := time.Now()
+	s.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		d, ok := r.Context().Deadline()
+		if !ok || d.After(start.Add(7*time.Second+time.Second)) {
+			t.Errorf("request deadline = %v (set: %v), want one within the 7s GogiosFetchTimeout", d, ok)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, Status: "200 OK",
+			Body: io.NopCloser(strings.NewReader(reportJSON)), Request: r,
+		}, nil
+	})
+	if _, err := s.Fetch(context.Background()); err != nil {
+		t.Errorf("Fetch: %v", err)
+	}
+}
+
+// TestNewHTTPClientOwnsItsTransportWhenDefaultIsReplaced pins the fallback:
+// with http.DefaultTransport swapped for something that is not an
+// *http.Transport, the client still gets a transport of its own rather than
+// sharing (or falling back to) the replaced default.
+func TestNewHTTPClientOwnsItsTransportWhenDefaultIsReplaced(t *testing.T) {
+	orig := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = orig })
+	http.DefaultTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("the replaced default transport must not be used")
+	})
+
+	c := NewHTTPClient(time.Second)
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok || tr == nil {
+		t.Fatalf("transport = %#v, want a dedicated *http.Transport", c.Transport)
+	}
+	if tr.Proxy == nil {
+		t.Error("fallback transport has no Proxy func, want http.ProxyFromEnvironment")
 	}
 }

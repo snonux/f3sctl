@@ -148,8 +148,8 @@ func docServer(t *testing.T, o docOpts) *Server {
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, a)
 	}
-	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), unreachableReports(), o.monitor, a)
+	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
+		return gogiosapi.New("test", contract.Hrefs(""), r, o.monitor, a)
 	}
 	return (&Server{
 		cfg: cfg, jobs: coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0),
@@ -161,7 +161,7 @@ func docServer(t *testing.T, o docOpts) *Server {
 		monitorStatus: func(context.Context) []gogios.GatewayMute {
 			return []gogios.GatewayMute{{Name: "gw", Muted: o.muted}}
 		},
-	}).assemble(inv, pw, gg, "")
+	}).assemble(inv, unreachableReports(), pw, gg, "")
 }
 
 // withDefaults fills every nil collaborator with its well-behaved fake.

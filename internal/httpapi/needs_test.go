@@ -129,13 +129,13 @@ func needsServer(t *testing.T) *Server {
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", href, inv, &plugRecorder{}, needsJobs{}, peers, a)
 	}
-	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, unreachableReports(), gw, a)
+	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
+		return gogiosapi.New("test", href, r, gw, a)
 	}
 	return (&Server{
 		cfg: cfg, jobs: jobs, peers: peers, siren: NewSirenRenderer(), node: "test",
 		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, pw, gg, "")
+	}).assemble(inv, unreachableReports(), pw, gg, "")
 }
 
 // observeRoute is everything about route name that the state enrichState
@@ -337,10 +337,10 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 		fansStatus:    func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
 		acStatus:      func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
 		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, func(a contract.ActionRenderer) *powerapi.Surface {
+	}).assemble(inv, fc.reports, func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", href, inv, &plugRecorder{}, jobs, peers, a)
-	}, func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, fc.reports, gw, a)
+	}, func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
+		return gogiosapi.New("test", href, r, gw, a)
 	}, ""), fc
 }
 

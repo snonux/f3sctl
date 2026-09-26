@@ -164,7 +164,9 @@ type Config struct {
 	// endpoint is the wrong path from the API node.
 	GogiosURL string `json:"gogios_url"`
 
-	// GogiosFetchTimeout bounds the HTTP GET of the Gogios report.
+	// GogiosFetchTimeout bounds the HTTP GET of the Gogios report. Zero
+	// means no bound beyond the caller's own deadline (the CGI timeout, in
+	// the API).
 	GogiosFetchTimeout Duration `json:"gogios_fetch_timeout"`
 
 	// GogiosCacheTTL is how long the on-disk cache of the report is served

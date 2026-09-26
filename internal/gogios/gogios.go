@@ -110,7 +110,12 @@ type Check struct {
 // report as a dependency, holds a Source instead. See Source.Fetch for the
 // cache semantics.
 func Fetch(ctx context.Context, cfg config.Config) (*Report, error) {
-	return NewSource(cfg).Fetch(ctx)
+	s := NewSource(cfg)
+	// The Source, and so its dedicated transport, dies with this call: close
+	// the kept-alive connection rather than leave it (and its goroutines)
+	// idling until the transport's idle timeout.
+	defer s.client.CloseIdleConnections()
+	return s.Fetch(ctx)
 }
 
 // ClearCache removes the cached report so the next Fetch call re-fetches, and
@@ -281,11 +286,19 @@ func withPrevStatus(c Check, prev map[string]string) Check {
 	return c
 }
 
-// fetch HTTP-GETs the report at cfg.GogiosURL through client, bounded by
-// cfg.GogiosFetchTimeout and the caller's context.
+// fetch HTTP-GETs the report at cfg.GogiosURL through client, bounded by the
+// caller's context and by cfg.GogiosFetchTimeout -- which zero (or negative)
+// disables, exactly as it does the dedicated client's own Timeout (see
+// NewHTTPClient), rather than expiring the request before it starts.
+//
+// The deadline is applied here as well as on the client so the bound holds
+// whatever client fetch is handed, not only one NewHTTPClient built.
 func fetch(ctx context.Context, client *http.Client, cfg config.Config) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, cfg.GogiosFetchTimeout.D())
-	defer cancel()
+	if d := cfg.GogiosFetchTimeout.D(); d > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, d)
+		defer cancel()
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfg.GogiosURL, nil)
 	if err != nil {

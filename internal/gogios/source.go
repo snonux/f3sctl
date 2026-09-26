@@ -37,15 +37,17 @@ func NewSource(cfg config.Config) *Source {
 // behaviour stay the standard library's) and an overall timeout covering the
 // connect, the headers and the body read. The per-request context deadline
 // fetch applies stays as well; whichever is shorter wins. A zero timeout
-// means none, as for http.Client itself.
+// means none, as for http.Client itself (and as fetch treats it).
 func NewHTTPClient(timeout time.Duration) *http.Client {
-	var transport http.RoundTripper
+	var transport *http.Transport
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = t.Clone()
+	} else {
+		// DefaultTransport was replaced by something that is not an
+		// *http.Transport: still use a transport of our own, with the one
+		// default setting that matters here, rather than share theirs.
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
 	}
-	// Otherwise (DefaultTransport replaced by something that is not an
-	// *http.Transport) a nil Transport makes the client use whatever
-	// DefaultTransport now is, which is still better than failing here.
 	return &http.Client{Timeout: timeout, Transport: transport}
 }
 

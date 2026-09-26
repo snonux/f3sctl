@@ -66,7 +66,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 			pc.acReads++
 			return power.ACState{}, nil
 		},
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
+	}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 	return srv, pc
 }
 
@@ -306,7 +306,7 @@ func TestBuildRendersPowerSurfaceActionsThroughItsRouter(t *testing.T) {
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: true}, nil
 		},
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), "/cgi-bin/f3sctl"), testGogiosSurface("/cgi-bin/f3sctl"), "/cgi-bin/f3sctl")
+	}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), "/cgi-bin/f3sctl"), testGogiosSurface("/cgi-bin/f3sctl"), "/cgi-bin/f3sctl")
 
 	var out bytes.Buffer
 	if err := srv.serve(&out, getRequest("/fans")); err != nil {
@@ -580,7 +580,7 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		// The Gogios surface's report source is a fake with no report, so
 		// neither a report read nor gogios-cache-clear touches the real Gogios
 		// or a real cache dir.
-	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
+	}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:

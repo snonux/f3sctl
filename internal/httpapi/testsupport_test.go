@@ -32,12 +32,12 @@ func testPowerSurface(inv inventory.Inventory, base string) powerSurfaceFunc {
 }
 
 // testGogiosSurface returns a factory for the Gogios surface with inert
-// collaborators (see testPowerSurface): no Monitor, and a report source that
-// has no report (unreachableReports), so no test serving a report route
-// through it can reach the real Gogios.
+// collaborators (see testPowerSurface): no Monitor, and whatever report
+// source Server.build hands it -- unreachableReports, in the helpers below,
+// so no test serving a report route through them can reach the real Gogios.
 func testGogiosSurface(base string) gogiosSurfaceFunc {
-	return func(actions contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(base), unreachableReports(), nil, actions)
+	return func(actions contract.ActionRenderer, reports gogiosapi.ReportSource) *gogiosapi.Surface {
+		return gogiosapi.New("test", contract.Hrefs(base), reports, nil, actions)
 	}
 }
 
@@ -78,7 +78,7 @@ func unreachableReports() *fakeReports { return &fakeReports{err: errNoReport} }
 // it and hrefs a handler renders -- links and actions alike -- always share
 // one base and one table.
 func testRouter(inv inventory.Inventory, base string) *Router {
-	return (&Server{}).assemble(inv, testPowerSurface(inv, base), testGogiosSurface(base), base).router
+	return (&Server{}).assemble(inv, unreachableReports(), testPowerSurface(inv, base), testGogiosSurface(base), base).router
 }
 
 // testRoutes is the route table of testRouter(inv, "") -- the same table
@@ -97,14 +97,14 @@ func testRoutes(inv inventory.Inventory) []contract.Route {
 func declaredRoutes(inv inventory.Inventory) []contract.Route {
 	srv := &Server{}
 	actions := srv.actionRenderer()
-	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions), testGogiosSurface("")(actions))
+	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions), testGogiosSurface("")(actions, unreachableReports()))
 }
 
 // assemble is Server.build for tests, whose route tables are known to be
 // unambiguous: it panics instead of returning the error, so a Server literal
 // can be wired in one expression.
-func (s *Server) assemble(inv inventory.Inventory, pw powerSurfaceFunc, gg gogiosSurfaceFunc, base string) *Server {
-	srv, err := s.build(inv, pw, gg, base)
+func (s *Server) assemble(inv inventory.Inventory, reports gogiosapi.ReportSource, pw powerSurfaceFunc, gg gogiosSurfaceFunc, base string) *Server {
+	srv, err := s.build(inv, reports, pw, gg, base)
 	if err != nil {
 		panic(err)
 	}
@@ -114,7 +114,7 @@ func (s *Server) assemble(inv inventory.Inventory, pw powerSurfaceFunc, gg gogio
 // testServer returns a Server with no collaborators at all, for building the
 // route table (which needs a Server only to bind the root-resource handlers).
 func testServer() *Server {
-	return (&Server{}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
+	return (&Server{}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 }
 
 // routeByName finds a route by its stable client-facing name, the way the

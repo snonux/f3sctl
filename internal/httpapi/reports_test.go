@@ -37,9 +37,7 @@ func reportsServer(t *testing.T, reports *fakeReports) *Server {
 		monitorStatus: func(context.Context) []gogios.GatewayMute {
 			return []gogios.GatewayMute{{Name: "blowfish"}}
 		},
-	}).assemble(inv, testPowerSurface(inv, ""), func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), reports, nil, a)
-	}, "")
+	}).assemble(inv, reports, testPowerSurface(inv, ""), testGogiosSurface(""), "")
 }
 
 // serveReportRoute serves one authenticated request and returns its status
@@ -164,16 +162,38 @@ func TestReportFetchFailureRendersAsToday(t *testing.T) {
 	}
 }
 
-// TestNewServerInjectsTheProductionSource pins the composition root's wiring:
-// newServer hands the Gogios surface a real report source, and build takes
-// enrichState's source from that surface -- one source, not two.
+// TestBuildSharesOneSourceWithTheSurface pins the ownership build takes on:
+// the source enrichState reads is the very one the Gogios factory is handed
+// and its surface is built with -- one source, not two that could diverge.
+func TestBuildSharesOneSourceWithTheSurface(t *testing.T) {
+	reports := unreachableReports()
+	var built *gogiosapi.Surface
+	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
+		built = testGogiosSurface("")(a, r)
+		return built
+	}
+	inv := inventory.Default()
+	srv := (&Server{}).assemble(inv, reports, testPowerSurface(inv, ""), gg, "")
+
+	if srv.reports != gogiosapi.ReportSource(reports) {
+		t.Errorf("enrichState's source = %p, want the %p build was given", srv.reports, reports)
+	}
+	if built == nil || built.Reports() != gogiosapi.ReportSource(reports) {
+		t.Errorf("the Gogios surface was not built with the source build was given")
+	}
+}
+
+// TestNewServerInjectsTheProductionSource pins the production wiring:
+// newServer hands build a real report source, over the dedicated-client
+// gogios.Source rather than any stand-in. power.New accepts any config (it
+// only builds clients), so the server test config is enough.
 func TestNewServerInjectsTheProductionSource(t *testing.T) {
 	t.Setenv("SCRIPT_NAME", "")
 	srv, err := newServer(serverTestConfig(t, "sekrit"))
 	if err != nil {
-		t.Skipf("newServer needs a usable power engine here: %v", err)
+		t.Fatalf("newServer: %v", err)
 	}
-	if _, ok := srv.reports.(*gogios.Source); !ok {
-		t.Errorf("enrichState's report source = %T, want the production *gogios.Source", srv.reports)
+	if src, ok := srv.reports.(*gogios.Source); !ok || src == nil {
+		t.Errorf("enrichState's report source = %#v, want a non-nil *gogios.Source", srv.reports)
 	}
 }

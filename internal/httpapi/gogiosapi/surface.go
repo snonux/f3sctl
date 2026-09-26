@@ -31,7 +31,7 @@ import (
 //
 // Everything here is injected by the composition root (internal/httpapi) when
 // it assembles a Server: the node name and href builder identify this
-// deployment, Reports is where the alert report comes from, and Monitor is
+// deployment, reports is where the alert report comes from, and Monitor is
 // the one slice of the power engine the mute drives. Nil Href/Monitor are
 // safe at table-declaration time -- the closures dereference them only while
 // serving the route that needs them.
@@ -42,12 +42,6 @@ type Surface struct {
 	// Href builds the absolute href for a route path, under the CGI mount
 	// this node answers on. See contract.Href.
 	Href func(string) string
-	// Reports reads and clears the Gogios alert report. In production this
-	// is a *gogios.Source (the cached-or-fetched report over its own HTTP
-	// client); the composition root also reads the report through this same
-	// source for the routes that declare contract.NeedReport, so the handlers
-	// and the state they are handed never disagree on where it came from.
-	Reports ReportSource
 	// Monitor changes and reads the Gogios mute marker on the gateways. In
 	// production this is the power engine's Monitor; a subset interface of
 	// it, because mute/unmute are the only engine powers this surface needs.
@@ -58,6 +52,14 @@ type Surface struct {
 	// composition root's Router (resolved lazily), the single source of the
 	// Siren action shape (name, title, method, href, cliVerb, fields).
 	actions contract.ActionRenderer
+	// reports reads and clears the Gogios alert report. It is unexported and
+	// set once, by New, which rejects a nil one. The composition root owns
+	// it: it creates the source, hands it to New, and reads the report
+	// through the same source for the routes that declare
+	// contract.NeedReport, so the handlers and the state they are handed
+	// never disagree on where it came from. In production it is a
+	// *gogios.Source (the cached-or-fetched report over its own HTTP client).
+	reports ReportSource
 }
 
 // Monitor is the slice of the power engine the mute drives. Satisfied by
@@ -87,21 +89,27 @@ type ReportSource interface {
 // from reports and rendering every actions list through actions.
 //
 // It panics on a nil reports or actions: unlike Monitor, which a test serving
-// only the report routes may leave nil, the composition root reads the report
-// through reports for every route declaring contract.NeedReport, and every
-// resource with controls renders through actions -- a Surface without either
-// is a wiring bug in the caller, not a state to serve in. In production
-// actions resolves the composition root's Router lazily, since the Router is
-// built from the very route table this Surface declares.
+// only the report routes may leave nil, the report routes read through
+// reports and every resource with controls renders through actions -- a
+// Surface without either is a wiring bug in the caller, not a state to serve
+// in. A nil *gogios.Source wrapped in the interface (the production type) is
+// caught too; any other typed nil is the caller's to avoid, as checking for it
+// in general would take reflection. In production actions resolves the
+// composition root's Router lazily, since the Router is built from the very
+// route table this Surface declares.
 func New(node string, href func(string) string, reports ReportSource, monitor Monitor, actions contract.ActionRenderer) *Surface {
-	if reports == nil {
+	if src, ok := reports.(*gogios.Source); reports == nil || (ok && src == nil) {
 		panic("gogiosapi: New called with a nil ReportSource")
 	}
 	if actions == nil {
 		panic("gogiosapi: New called with a nil ActionRenderer")
 	}
-	return &Surface{Node: node, Href: href, Reports: reports, Monitor: monitor, actions: actions}
+	return &Surface{Node: node, Href: href, Monitor: monitor, actions: actions, reports: reports}
 }
+
+// Reports returns the report source this Surface was built with, so the
+// composition root's wiring can be checked against it.
+func (sf *Surface) Reports() ReportSource { return sf.reports }
 
 // Muted reports whether Gogios is muted on at least one gateway.
 //

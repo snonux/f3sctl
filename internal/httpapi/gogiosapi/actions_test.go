@@ -64,16 +64,24 @@ func TestNewRejectsANilActionRenderer(t *testing.T) {
 }
 
 // TestNewRejectsANilReportSource pins the other constructor guard: the
-// composition root reads every NeedReport route's report through the
-// surface's source, so a Surface without one would only fail later, on the
-// first report request, with a nil dereference.
+// report routes read through the surface's source, so a Surface without one
+// would only fail later, on the first report request, with a nil
+// dereference. A nil *gogios.Source -- the production type -- wrapped in the
+// interface is not nil to a plain == check, and is rejected too.
 func TestNewRejectsANilReportSource(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Error("New with a nil ReportSource returned a Surface; want a panic")
-		}
-	}()
-	New("test", contract.Hrefs(""), nil, nil, echoActions{})
+	for name, reports := range map[string]ReportSource{
+		"nil interface":      nil,
+		"nil *gogios.Source": (*gogios.Source)(nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Error("New with a nil ReportSource returned a Surface; want a panic")
+				}
+			}()
+			New("test", contract.Hrefs(""), reports, nil, echoActions{})
+		})
+	}
 }
 
 // TestConstructedSurfaceRendersActionsThroughItsRenderer serves every

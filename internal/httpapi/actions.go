@@ -7,11 +7,13 @@ import (
 )
 
 // powerSurfaceFunc and gogiosSurfaceFunc construct a domain surface bound to
-// the given action renderer. Server.build takes these rather than finished
-// surfaces so that it, not its caller, supplies the renderer -- see build.
+// the given action renderer (and, for Gogios, report source). Server.build
+// takes these rather than finished surfaces so that it, not its caller,
+// supplies the renderer and the report source it also reads itself -- see
+// build.
 type (
 	powerSurfaceFunc  func(contract.ActionRenderer) *powerapi.Surface
-	gogiosSurfaceFunc func(contract.ActionRenderer) *gogiosapi.Surface
+	gogiosSurfaceFunc func(contract.ActionRenderer, gogiosapi.ReportSource) *gogiosapi.Surface
 )
 
 // serverActions is the contract.ActionRenderer Server.build hands both domain
