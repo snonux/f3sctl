@@ -58,11 +58,11 @@ var _ PowerBackend = (*execPower)(nil)
 func (p execPower) Wake(h inventory.Host) error { return p.e.Wake(h) }
 
 func (p execPower) AgentVerb(ctx context.Context, h inventory.Host, verb string) (string, error) {
-	return p.e.ssh.agentVerb(ctx, h, verb)
+	return p.e.sshRunner().agentVerb(ctx, h, verb)
 }
 
 func (p execPower) PowerOff(ctx context.Context, h inventory.Host) (out, diag string, err error) {
-	return p.e.ssh.agentVerbFull(ctx, h, "poweroff")
+	return p.e.sshRunner().agentVerbFull(ctx, h, "poweroff")
 }
 
 // execProbe is the ProbeBackend adapter.
@@ -244,9 +244,9 @@ type execZusb struct{ e *Engine }
 var _ ZusbChecker = (*execZusb)(nil)
 
 func (z execZusb) Status(ctx context.Context, h inventory.Host) (string, error) {
-	return z.e.ssh.agentVerb(ctx, h, "zusb-status")
+	return z.e.sshRunner().agentVerb(ctx, h, "zusb-status")
 }
 
 func (z execZusb) Unload(ctx context.Context, h inventory.Host) (string, error) {
-	return z.e.ssh.agentVerb(ctx, h, "zusb-unload")
+	return z.e.sshRunner().agentVerb(ctx, h, "zusb-unload")
 }

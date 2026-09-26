@@ -918,6 +918,89 @@ func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
 	}
 }
 
+// TestAHandBuiltEngineFallsBackToARealSSHRunner is the ssh half of the nil-seam
+// fallbacks above. e.ssh used to be read directly, so a hand-built Engine
+// panicked in logWarnings -- the first line of on() and off() -- and in every
+// exec adapter's agent verb.
+//
+// The identity is pointed at a file that does not exist, so each agent verb
+// fails in resolveIdentity, before ssh(1) could be exec'd: the test proves the
+// fallback runner is real (it reached the identity lookup) without a network.
+func TestAHandBuiltEngineFallsBackToARealSSHRunner(t *testing.T) {
+	cfg := config.Default()
+	cfg.SSHIdentity = []string{filepath.Join(t.TempDir(), "no_such_key")}
+
+	// logWarnings first, on an Engine nothing has touched yet: that is the
+	// order on() and off() reach it in. The hook must then land on the runner
+	// the adapters use, which a throwaway-per-call fallback would get wrong.
+	e := &Engine{cfg: cfg}
+	var log bytes.Buffer
+	e.logWarnings(&log)
+	r := e.sshRunner()
+	if r == nil || r.warn == nil {
+		t.Fatal("logWarnings did not install the warn hook on the fallback runner")
+	}
+	if again := e.sshRunner(); again != r {
+		t.Error("sshRunner() built a second runner; the first one's state would be lost")
+	}
+	r.warn("f0", "poweroff", "guest killed\ncheck etcd")
+	if want := "  ! f0 (poweroff): guest killed\n  check etcd\n"; log.String() != want {
+		t.Errorf("warning logged as %q, want %q", log.String(), want)
+	}
+
+	// Each adapter on its own fresh Engine, so none of them rides on a runner
+	// another call already created.
+	h, _ := cfg.Inventory.ByName("f0")
+	ctx := context.Background()
+	calls := map[string]func(e *Engine) error{
+		"AgentVerb": func(e *Engine) error { _, err := execPower{e}.AgentVerb(ctx, h, "carp-stop"); return err },
+		"PowerOff":  func(e *Engine) error { _, _, err := execPower{e}.PowerOff(ctx, h); return err },
+		"Status":    func(e *Engine) error { _, err := execZusb{e}.Status(ctx, h); return err },
+		"Unload":    func(e *Engine) error { _, err := execZusb{e}.Unload(ctx, h); return err },
+	}
+	for name, call := range calls {
+		err := call(&Engine{cfg: cfg})
+		if err == nil || !strings.Contains(err.Error(), "SSH identity") {
+			t.Errorf("%s on a hand-built Engine: err = %v, want the missing SSH identity", name, err)
+		}
+	}
+}
+
+// TestSSHRunnerKeepsAnInjectedRunner pins the other direction of the
+// fallback: a runner that is already set is used as is, never replaced.
+func TestSSHRunnerKeepsAnInjectedRunner(t *testing.T) {
+	r := newRunner(config.Default())
+	e := &Engine{cfg: config.Default(), ssh: r}
+	if got := e.sshRunner(); got != r {
+		t.Errorf("sshRunner() = %p, want the injected runner %p", got, r)
+	}
+}
+
+// TestSSHRunnerFallbackIsCreatedOnceUnderConcurrency covers shutdownTogether's
+// shape: several goroutines reaching the fallback at once must all get the
+// same runner (and, under -race, must not race on storing it).
+func TestSSHRunnerFallbackIsCreatedOnceUnderConcurrency(t *testing.T) {
+	e := &Engine{cfg: config.Default()}
+
+	const n = 16
+	got := make([]*runner, n)
+	var wg sync.WaitGroup
+	for i := range got {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = e.sshRunner()
+		}(i)
+	}
+	wg.Wait()
+
+	for i, r := range got {
+		if r == nil || r != got[0] {
+			t.Fatalf("goroutine %d got runner %p, want the shared %p", i, r, got[0])
+		}
+	}
+}
+
 // recordingReporter keeps the progress a run reports, so a test can assert on
 // what a polling API client would see rather than only on the human log.
 type recordingReporter struct {

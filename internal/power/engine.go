@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
@@ -18,8 +19,16 @@ import (
 
 // Engine performs power operations against the inventory in cfg.
 type Engine struct {
-	cfg    config.Config
-	ssh    *runner
+	cfg config.Config
+
+	// ssh runs agent verbs over ssh(1). Read it through sshRunner, never
+	// directly: a hand-built Engine carries a nil here, and sshRunner fills it
+	// in exactly once (sshInit) so the warn hook logWarnings installs and the
+	// lazily resolved identity survive across calls -- unlike the stateless
+	// backends below, a fresh runner per call would silently drop both.
+	ssh     *runner
+	sshInit sync.Once
+
 	report Reporter
 
 	// isUp probes one host: whether it answered ICMP, and -- separately --
@@ -293,6 +302,20 @@ func (e *Engine) zusbBackend() ZusbChecker {
 	return e.zusb
 }
 
+// sshRunner returns the SSH runner, creating one when the field is unset (a
+// hand-built Engine). Same nil-safety reasoning as liveness; it stores the
+// fallback rather than returning a throwaway because the runner is stateful
+// (see the ssh field). The sync.Once makes that first store safe against
+// shutdownTogether's goroutines reaching it concurrently.
+func (e *Engine) sshRunner() *runner {
+	e.sshInit.Do(func() {
+		if e.ssh == nil {
+			e.ssh = newRunner(e.cfg)
+		}
+	})
+	return e.ssh
+}
+
 // Config exposes the resolved configuration to callers that need the
 // inventory (the CLI's status table, the API's registry).
 func (e *Engine) Config() config.Config { return e.cfg }
@@ -304,7 +327,7 @@ func (e *Engine) Config() config.Config { return e.cfg }
 // an agent that force-kills a bhyve guest warns on stderr and still exits 0,
 // so the warning arrives on the success path or not at all.
 func (e *Engine) logWarnings(log io.Writer) {
-	e.ssh.warn = func(host, verb, msg string) {
+	e.sshRunner().warn = func(host, verb, msg string) {
 		fmt.Fprintf(log, "  ! %s (%s): %s\n", host, verb, indent(msg))
 	}
 }
