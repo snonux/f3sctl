@@ -44,9 +44,6 @@ func newRecordingActions() *recordingActions {
 	return &recordingActions{names: map[string]bool{}, sections: map[string]bool{}}
 }
 
-// Actions renders the whole table, so it names nothing that could be wrong.
-func (*recordingActions) Actions(contract.State) []contract.Action { return nil }
-
 func (r *recordingActions) ActionsFor(_ contract.State, names ...string) []contract.Action {
 	for _, n := range names {
 		r.names[n] = true

@@ -16,13 +16,9 @@ import (
 // it is asked for, so a test can tell from a resource's actions list exactly
 // which actions its handler requested. It stands in for the composition
 // root's Router, which this package cannot import; this surface only ever
-// calls ActionsFor, so the other two methods render a marker that would show
-// up in any assertion if a handler started calling them.
+// calls ActionsFor, so SectionActions renders a marker that would show up in
+// any assertion if a handler started calling it.
 type echoActions struct{}
-
-func (echoActions) Actions(contract.State) []contract.Action {
-	return []contract.Action{{Name: "unexpected:Actions"}}
-}
 
 func (echoActions) ActionsFor(_ contract.State, names ...string) []contract.Action {
 	out := make([]contract.Action, 0, len(names))

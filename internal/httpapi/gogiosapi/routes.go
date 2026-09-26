@@ -51,9 +51,10 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			Method: http.MethodGet, Path: "/monitoring",
 			// handleMonitoring, and the monitoring-mute/monitoring-unmute
 			// actions it renders via ActionsFor, all read only
-			// state.Monitoring, populated separately by enrichState.
+			// state.Monitoring, which NeedMonitoring has fetched.
 			NoRootLink: true,
 			SkipsProbe: true,
+			Needs:      contract.NeedMonitoring,
 			Handle:     sf.handleMonitoring,
 		},
 		{
@@ -62,6 +63,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			CLIVerb:    "monitoring unmute",
 			Errors:     []contract.ErrorResponse{gatewayWriteFailed},
 			SkipsProbe: true,
+			Needs:      contract.NeedMonitoring,
 			Available:  func(s contract.State) bool { return Muted(s) },
 			Handle:     sf.handleUnmute,
 		},
@@ -71,6 +73,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 			CLIVerb:    "monitoring mute",
 			Errors:     []contract.ErrorResponse{gatewayWriteFailed},
 			SkipsProbe: true,
+			Needs:      contract.NeedMonitoring,
 			// Not !Muted: a partial mute leaves a gateway alerting (or
 			// unknown), and the mute is what finishes it -- so both
 			// actions can be offered at once (see NotAllMuted).
@@ -104,9 +107,11 @@ func (sf *Surface) reportRoutes() []contract.Route {
 			Name: "gogios", Title: "Gogios status and alerting",
 			Method: http.MethodGet, Path: "/gogios",
 			// handleOverview and every /gogios* handler below read only
-			// state.Gogios/state.GogiosErr (populated by enrichState for this
-			// path prefix), never state.Hosts/state.Fans.
+			// state.Gogios/state.GogiosErr (NeedReport), never
+			// state.Hosts/state.Fans. The folder also advertises the mute
+			// pair, judged on the gateway mute -- hence NeedMonitoring too.
 			SkipsProbe: true,
+			Needs:      contract.NeedReport | contract.NeedMonitoring,
 			Handle:     sf.handleOverview,
 		},
 	}
@@ -119,6 +124,7 @@ func (sf *Surface) reportRoutes() []contract.Route {
 			// each category by rel -- see reportRoutes' doc comment.
 			NoRootLink: true,
 			SkipsProbe: true,
+			Needs:      contract.NeedReport,
 			Handle:     sf.statusHandle(status),
 		})
 	}
@@ -142,6 +148,7 @@ func (sf *Surface) reportRoutes() []contract.Route {
 			// links to the bare route either.
 			NoRootLink: true,
 			SkipsProbe: true,
+			Needs:      contract.NeedReport,
 			Handle:     sf.handleCheck,
 		},
 		contract.Route{
@@ -154,7 +161,12 @@ func (sf *Surface) reportRoutes() []contract.Route {
 			// Always advertised: unlike the power/fan/monitoring actions, there
 			// is no state in which clearing the cache would fail to make sense.
 			SkipsProbe: true,
-			Handle:     sf.handleClearCache,
+			// NeedMonitoring: the response is the re-rendered /gogios folder,
+			// mute pair included (see handleClearCache). Not NeedReport: the
+			// handler re-reads the report after clearing it, so a report
+			// fetched before the clear would only be thrown away.
+			Needs:  contract.NeedMonitoring,
+			Handle: sf.handleClearCache,
 		},
 	)
 	return out

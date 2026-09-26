@@ -12,15 +12,10 @@ import (
 
 // echoActions is a contract.ActionRenderer that renders an action for exactly
 // what it was asked, so a test can tell from a resource's actions list which
-// renderer method its handler called and with what: Actions yields "*",
-// ActionsFor one action per requested name, and SectionActions
-// "section:<name>". It stands in for the composition root's Router, which
+// renderer method its handler called and with what: ActionsFor yields one
+// action per requested name, and SectionActions "section:<name>". It stands in for the composition root's Router, which
 // this package cannot import.
 type echoActions struct{}
-
-func (echoActions) Actions(contract.State) []contract.Action {
-	return []contract.Action{{Name: "*"}}
-}
 
 func (echoActions) ActionsFor(_ contract.State, names ...string) []contract.Action {
 	out := make([]contract.Action, 0, len(names))
@@ -60,7 +55,7 @@ func TestNewRejectsANilActionRenderer(t *testing.T) {
 // its own actions, and none silently renders none.
 func TestConstructedSurfaceRendersActionsThroughItsRenderer(t *testing.T) {
 	want := map[string][]string{
-		StatusPath:    {"*"},
+		StatusPath:    {"section:" + contract.SectionPower, "section:" + contract.SectionAC},
 		"/power":      {"section:" + contract.SectionPower},
 		"/ac-control": {"section:" + contract.SectionAC},
 		"/fans":       {"fans-on", "fans-off"},

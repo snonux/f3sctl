@@ -41,16 +41,13 @@ import (
 // config.Config.PeerJobPath itself stays empty in the default case, since
 // resolvePeerJobPath never writes back into it.
 //
-// Named so Server.serve's enrichState can exclude it from triggering a peer
-// check of its own: a peer check that recurses into another peer check makes
-// each node's answer wait on the other's.
+// Named because the composition root builds that peer URL from it, and the
+// job route and every link to it share it. The job route declares no
+// contract.NeedPeerBusy on purpose -- see its declaration in routes.go.
 const JobPath = "/job"
 
-// StatusPath is PATH_INFO for the status route, named for the same reason as
-// JobPath: enrichState (composition root) excludes it from its own,
-// separate peer-busy check, because handleStatus already makes its own single
-// peer round trip (for the job it embeds) and reuses that answer rather than
-// paying for a second one -- see handleStatus.
+// StatusPath is PATH_INFO for the status route, shared by the route and every
+// link to it.
 const StatusPath = "/status"
 
 // Surface is the power REST surface, bound to the collaborators its handlers

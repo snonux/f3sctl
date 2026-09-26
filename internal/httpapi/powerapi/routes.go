@@ -78,17 +78,29 @@ func (sf *Surface) hostsRoutes() []contract.Route {
 // resource whose actions list is every host power operation possible right
 // now (see handlePowerFolder). It is NOT SkipsProbe -- its actions are judged
 // on fleet state -- so unlike the root itself a folder render still pays the
-// probe.
+// probe. Its actions are judged on the peer's job too, hence NeedPeerBusy.
 func (sf *Surface) powerResourceRoutes() []contract.Route {
 	return []contract.Route{
 		{
 			Name: "power", Title: "Power control",
 			Method: http.MethodGet, Path: "/power",
+			Needs:  contract.NeedPeerBusy,
 			Handle: sf.handlePowerFolder,
 		},
 		{
 			Name: "status", Title: "Host and rack status",
 			Method: http.MethodGet, Path: StatusPath,
+			// No NeedMonitoring: /status must stay cheap enough for a
+			// watchface to poll, so it renders only the Power and AC actions
+			// (see handleStatus), none judged on the gateway mute.
+			//
+			// Deliberately not NeedPeerBusy either, although every action it
+			// renders is judged on the peer's job: handleStatus makes its own
+			// peer round trip (peerJob, to embed the merged job) and derives
+			// PeerBusy from that one answer. Declaring the need as well would
+			// pay a second, separate round trip -- doubling /status's
+			// worst-case latency against a peer that is down or timing out
+			// (2x3s instead of 3s) -- for an answer the handler overwrites.
 			Handle: sf.handleStatus,
 		},
 		{
@@ -102,7 +114,22 @@ func (sf *Surface) powerResourceRoutes() []contract.Route {
 			// handleJob renders only state.Job, which snapshot() always reads
 			// regardless of this flag (it is a cheap local disk read).
 			SkipsProbe: true,
-			Handle:     sf.handleJob,
+			// No Needs, and NeedPeerBusy above all must never be added: that
+			// check *is* a GET of the peer's /job, so letting /job trigger
+			// one makes each node's answer depend on the other's, and a
+			// single question bounces between them until the 3s client
+			// timeout fires and the peer is misread as idle -- which is
+			// precisely how this arrived broken the first time (pi0
+			// answering in 5.3s and still offering power actions mid-job).
+			// /job renders no actions, so it has no use for the answer.
+			//
+			// handleJob does make its own, separate peer round trip
+			// (currentJob, so a client sees the same job whichever of
+			// pi0/pi1 it asked), but that one is bounded the other way:
+			// PeerQueryParam on the outgoing request tells the node
+			// answering it to skip its own merge. See
+			// coordination.PeerQueryParam and TestJobNeverAsksThePeerTwice.
+			Handle: sf.handleJob,
 		},
 	}
 }
@@ -110,23 +137,28 @@ func (sf *Surface) powerResourceRoutes() []contract.Route {
 // acResourceRoutes is the Shelly-plug navigable resources: the AC control
 // folder and the two plugs (rack fans on shelly1, f-host mains on shelly2).
 // Both plugs are NoRootLink -- reached through /ac-control, peer to /power.
+// All three render plug actions, which are withheld while either node runs a
+// job, hence NeedPeerBusy.
 func (sf *Surface) acResourceRoutes() []contract.Route {
 	return []contract.Route{
 		{
 			Name: "ac-control", Title: "AC control",
 			Method: http.MethodGet, Path: "/ac-control",
+			Needs:  contract.NeedPeerBusy,
 			Handle: sf.handleACControlFolder,
 		},
 		{
 			Name: "fans", Title: "Rack fan plug",
 			Method: http.MethodGet, Path: "/fans",
 			NoRootLink: true,
+			Needs:      contract.NeedPeerBusy,
 			Handle:     sf.handleFans,
 		},
 		{
 			Name: "ac", Title: "F-host mains AC plug",
 			Method: http.MethodGet, Path: "/ac",
 			NoRootLink: true,
+			Needs:      contract.NeedPeerBusy,
 			Handle:     sf.handleAC,
 		},
 	}
@@ -224,6 +256,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/fans/on", Action: true,
 			CLIVerb: "fans on",
 			Errors:  []contract.ErrorResponse{plugWriteFailed},
+			Needs:   contract.NeedPeerBusy,
 			// Unavailable when the plug cannot be read: without a read-back
 			// there is no way to report truthfully whether it worked.
 			Available: func(s contract.State) bool {
@@ -236,6 +269,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/fans/off", Action: true,
 			CLIVerb: "fans off",
 			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
+			Needs:   contract.NeedPeerBusy,
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.FansErr == nil && s.Fans.On
 			},
@@ -289,6 +323,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/ac/on", Action: true,
 			CLIVerb: "ac on",
 			Errors:  []contract.ErrorResponse{plugWriteFailed},
+			Needs:   contract.NeedPeerBusy,
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil && !s.AC.On
 			},
@@ -299,6 +334,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/ac/off", Action: true,
 			CLIVerb: "ac off",
 			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
+			Needs:   contract.NeedPeerBusy,
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil && s.AC.On
 			},
@@ -366,10 +402,15 @@ func (sf *Surface) hostRoutes(name string) []contract.Route {
 // with that job. Setting both here, from the route itself, is what keeps a
 // route from being declared a job without starting one (or the reverse), and
 // its handler from starting a different job than JobArgsFrom maps it to.
+//
+// Every power operation is also withheld while a job runs on either node
+// (JobRunning), so each needs the peer's job state -- stamped here for the
+// same reason: a job route cannot be declared without it.
 func (sf *Surface) jobRoutes(rs []contract.Route) []contract.Route {
 	for i := range rs {
 		rs[i].Handle = sf.action(rs[i].JobAction())
 		rs[i].Response = contract.ResponseJob
+		rs[i].Needs |= contract.NeedPeerBusy
 	}
 	return rs
 }

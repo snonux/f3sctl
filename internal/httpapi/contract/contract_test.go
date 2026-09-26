@@ -59,3 +59,25 @@ func TestResponseKindStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestNeedHas pins Need as a set: Has is true only when every need asked
+// about is declared, and the zero value -- a route declaring nothing --
+// has none of them.
+func TestNeedHas(t *testing.T) {
+	both := NeedMonitoring | NeedReport
+	for _, tc := range []struct {
+		set, x Need
+		want   bool
+	}{
+		{set: both, x: NeedMonitoring, want: true},
+		{set: both, x: NeedReport, want: true},
+		{set: both, x: both, want: true},
+		{set: both, x: NeedPeerBusy, want: false},
+		{set: NeedMonitoring, x: both, want: false},
+		{set: Route{}.Needs, x: NeedPeerBusy, want: false},
+	} {
+		if got := tc.set.Has(tc.x); got != tc.want {
+			t.Errorf("Need(%#x).Has(%#x) = %v, want %v", tc.set, tc.x, got, tc.want)
+		}
+	}
+}

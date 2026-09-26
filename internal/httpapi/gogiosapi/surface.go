@@ -21,28 +21,10 @@ package gogiosapi
 import (
 	"context"
 	"io"
-	"strings"
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/power"
-)
-
-// Path prefixes -- the PATH_INFO prefixes this surface answers on, named
-// as constants so the composition root's enrichState (which pre-fetches state
-// for exactly these families) and the routes themselves cannot drift apart.
-const (
-	// monitorPathPrefix covers /monitoring, /monitoring/mute and
-	// /monitoring/unmute.
-	monitorPathPrefix = "/monitoring"
-	// reportPathPrefix covers the whole alert-browse family: /gogios, every
-	// drill-down, /gogios/check and /gogios/cache/clear.
-	reportPathPrefix = "/gogios"
-	// cacheClearPath is the cache-clear action, which answers with the
-	// re-rendered folder (see handleClearCache) and so counts as a folder
-	// path for IsFolderPath. It must match the gogios-cache-clear route's
-	// Path (routes.go); TestIsFolderPathCoversEveryFolderRender pins that.
-	cacheClearPath = reportPathPrefix + "/cache/clear"
 )
 
 // Surface is the Gogios REST surface, bound to the collaborators its handlers
@@ -136,23 +118,3 @@ func NotAllMuted(s contract.State) bool {
 	}
 	return false
 }
-
-// IsMonitorPath reports whether path belongs to the mute family (/monitoring
-// and its actions). The composition root uses it to decide whether to pay for
-// the SSH round trips that read the gateways -- see enrichState.
-func IsMonitorPath(path string) bool { return strings.HasPrefix(path, monitorPathPrefix) }
-
-// IsFolderPath reports whether path answers with the Gogios folder: /gogios
-// itself, and the cache-clear action, whose response is the re-rendered
-// folder (see handleClearCache) -- as opposed to the drill-downs and the check
-// detail beneath it, which render no mute state. The folder advertises the
-// mute pair alongside the report (see handleOverview), so enrichState must
-// also fetch the gateway mute for every such path -- the same SSH round trips
-// IsMonitorPath exists to gate. Missing the cache-clear path here is what
-// once made its response silently drop monitoring-mute/unmute.
-func IsFolderPath(path string) bool { return path == reportPathPrefix || path == cacheClearPath }
-
-// IsReportPath reports whether path belongs to the alert-browse family
-// (/gogios and its drill-downs). The composition root uses it to decide
-// whether to fetch the report -- see enrichState.
-func IsReportPath(path string) bool { return strings.HasPrefix(path, reportPathPrefix) }

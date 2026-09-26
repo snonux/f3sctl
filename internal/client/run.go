@@ -122,7 +122,7 @@ func (c *Client) runAction(ctx context.Context, cmd, holderRel string, force boo
 		// something currently withheld -- the two look identical from here,
 		// since only possible actions are advertised (the server renders
 		// them from its route table, filtered by each route's Available
-		// predicate -- see httpapi's Router.Actions). Either way, showing
+		// predicate -- see httpapi's Router). Either way, showing
 		// the state it was judged against is more useful than a bare error.
 		fmt.Fprintf(c.stdout, "%q is not available right now.\n\n", cmd)
 		switch holderRel {
@@ -245,8 +245,8 @@ func (c *Client) showMonitoring(ctx context.Context) error {
 // next is the point of a hypermedia client: this list is the server's, not a
 // guess -- only possible actions are ever advertised (the server renders them
 // from its route table, filtered by each route's Available predicate -- see
-// contract.ActionRenderer, implemented by httpapi's Router.Actions and
-// Router.ActionsFor).
+// contract.ActionRenderer, implemented by httpapi's Router.ActionsFor and
+// Router.SectionActions).
 //
 // Each action is shown by its CLIVerb, the command the operator actually
 // types ("power on"), falling back to its name for a server that predates

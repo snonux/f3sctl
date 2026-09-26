@@ -45,11 +45,6 @@ func (a serverActions) router() *Router {
 	return a.s.router
 }
 
-// Actions delegates to Router.Actions.
-func (a serverActions) Actions(state contract.State) []contract.Action {
-	return a.router().Actions(state)
-}
-
 // ActionsFor delegates to Router.ActionsFor.
 func (a serverActions) ActionsFor(state contract.State, names ...string) []contract.Action {
 	return a.router().ActionsFor(state, names...)

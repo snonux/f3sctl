@@ -109,10 +109,10 @@ func gogiosE2EUpstream(t *testing.T, body string, status int) (*httptest.Server,
 // the real, unmodified pipeline.
 //
 // No engine, and peers is an empty PeerSet: every /gogios* route is
-// SkipsProbe:true and enrichState's PeerBusy check (server.go) loops over
-// zero peer nodes and returns immediately, so nothing here ever needs a
-// fleet probe, a Shelly read, or a real peer to ask -- see countingServer's
-// own doc comment for the same reasoning.
+// SkipsProbe:true and none declares contract.NeedPeerBusy (a peer check would
+// loop over zero peer nodes and return immediately anyway), so nothing here
+// ever needs a fleet probe, a Shelly read, or a real peer to ask -- see
+// countingServer's own doc comment for the same reasoning.
 func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server, config.Config, string) {
 	t.Helper()
 

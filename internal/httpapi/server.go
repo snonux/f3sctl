@@ -77,9 +77,9 @@ type Server struct {
 	// monitorStatus reads the Gogios mute marker from both gateways, feeding
 	// State.Monitoring. Nil means the engine's own read
 	// (Engine.MonitoringStatus, an SSH round trip to each gateway, several
-	// seconds); same reasoning as probeHosts. Fetched for the routes that
-	// render it -- the /monitoring family and the /gogios folder, which
-	// advertises the mute pair (see enrichState). See Server.monitorStatusFn.
+	// seconds); same reasoning as probeHosts. Fetched only for the routes
+	// that declare contract.NeedMonitoring (see enrichState). See
+	// Server.monitorStatusFn.
 	monitorStatus func(context.Context) []power.GatewayMute
 }
 
@@ -259,7 +259,7 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 	// cleanly rather than holding the CGI process open indefinitely.
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.CGITimeout.D())
 	defer cancel()
-	state := s.enrichState(ctx, s.snapshot(ctx, req), req)
+	state := s.enrichState(ctx, s.snapshot(ctx, req), r, req)
 
 	// An action that is not currently available is refused here, before any
 	// handler runs. A well-written client never reaches this: it was not
@@ -378,67 +378,29 @@ func (s *Server) monitorStatusFn() func(context.Context) []power.GatewayMute {
 	return s.engine.MonitoringStatus
 }
 
-// enrichState adds the request-scoped facts that cost more than the local
-// probes in snapshot() to gather -- the peer node's job state, and, only for
-// the routes that render it, the Gogios mute and the alert report -- so
-// serve() pays for them only when a route actually needs them.
-func (s *Server) enrichState(ctx context.Context, state contract.State, req contract.Request) contract.State {
-	// Ask the other node whether it is mid-job, so actions this node advertises
-	// account for a job running over there.
-	//
-	// Three routes are excluded. /job is excluded for a reason worth stating:
-	// the peer check *is* a GET of the peer's /job. Letting /job trigger one
-	// makes each node's answer depend on the other's, so a single question
-	// bounces between them until the 3s client timeout fires and the peer is
-	// misread as idle -- which is precisely how this arrived broken the first
-	// time (pi0 answering in 5.3s and still offering power actions mid-job).
-	// /job renders no actions, so it has no use for the answer anyway.
-	// openapi.json describes the surface rather than the moment.
-	//
-	// /job does still make its own, separate peer round trip -- the power
-	// surface's handleJob currentJob, so a client sees the same "current or
-	// last job" regardless of which of pi0/pi1 it asked -- but that one is bounded the other way:
-	// PeerQueryParam on the outgoing request tells the node answering it to
-	// skip its own currentJob merge, so the bounce this comment describes
-	// cannot happen there either. See coordination.PeerQueryParam.
-	//
-	// /status is excluded for a cheaper reason: it makes exactly the same
-	// peer round trip currentJob does (it embeds the merged job too), so
-	// paying for a second, separate one here would double /status's
-	// worst-case latency against a peer that is genuinely down or timing out
-	// (2x3s instead of 3s) for no benefit -- handleStatus derives its own
-	// PeerBusy from the one peer fetch it already makes. See powerapi's
-	// handleStatus.
-	//
-	// An unreachable peer counts as idle, for the same reason PeerSet.Busy
-	// gives: if one node is down the other must still be able to power the
-	// cluster on.
-	if req.Path != openAPIPath && req.Path != powerapi.JobPath && req.Path != powerapi.StatusPath {
+// enrichState adds the request-scoped facts r declares it reads (see
+// contract.Route.Needs) that cost more than the local probes in snapshot() to
+// gather -- the peer node's job state, the Gogios mute and the alert report
+// -- so serve() pays for each only when the route serving this request
+// actually reads it. It runs before the availability check in serve(),
+// because actions like monitoring-mute/unmute and every power action are
+// judged against exactly this state.
+//
+// The route is the matched one (method and path), not a path prefix: what to
+// fetch is part of each route's own declaration, so a new route cannot
+// silently inherit, or miss, a fetch meant for its neighbours.
+func (s *Server) enrichState(ctx context.Context, state contract.State, r contract.Route, req contract.Request) contract.State {
+	if r.Needs.Has(contract.NeedPeerBusy) {
+		// An unreachable peer counts as idle, for the same reason PeerSet.Busy
+		// gives: if one node is down the other must still be able to power the
+		// cluster on.
 		state.PeerBusy, _ = s.peers.Busy(ctx, s.node, req.APIKey)
 	}
-
-	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
-	// trip each to read, so it is fetched only for the routes that actually
-	// render or change it: the /monitoring family, and the /gogios folder
-	// (and POST /gogios/cache/clear, which re-renders the folder), which
-	// advertises the mute pair alongside the report browse. Every other
-	// response would pay ~2s for a value it never shows. This runs before the
-	// availability check in serve() because monitoring-mute/unmute are judged
-	// against exactly this state.
-	if gogiosapi.IsMonitorPath(req.Path) || gogiosapi.IsFolderPath(req.Path) {
+	if r.Needs.Has(contract.NeedMonitoring) {
 		state.Monitoring = s.monitorStatusFn()(ctx)
 	}
-
-	// The Gogios alert report is cached on disk (internal/gogios) but still
-	// costs a stat, and on a cold or expired cache an HTTP round trip to the
-	// federated endpoint, so it is fetched only for the routes that render it.
-	// The Gogios surface's clear-cache handler re-fetches after clearing the
-	// cache, so this fetch's result is discarded there rather than reused --
-	// the same "populate for availability, then recompute in the handler"
-	// shape the mute handlers already use for state.Monitoring.
-	if gogiosapi.IsReportPath(req.Path) {
+	if r.Needs.Has(contract.NeedReport) {
 		state.Gogios, state.GogiosErr = gogios.Fetch(ctx, s.cfg)
 	}
-
 	return state
 }

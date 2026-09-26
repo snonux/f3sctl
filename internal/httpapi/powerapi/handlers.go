@@ -17,12 +17,18 @@ import (
 // watchface needs a single request per refresh.
 //
 // /status makes its own single peer round trip -- via peerJob, the same
-// helper handleJob uses -- rather than also relying on the composition root's
-// enrichState PeerBusy check (StatusPath is excluded from that, see
-// enrichState): this route needs the peer's *job*, not just whether it is
-// running, to embed the merged job entity, so deriving PeerBusy from that
-// same fetch avoids paying for a second, separate peer round trip against a
-// peer that may be slow or unreachable.
+// helper handleJob uses -- rather than also declaring contract.NeedPeerBusy
+// (see the route's declaration): this route needs the peer's *job*, not just
+// whether it is running, to embed the merged job entity, so deriving PeerBusy
+// from that same fetch avoids paying for a second, separate peer round trip
+// against a peer that may be slow or unreachable.
+//
+// Its actions are the Power and AC sections' -- every operation judged on the
+// fleet, plug and job state this route gathers. The Gogios section's are left
+// to /gogios and /monitoring: the mute pair is judged on the gateway mute,
+// which /status deliberately never reads (an SSH round trip to each gateway
+// on every watchface poll; see docs/CLIENT.md), so rendering it here could
+// only ever omit it as if nothing were muted.
 func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
 	peer := sf.peerJob(ctx, req.APIKey)
 	state.PeerBusy = peer != nil && peer.State == coordination.JobRunning
@@ -35,7 +41,7 @@ func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req c
 			{Rel: []string{"self"}, Href: sf.Href(StatusPath)},
 			{Rel: []string{"up"}, Href: sf.Href("/")},
 		},
-		Actions: sf.actions.Actions(state),
+		Actions: append(sf.actions.SectionActions(state, contract.SectionPower), sf.actions.SectionActions(state, contract.SectionAC)...),
 	}
 
 	e.Entities = append(e.Entities, sf.hostEntities(state.Hosts)...)

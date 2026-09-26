@@ -11,9 +11,6 @@ package contract
 // action that is not possible right now rather than marking it disabled --
 // see Entity.Actions.
 type ActionRenderer interface {
-	// Actions renders every action the route table offers right now, for a
-	// resource that advertises the whole API (the status route).
-	Actions(state State) []Action
 	// ActionsFor renders only the named actions that are possible right now,
 	// for a resource that advertises just its own controls.
 	ActionsFor(state State, names ...string) []Action

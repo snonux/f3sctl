@@ -66,9 +66,10 @@ func (g *gatewayRecorder) callCount() int {
 	return g.calls
 }
 
-// muteServer is a Server whose Gogios surface drives gw, and whose enrichState
-// reads the mute from gw too -- so availability and the handler see the same
-// gateways, as they do in production through the engine.
+// muteServer is a Server whose Gogios surface drives gw, and whose
+// NeedMonitoring fetch (enrichState) reads the mute from gw too -- so
+// availability and the handler see the same gateways, as they do in
+// production through the engine.
 func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 	t.Helper()
 

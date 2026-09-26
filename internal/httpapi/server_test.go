@@ -187,10 +187,9 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 
 // TestSkipsProbeCoversTheMonitoringFamily pins that skipsProbe treats every
 // /monitoring path -- the resource itself and its mute/unmute actions -- the
-// same way, matching the "/monitoring" prefix check enrichState already uses
-// to decide whether to fetch the Gogios mute. Every handler in the mute
-// family -- Gogios surface's handleMonitoring, handleMute, handleUnmute --
-// renders only state.Monitoring; see gogiosapi/handlers.go.
+// same way. Every handler in the mute family -- Gogios surface's
+// handleMonitoring, handleMute, handleUnmute -- renders only
+// state.Monitoring; see gogiosapi/handlers.go.
 //
 // The root belongs on the SkipsProbe side since the section folders took
 // over its actions list: handleRoot renders properties and links only, no
@@ -212,11 +211,12 @@ func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
 
 // cgiEnvForJob sets the CGI environment variables ServeCGI reads (see
 // parseCGIRequest) for a GET request against the job path, authenticated with
-// apiKey. powerapi.JobPath is used by both tests below because it is the one route
-// that needs no live probe, no peer network call and no Gogios SSH round
-// trip (see skipsProbe and enrichState) -- so the only things standing
-// between "bad key" and "200 with the job entity" are the pieces qz0 is
-// about: auth, routing and siren rendering, not network flakiness.
+// apiKey. powerapi.JobPath is used by both tests below because it is the one
+// route that needs no live probe, no peer network call and no Gogios SSH
+// round trip (see skipsProbe, and the route's empty Needs) -- so the only
+// things standing between "bad key" and "200 with the job entity" are the
+// pieces qz0 is about: auth, routing and siren rendering, not network
+// flakiness.
 func cgiEnvForJob(t *testing.T, apiKey string) {
 	t.Helper()
 	t.Setenv("REQUEST_METHOD", http.MethodGet)
@@ -619,7 +619,7 @@ func TestACControlFolderOffersThePlugActions(t *testing.T) {
 // always, and the mute pair judged on the same gateway mute state /monitoring
 // renders -- one of them for a uniform state, both after a partial mute. This
 // is what makes /gogios a folder rather than only a report -- see
-// handleOverview and enrichState's IsFolderPath fetch.
+// handleOverview and the route's contract.NeedMonitoring.
 func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 	tests := []struct {
 		name string
@@ -658,8 +658,9 @@ func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 // /gogios/cache/clear, whose response is the re-rendered /gogios folder,
 // advertises exactly the actions GET /gogios does -- including the mute pair,
 // judged on the same gateway mute read. It once rendered the folder with
-// state.Monitoring nil (enrichState fetched the mute only for GET /gogios), so
-// a stranded mute's monitoring-unmute silently vanished after a cache clear.
+// state.Monitoring nil (a path predicate fetched the mute only for GET
+// /gogios; the route now declares contract.NeedMonitoring), so a stranded
+// mute's monitoring-unmute silently vanished after a cache clear.
 // The "unreadable" case is the negative one: with no mute state at all, both
 // responses must withhold both mute actions rather than guess.
 func TestGogiosCacheClearCarriesTheMutePairLikeTheFolder(t *testing.T) {

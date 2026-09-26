@@ -113,24 +113,12 @@ func (rt *Router) Links() []contract.Link {
 	return out
 }
 
-// Actions renders every action that is possible right now.
+// ActionsFor renders every named action that is possible right now, for
+// resources that should only advertise their own controls.
 //
 // Actions that are not possible are omitted entirely rather than marked
 // disabled. That is the core of the contract: a client renders what it is
 // given, and never needs to encode a rule about when something is allowed.
-func (rt *Router) Actions(state contract.State) []contract.Action {
-	var out []contract.Action
-	for _, r := range rt.routes {
-		if !r.Action || !r.IsAvailable(state) {
-			continue
-		}
-		out = append(out, rt.action(r, state))
-	}
-	return out
-}
-
-// ActionsFor is Actions narrowed to the named routes, for resources that
-// should only advertise their own controls.
 func (rt *Router) ActionsFor(state contract.State, names ...string) []contract.Action {
 	var out []contract.Action
 	for _, r := range rt.routes {

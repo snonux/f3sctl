@@ -130,8 +130,8 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 		Properties: props,
 		Links:      links,
 		// The folder advertises the whole family's controls: the report cache
-		// clear, and the gateway mute pair -- which is why the route's render
-		// needs state.Monitoring too (see enrichState's IsFolderPath fetch).
+		// clear, and the gateway mute pair -- which is why every route that
+		// renders the folder declares contract.NeedMonitoring.
 		Actions: sf.actions.ActionsFor(state, "gogios-cache-clear", "monitoring-mute", "monitoring-unmute"),
 	}, http.StatusOK, nil
 }
@@ -231,9 +231,9 @@ func (sf *Surface) handleCheck(_ context.Context, state contract.State, req cont
 // re-populate state and re-render the overview, rather than assuming success.
 //
 // Only the report is re-read: clearing it does not touch the gateway mute, so
-// state.Monitoring -- fetched by enrichState because IsFolderPath covers this
-// path -- is passed through as-is, and the re-rendered folder advertises the
-// mute pair exactly as GET /gogios does.
+// state.Monitoring -- fetched because the route declares NeedMonitoring -- is
+// passed through as-is, and the re-rendered folder advertises the mute pair
+// exactly as GET /gogios does.
 func (sf *Surface) handleClearCache(ctx context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
 	if err := gogios.ClearCache(sf.Config); err != nil {
 		return contract.Entity{}, http.StatusInternalServerError, err
