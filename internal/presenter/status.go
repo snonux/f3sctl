@@ -26,15 +26,12 @@ type Options struct {
 	//
 	// The local CLI always sets this: power.Engine.ProbeAll populates Role for
 	// every host it probes, straight out of the inventory. The remote client
-	// leaves it off. It could, in principle, dig it out: powerapi's hostEntity
-	// puts the role in a host entity's "class" array (["host", role]) --
-	// but docs/CLIENT.md section 11 lists the stable, depend-on-able host
-	// properties as name/ip/ping/pingKnown/ssh/ms only, and explicitly calls
-	// out "new entity classes... appearing at any time" as NOT stable. Reading
-	// class[1] positionally would be coupling to exactly the kind of thing
-	// that contract says not to. So the remote client passes ShowRole: false
-	// and the column is simply absent there, same as it always effectively
-	// was.
+	// leaves it off by choice: powerapi's hostEntity does carry the role as
+	// the second entry of a host entity's "class" (["host", role]), which
+	// docs/CLIENT.md now lists as stable, but the remote status table has
+	// never shown a ROLE column and the powerGroup property already answers
+	// the question operators ask of it. Turning it on is a presentation
+	// change, not a contract one.
 	ShowRole bool
 }
 
