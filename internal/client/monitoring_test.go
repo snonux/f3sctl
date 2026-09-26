@@ -342,6 +342,11 @@ func TestRunMonitoringMuteFinishesAPartialMute(t *testing.T) {
 	if strings.Contains(got, "not available") || !strings.Contains(got, "fishfinger: MUTED") {
 		t.Errorf("output = %q, want the mute performed and fishfinger shown muted", got)
 	}
+	// The mute view is the follow-up; the rack nouns' "<action>: done"
+	// line is not (see nounFollowUp's sayDone).
+	if strings.Contains(got, ": done") {
+		t.Errorf("output = %q, want no \"<action>: done\" line for a monitoring action", got)
+	}
 }
 
 // Negative: with every gateway already muted the mute is withheld, so Run

@@ -47,6 +47,12 @@ type fakeAPI struct {
 	// up on it -- an action still in flight when the operator hits Ctrl-C.
 	hangPost bool
 
+	// fansOn, when true, makes /fans also advertise fans-on (and POST
+	// /fans/on answer with the plug's new state), for tests of a
+	// synchronous success's follow-up. Off by default so every older test
+	// sees the fans-off-only advertisement it was written against.
+	fansOn bool
+
 	// rootActions, powerActions and statusActions are what GET /, GET
 	// /power and GET /status advertise. All are empty unless a test sets
 	// them: the real root renders no actions since the section folders, the
@@ -100,6 +106,8 @@ func (f *fakeAPI) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleFans(w)
 	case r.URL.Path == "/fans/off" && r.Method == http.MethodPost:
 		f.handleFansOff(w, r)
+	case r.URL.Path == "/fans/on" && r.Method == http.MethodPost && f.fansOn:
+		writeEntity(w, Entity{Properties: map[string]any{"on": true}})
 	case r.URL.Path == "/status" && r.Method == http.MethodGet:
 		// No hosts, no fan entity: enough for showStatus to render.
 		writeEntity(w, Entity{Class: []string{"status"}, Actions: f.statusActions})
@@ -149,7 +157,13 @@ func (f *fakeAPI) handleFans(w http.ResponseWriter) {
 			{Name: "force", Type: "checkbox", Title: "hosts may still be running", Required: true},
 		}
 	}
-	writeEntity(w, Entity{Class: []string{"fans"}, Actions: []Action{action}})
+	actions := []Action{action}
+	if f.fansOn {
+		actions = append(actions, Action{
+			Name: "fans-on", Method: http.MethodPost, Href: "/fans/on", CLIVerb: "fans on",
+		})
+	}
+	writeEntity(w, Entity{Class: []string{"fans"}, Actions: actions})
 }
 
 // handleFansOff answers POST /fans/off, recording the "force" form value the

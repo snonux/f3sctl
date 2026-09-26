@@ -331,3 +331,28 @@ func TestInterruptedInFlightHintFollowsTheTable(t *testing.T) {
 		}
 	}
 }
+
+// TestRunFansOnAnnouncesDoneAndReFetchesStatus is the positive half of
+// nounFollowUp's sayDone: a synchronous rack action is announced as
+// "<action>: done" and followed by a fresh /status render (fetched after the
+// POST, not before it).
+func TestRunFansOnAnnouncesDoneAndReFetchesStatus(t *testing.T) {
+	api := newFakeAPI(t, "key")
+	api.fansOn = true
+	api.statusActions = statusFixtureActions
+	c, out := newCapturingClient(t, api.srv.URL, "key")
+
+	if err := Run(context.Background(), c, []string{"fans", "on"}, false); err != nil {
+		t.Fatalf("Run(fans on): %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "fans-on: done\n") {
+		t.Errorf("output = %q, want %q", got, "fans-on: done\n")
+	}
+	if !strings.Contains(got, "available now: power on, fans off\n") {
+		t.Errorf("output = %q, want the re-fetched status's actions", got)
+	}
+	if gets := api.getPaths(); len(gets) == 0 || gets[len(gets)-1] != "/status" {
+		t.Errorf("GETs = %v, want /status re-fetched last, after the action", gets)
+	}
+}

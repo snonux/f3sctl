@@ -314,6 +314,11 @@ func TestRunGogiosCacheClearInvokesTheActionAndReFetches(t *testing.T) {
 	if !strings.Contains(out.String(), "GOGIOS Report") {
 		t.Errorf("output = %q, want the re-fetched overview", out.String())
 	}
+	// The overview is the follow-up; the rack nouns' "<action>: done" line
+	// is not (see nounFollowUp's sayDone).
+	if strings.Contains(out.String(), ": done") {
+		t.Errorf("output = %q, want no \"<action>: done\" line for the cache clear", out.String())
+	}
 }
 
 // TestRunGogiosShowsAnUnreachableReportEndToEnd pins the "error" property
