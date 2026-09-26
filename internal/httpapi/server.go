@@ -381,8 +381,9 @@ func (s *Server) enrichState(ctx context.Context, state contract.State, req cont
 
 	// The Gogios mute lives on the two OpenBSD gateways and costs an SSH round
 	// trip each to read, so it is fetched only for the routes that actually
-	// render or change it: the /monitoring family, and the /gogios folder,
-	// which advertises the mute pair alongside the report browse. Every other
+	// render or change it: the /monitoring family, and the /gogios folder
+	// (and POST /gogios/cache/clear, which re-renders the folder), which
+	// advertises the mute pair alongside the report browse. Every other
 	// response would pay ~2s for a value it never shows. This runs before the
 	// availability check in serve() because monitoring-mute/unmute are judged
 	// against exactly this state.
