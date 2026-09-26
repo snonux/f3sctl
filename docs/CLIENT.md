@@ -672,7 +672,10 @@ X-API-Key: ...
 
 The root is a **folder index**: it never carries actions. Its section
 folders — Power control, AC control, and Gogios — are where the operations
-live, each following its own domain:
+live, each following its own domain. (`/status` also carries the Power and AC
+folders' actions, so a status view can offer them without a second request;
+the Gogios actions — the mute pair and `gogios cache clear` — are only on
+`/gogios`, plus the mute pair on `/monitoring`.)
 
 ```json
 { "class": ["power", "section"],
@@ -752,7 +755,10 @@ project assumes — you will never see the refusal anyway.
   `fans-off`, `ac-on`, `ac-off`, `monitoring-mute`, `monitoring-unmute`,
   `gogios-cache-clear` — advertised where their section folder puts them
   (host power on `/power`; Shelly plug switches on `/ac-control`; the mute
-  pair on `/monitoring` and on the `/gogios` folder), never on the root
+  pair on `/monitoring` and on the `/gogios` folder; `gogios-cache-clear` on
+  the `/gogios` folder), never on the root. `/status` carries the Power and
+  AC actions only — the two folders' together — and never the Gogios ones:
+  it does not read the gateway mute they are judged on
 - `properties` keys on hosts (`name`, `ip`, `ping`, `pingKnown`, `ssh`, `ms`,
   `powerGroup`) and their role class (`f`, `cluster`), fans and ac (`on`,
   `ip`, `error`) and jobs (`action`, `state`, `started`, `finished`, `rc`,

@@ -185,10 +185,10 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 	}
 }
 
-// TestSkipsProbeCoversTheMonitoringFamily pins that skipsProbe treats every
-// /monitoring path -- the resource itself and its mute/unmute actions -- the
-// same way. Every handler in the mute family -- Gogios surface's
-// handleMonitoring, handleMute, handleUnmute -- renders only
+// TestSkipsProbeCoversTheMonitoringFamily pins the SkipsProbe declarations
+// snapshot() follows for the mute family: the /monitoring resource and its
+// mute/unmute actions all skip the probe. Every handler in the mute family --
+// Gogios surface's handleMonitoring, handleMute, handleUnmute -- renders only
 // state.Monitoring; see gogiosapi/handlers.go.
 //
 // The root belongs on the SkipsProbe side since the section folders took
@@ -197,14 +197,58 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 // no probe at all. Everything that still renders state-derived actions
 // (/status, the fans pair, /power's folder list) must keep probing.
 func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
-	for _, path := range []string{"/", "/monitoring", "/monitoring/mute", "/monitoring/unmute"} {
-		if !skipsProbe(testRoutes(inventory.Default()), path) {
-			t.Errorf("skipsProbe(%q) = false, want true: this handler renders no probe-derived state", path)
+	rt := testRouter(inventory.Default(), "")
+	for _, tc := range []struct {
+		method, path string
+		skips        bool
+	}{
+		{http.MethodGet, "/", true},
+		{http.MethodGet, "/monitoring", true},
+		{http.MethodPost, "/monitoring/mute", true},
+		{http.MethodPost, "/monitoring/unmute", true},
+		{http.MethodGet, "/power", false},
+		{http.MethodGet, "/status", false},
+		{http.MethodGet, "/fans", false},
+		{http.MethodPost, "/fans/on", false},
+		{http.MethodPost, "/fans/off", false},
+		{http.MethodPost, "/power/off", false},
+	} {
+		r, ok := rt.Lookup(tc.method, tc.path)
+		if !ok {
+			t.Errorf("no route serves %s %s", tc.method, tc.path)
+			continue
+		}
+		if r.SkipsProbe != tc.skips {
+			t.Errorf("%s %s SkipsProbe = %v, want %v", tc.method, tc.path, r.SkipsProbe, tc.skips)
 		}
 	}
-	for _, path := range []string{"/power", "/status", "/fans", "/fans/on", "/fans/off", "/power/off"} {
-		if skipsProbe(testRoutes(inventory.Default()), path) {
-			t.Errorf("skipsProbe(%q) = true, want false: this route's handler or Available predicates do read the probe", path)
+}
+
+// TestSnapshotFollowsTheMatchedRouteNotThePath pins that whether snapshot()
+// probes belongs to the route serving the request -- method and path --
+// rather than to the first route found on its path, which is all the old
+// path-only lookup could see. Two routes share one path here and differ in
+// SkipsProbe; each must get its own answer, in either declaration order.
+func TestSnapshotFollowsTheMatchedRouteNotThePath(t *testing.T) {
+	render := func(context.Context, contract.State, contract.Request) (contract.Entity, int, error) {
+		return contract.Entity{}, http.StatusOK, nil
+	}
+	get := contract.Route{Name: "shared-get", Method: http.MethodGet, Path: "/shared", SkipsProbe: true, Handle: render}
+	post := contract.Route{Name: "shared-post", Method: http.MethodPost, Path: "/shared", Action: true, Handle: render}
+
+	for _, order := range [][]contract.Route{{get, post}, {post, get}} {
+		srv, pc := countingServer(t)
+		srv.router = routerOver(t, order)
+
+		getEntity(t, srv, "/shared")
+		if pc.probes != 0 || pc.fanReads != 0 || pc.acReads != 0 {
+			t.Errorf("GET /shared (SkipsProbe) with %s first: probes=%d fans=%d ac=%d, want none",
+				order[0].Name, pc.probes, pc.fanReads, pc.acReads)
+		}
+		postEntity(t, srv, "/shared")
+		if pc.probes != 1 || pc.fanReads != 1 || pc.acReads != 1 {
+			t.Errorf("POST /shared (probing) with %s first: probes=%d fans=%d ac=%d, want one each",
+				order[0].Name, pc.probes, pc.fanReads, pc.acReads)
 		}
 	}
 }
@@ -213,7 +257,7 @@ func TestSkipsProbeCoversTheMonitoringFamily(t *testing.T) {
 // parseCGIRequest) for a GET request against the job path, authenticated with
 // apiKey. powerapi.JobPath is used by both tests below because it is the one
 // route that needs no live probe, no peer network call and no Gogios SSH
-// round trip (see skipsProbe, and the route's empty Needs) -- so the only
+// round trip (see the route's SkipsProbe and empty Needs) -- so the only
 // things standing between "bad key" and "200 with the job entity" are the
 // pieces qz0 is about: auth, routing and siren rendering, not network
 // flakiness.

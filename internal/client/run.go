@@ -544,8 +544,11 @@ func (c *Client) showStatus(ctx context.Context) error {
 
 	// The actions come off the status entity, not the root: since the
 	// section folders the root is a folder index that renders no actions of
-	// its own (see httpapi's handleRoot), while /status renders every action
-	// possible right now -- so reading the root here printed nothing at all.
+	// its own (see httpapi's handleRoot), so reading the root here printed
+	// nothing at all. /status renders the Power and AC actions possible right
+	// now -- the Gogios ones (the mute pair, the cache clear) live on /gogios
+	// and /monitoring, since /status never reads the gateway mute they are
+	// judged on.
 	c.printAvailable(statusEntity.Actions)
 	return nil
 }

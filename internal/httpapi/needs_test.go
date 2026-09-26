@@ -71,11 +71,13 @@ var needsReport = &gogios.Report{
 	},
 }
 
-// needsBaseStates are states with every Need's state fetched and set to a
-// value its readers can tell from the dropped one: the peer busy, a partial
-// mute (so both mute actions are offered), and a report. Two fleets, all up
-// and all down, so that between them every power and plug action is offered
-// in at least one -- and so is judged on the peer.
+// needsBaseStates are states with every Need's state fetched: a partial mute
+// (so both mute actions are offered) and a report, which dropping them
+// changes, on two fleets (all up and all down) with the peer busy and idle.
+// The busy peer is what dropping NeedPeerBusy changes; the idle one is what
+// offers the power and plug actions at all -- between the four states every
+// action is offered in at least one (TestNeedsBaseStatesOfferEveryAction), so
+// the guard never judges an action only in states where it is withheld anyway.
 func needsBaseStates() []contract.State {
 	fHosts := func(up bool) []power.HostStatus {
 		var out []power.HostStatus
@@ -84,24 +86,36 @@ func needsBaseStates() []contract.State {
 		}
 		return out
 	}
-	enriched := func(up bool) contract.State {
+	enriched := func(up, peerBusy bool) contract.State {
 		return contract.State{
 			Hosts:      fHosts(up),
 			Fans:       power.FansState{On: up},
 			AC:         power.ACState{On: up},
-			PeerBusy:   true,
+			PeerBusy:   peerBusy,
 			Monitoring: []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}},
 			Gogios:     needsReport,
 		}
 	}
-	return []contract.State{enriched(true), enriched(false)}
+	return []contract.State{enriched(true, true), enriched(false, true), enriched(true, false), enriched(false, false)}
 }
 
+// needsJobs is a powerapi.Jobs that never spawns a child and answers every
+// Start with the same fixed job, so a job route's Handle can be observed, and
+// compared, like any other.
+type needsJobs struct{}
+
+func (needsJobs) Start(action string, _ []string) (coordination.Job, error) {
+	return coordination.Job{ID: "j1", Action: action, State: coordination.JobRunning,
+		Started: "2026-09-27T08:00:00Z", Node: "test"}, nil
+}
+func (needsJobs) StaleCeiling() time.Duration { return time.Minute }
+func (needsJobs) Read() *coordination.Job     { return nil }
+
 // needsServer is a Server whose every collaborator a handler can reach is a
-// fake -- the plug engine, the gateway mute, an empty peer set, a job manager
-// and a report cache in temp dirs, an unreachable Gogios URL -- so every
-// synchronous route's Handle can be called directly, side effects included,
-// without touching the network or a real gateway.
+// fake -- the plug engine, the gateway mute, an empty peer set, a job starter
+// that spawns nothing, a report cache in a temp dir, an unreachable Gogios
+// URL -- so every route's Handle can be called directly, side effects
+// included, without touching the network, a real gateway or a real job.
 func needsServer(t *testing.T) *Server {
 	t.Helper()
 
@@ -116,7 +130,7 @@ func needsServer(t *testing.T) *Server {
 
 	href := contract.Hrefs("")
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", href, inv, &plugRecorder{}, jobs, peers, a)
+		return powerapi.New("test", href, inv, &plugRecorder{}, needsJobs{}, peers, a)
 	}
 	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
 		return gogiosapi.New("test", href, cfg, gw, a)
@@ -130,9 +144,10 @@ func needsServer(t *testing.T) *Server {
 // observeRoute is everything about route name that the state enrichState
 // fetched could change, rendered as one comparable string: whether the route
 // is available and with which fields (what serve() judges before any handler
-// runs), and -- for every route but a job start, which would spawn a real
-// detached child -- what its own Handle answers. A panicking handler (one
-// dereferencing a report that was never fetched) is an answer too.
+// runs), and what its own Handle answers. A panicking handler (one
+// dereferencing a report that was never fetched) is an answer too. Job routes
+// are observed through needsJobs, so a job handler that started reading State
+// would be held to its declarations like every other handler.
 //
 // Each observation gets a fresh Server, so a handler's side effects (a mute,
 // a cleared cache) cannot leak from one observation into the next.
@@ -144,11 +159,7 @@ func observeRoute(t *testing.T, name string, state contract.State) string {
 		t.Fatalf("route %q vanished from a freshly built table", name)
 	}
 
-	out := fmt.Sprintf("available=%v fields=%+v", r.IsAvailable(state), r.FieldsFor(state))
-	if r.Response == contract.ResponseJob {
-		return out
-	}
-	return out + " handle=" + handleOutput(r, state)
+	return fmt.Sprintf("available=%v fields=%+v handle=%s", r.IsAvailable(state), r.FieldsFor(state), handleOutput(r, state))
 }
 
 func routeNamed(srv *Server, name string) (contract.Route, bool) {
@@ -224,6 +235,26 @@ func TestRoutesDeclareTheStateTheyRead(t *testing.T) {
 	}
 }
 
+// TestNeedsBaseStatesOfferEveryAction keeps the guard from passing vacuously
+// for an action: one withheld in every base state would compare equal with
+// and without a need it does read -- "unavailable" both times -- and so
+// escape TestRoutesDeclareTheStateTheyRead unnoticed.
+func TestNeedsBaseStatesOfferEveryAction(t *testing.T) {
+	for _, r := range needsServer(t).router.routes {
+		if !r.Action {
+			continue
+		}
+		offered := false
+		for _, base := range needsBaseStates() {
+			offered = offered || r.IsAvailable(base)
+		}
+		if !offered {
+			t.Errorf("action %q is available in none of needsBaseStates: add a base state that offers it, "+
+				"or the Needs guard cannot see what it reads", r.Name)
+		}
+	}
+}
+
 // TestNeedsGuardSeesEachNeed is the guard's own negative test: each needCase
 // must actually change something observable on a route known to read it, or
 // TestRoutesDeclareTheStateTheyRead would pass vacuously -- flagging every
@@ -255,6 +286,19 @@ func (fc *fetchCounts) counts() [3]int32 {
 	return [3]int32{atomic.LoadInt32(&fc.peer), atomic.LoadInt32(&fc.mute), atomic.LoadInt32(fc.report)}
 }
 
+// countingMonitor is a gatewayRecorder that counts its gateway reads into
+// reads -- both enrichState's (as the Server's monitorStatus) and a mute
+// handler's own re-read (as the Gogios surface's Monitor).
+type countingMonitor struct {
+	gatewayRecorder
+	reads *int32
+}
+
+func (m *countingMonitor) MonitoringStatus(ctx context.Context) []power.GatewayMute {
+	atomic.AddInt32(m.reads, 1)
+	return m.gatewayRecorder.MonitoringStatus(ctx)
+}
+
 // fetchCountingServer serves the real pipeline against a fake peer node and a
 // fake Gogios upstream over real HTTP, and a counting gateway mute read -- so
 // a test can tell exactly which round trips one request paid for, including
@@ -264,6 +308,9 @@ func (fc *fetchCounts) counts() [3]int32 {
 func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 	t.Helper()
 	fc := &fetchCounts{}
+	// One alerting gateway, the plugs off: the mute and fans-on are both
+	// available, so serving them reaches their handlers.
+	gw := &countingMonitor{gatewayRecorder: gatewayRecorder{gws: []power.GatewayMute{{Name: "blowfish"}}}, reads: &fc.mute}
 
 	idle := coordination.Job{ID: "j0", Action: "on", State: coordination.JobDone, Node: "pi1"}
 	peerBody, err := json.Marshal(map[string]any{"class": []string{"job"}, "properties": idle})
@@ -295,17 +342,14 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 	return (&Server{
 		cfg: cfg, jobs: jobs, peers: peers,
 		auth: NewAuthenticator(keyFile), siren: NewSirenRenderer(), node: "test",
-		probeHosts: func(context.Context) []power.HostStatus { return nil },
-		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
-		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
-		monitorStatus: func(context.Context) []power.GatewayMute {
-			atomic.AddInt32(&fc.mute, 1)
-			return []power.GatewayMute{{Name: "blowfish", Muted: true}}
-		},
+		probeHosts:    func(context.Context) []power.HostStatus { return nil },
+		fansStatus:    func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
+		acStatus:      func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
+		monitorStatus: gw.MonitoringStatus,
 	}).assemble(inv, func(a contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", href, inv, nil, jobs, peers, a)
+		return powerapi.New("test", href, inv, &plugRecorder{}, jobs, peers, a)
 	}, func(a contract.ActionRenderer) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, cfg, nil, a)
+		return gogiosapi.New("test", href, cfg, gw, a)
 	}, ""), fc
 }
 
@@ -333,12 +377,19 @@ func TestEachRouteFetchesExactlyWhatItDeclares(t *testing.T) {
 		{http.MethodGet, "/gogios", [3]int32{0, 1, 1}},
 		{http.MethodGet, "/gogios/critical", [3]int32{0, 0, 1}},
 		{http.MethodPost, "/gogios/cache/clear", [3]int32{0, 1, 1}},
+		// The mute reads the gateways twice: once for serve()'s availability
+		// check, once in the handler to report what the mute left behind.
+		{http.MethodPost, "/monitoring/mute", [3]int32{0, 2, 0}},
+		{http.MethodPost, "/fans/on", [3]int32{1, 0, 0}},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			srv, fc := fetchCountingServer(t)
 			req := getRequest(tc.path)
 			req.Method = tc.method
-			serveEntity(t, srv, req)
+			if msg, failed := serveEntity(t, srv, req).Properties["message"]; failed {
+				t.Errorf("%s %s answered an error (%v): its handler must run for the counts to mean anything",
+					tc.method, tc.path, msg)
+			}
 
 			if got := fc.counts(); got != tc.want {
 				t.Errorf("[peer, mute, report] fetches = %v, want %v", got, tc.want)
@@ -427,7 +478,8 @@ func TestEnrichStateFollowsTheMatchedRouteNotThePath(t *testing.T) {
 }
 
 // routerOver is a Router over a hand-built route table, for the tests above
-// that serve two routes sharing one path through a real Server.
+// (and in server_test.go) that serve two routes sharing one path through a
+// real Server.
 func routerOver(t *testing.T, rs []contract.Route) *Router {
 	t.Helper()
 	rt, err := NewRouter("", rs)

@@ -51,7 +51,7 @@ type fakeAPI struct {
 	// /power and GET /status advertise. All are empty unless a test sets
 	// them: the real root renders no actions since the section folders, the
 	// real /power folder renders its possible host power actions, and the
-	// real /status renders every action possible right now -- see
+	// real /status its possible Power and AC actions -- see
 	// TestRunStatusLists*.
 	rootActions   []Action
 	powerActions  []Action

@@ -30,9 +30,9 @@ type State struct {
 	// Gogios is the fetched-or-cached Gogios alert report (internal/gogios),
 	// populated by the composition root only for routes declaring NeedReport
 	// -- reading it costs an HTTP round trip on a cold cache, so only those
-	// routes pay for it. Nil when not collected for this request, or when the fetch failed;
-	// the two are told apart by GogiosErr, the same pattern Fans/FansErr
-	// uses.
+	// routes pay for it. Nil when not collected for this request, or when the
+	// fetch failed; the two are told apart by GogiosErr, the same pattern
+	// Fans/FansErr uses.
 	Gogios *gogios.Report
 	// GogiosErr is set when the Gogios fetch failed; Gogios is nil in that case.
 	GogiosErr error

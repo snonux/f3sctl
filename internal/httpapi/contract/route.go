@@ -99,8 +99,8 @@ type Route struct {
 	SkipsProbe bool
 	// Needs declares the request-scoped State this route reads beyond the
 	// snapshot -- the peer's job, the Gogios mute, the alert report -- in its
-	// own Handle, in its Available/Fields predicates (which serve() checks
-	// before any handler runs), and in the Available predicates of every
+	// own Handle, in its Available predicate (which serve() checks before any
+	// handler runs) and its Fields, and in the Available/Fields of every
 	// action its handler renders. The composition root fetches exactly what
 	// is declared and nothing else (see enrichState), so each costly round
 	// trip is paid only by the routes that use its answer. See Need.

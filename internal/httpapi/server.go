@@ -259,7 +259,7 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 	// cleanly rather than holding the CGI process open indefinitely.
 	ctx, cancel := context.WithTimeout(context.Background(), s.cfg.CGITimeout.D())
 	defer cancel()
-	state := s.enrichState(ctx, s.snapshot(ctx, req), r, req)
+	state := s.enrichState(ctx, s.snapshot(ctx, r), r, req)
 
 	// An action that is not currently available is refused here, before any
 	// handler runs. A well-written client never reaches this: it was not
@@ -282,63 +282,36 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 	return s.siren.WriteEntity(out, status, entity)
 }
 
-// snapshot probes what the requested route actually needs, once.
+// snapshot probes what the matched route r actually needs, once.
 //
 // Job is a local disk read (coordination.Manager.Read), cheap enough to take
 // unconditionally. Hosts, Fans and AC are not: Hosts costs Engine.ProbeAll, 7
 // concurrent ping+TCP probes bounded by ProbeTimeout+1s each (~3s total);
 // Fans and AC each cost an HTTP round trip to a Shelly plug bounded by a 5s
-// timeout. Every Available predicate and every handler that reads any of
-// them lives in routes whose SkipsProbe flag is false -- see that field's
-// doc comment in contract. Paying for all three on every request used to mean
-// /job, polled every 10s through a multi-minute shutdown, waited out a full
-// fleet probe and plug reads for data it discards.
-func (s *Server) snapshot(ctx context.Context, req contract.Request) contract.State {
+// timeout. Paying for all three on every request used to mean /job, polled
+// every 10s through a multi-minute shutdown, waited out a full fleet probe and
+// plug reads for data it discards.
+//
+// Whether to probe is r's own SkipsProbe -- the route serve() matched on
+// method and path, so two routes sharing a path each get their own answer.
+// A route's SkipsProbe has to account for everything that route reads: its
+// own Handle, its Available/Fields predicates, and the Available/Fields of
+// every action its handler renders. The /monitoring route being SkipsProbe is
+// only correct because its mute/unmute actions are SkipsProbe as well --
+// which actions a handler renders is still a human's call, so
+// TestSkipsProbeRoutesDontDependOnHostsOrFans checks the predicates directly.
+// The routes that do render probe-judged actions -- /status and the /power
+// and /ac-control folders, through SectionActions -- are not SkipsProbe; the
+// root, which renders links only, is.
+func (s *Server) snapshot(ctx context.Context, r contract.Route) contract.State {
 	st := contract.State{Job: s.jobs.Read()}
 
-	if !skipsProbe(s.router.routes, req.Path) {
+	if !r.SkipsProbe {
 		st.Hosts = s.probeHostsFn()(ctx)
 		st.Fans, st.FansErr = s.fansStatusFn()(ctx)
 		st.AC, st.ACErr = s.acStatusFn()(ctx)
 	}
 	return st
-}
-
-// skipsProbe reports whether the route serving path never reads
-// State.Hosts or State.Fans -- in its Handle, or in any Available/Fields
-// predicate the router evaluates while rendering it -- so snapshot() can
-// skip the fleet probe and the Shelly read for it entirely.
-//
-// The route table is read from the router's table, built once from the two
-// domain surfaces plus the composition root's own resources -- so the
-// exemption set is the same inventory the engine acts on, not the
-// compiled-in inventory.Default(); see buildRoutes' doc comment in registry.go.
-//
-// Looked up by path alone, ignoring method, the same as Router.PathExists:
-// every route in the registry has a unique Path (TestRoutesAreUnique), so
-// this never has to disambiguate two routes sharing one. A path matching no
-// route returns false -- the safe default of "run the probe" -- but that
-// case cannot actually reach here: serve() only calls snapshot() after
-// Router.Lookup has already found a route for this exact path.
-//
-// A resource route's own SkipsProbe therefore has to account for every
-// action its handler renders, not just its own Handle: the /monitoring
-// route being SkipsProbe:true is only correct because its mute/unmute
-// actions are SkipsProbe:true as well -- a fact
-// TestSkipsProbeRoutesDontDependOnHostsOrFans checks directly, since which
-// actions a resource's handler chooses to render is still a human's call to
-// get right when wiring up that handler, not something this function can
-// derive. Router.Actions/ActionsFor, called from the status and root
-// resources, by contrast, evaluate every action route's Available predicate
-// including ones that do read Hosts/Fans -- but neither of those resources is
-// SkipsProbe, so that is never an issue for them.
-func skipsProbe(rs []contract.Route, path string) bool {
-	for _, r := range rs {
-		if r.Path == path {
-			return r.SkipsProbe
-		}
-	}
-	return false
 }
 
 // probeHostsFn returns the fleet probe, falling back to the engine's real

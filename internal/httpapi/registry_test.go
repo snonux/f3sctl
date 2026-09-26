@@ -662,7 +662,7 @@ func TestAllCycleNeedsAReadableACPlugAndNoJob(t *testing.T) {
 }
 
 // TestSkipsProbeRoutesDontDependOnHostsOrFans is the safety net for
-// route.SkipsProbe (see server.go's skipsProbe and rz0): it does not trust
+// route.SkipsProbe (see server.go's snapshot and rz0): it does not trust
 // the flag on the declaring author's word alone, it asks each route marked
 // SkipsProbe whether its own Available/Fields answer actually changes when
 // only Hosts/Fans/FansErr/AC/ACErr change, and requires the answer to be no.
