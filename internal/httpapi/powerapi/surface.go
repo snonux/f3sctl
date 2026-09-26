@@ -99,9 +99,9 @@ type Surface struct {
 	// means Engine.ACActivity. See confirmAC.
 	ACConfirm func(context.Context) power.RackActivity
 	// actions renders every actions list this surface's resources advertise:
-	// the whole API's (the status route), a resource's own controls, or one
-	// whole API section's (contract.Route.Section) -- what a section folder
-	// offers (/power for host power, /ac-control for Shelly plugs), judged
+	// a resource's own controls, or one whole API section's
+	// (contract.Route.Section) -- what a section folder offers (/power for
+	// host power, /ac-control for Shelly plugs, and both on /status), judged
 	// state by state, without the folder naming any action by hand. It is
 	// unexported and set once, by New, which rejects a nil one; in production
 	// it is the composition root's Router (resolved lazily), the single
