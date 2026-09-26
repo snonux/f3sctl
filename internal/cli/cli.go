@@ -100,9 +100,9 @@ func RunLocal(ctx context.Context, cfg config.Config, args []string, stdout, std
 
 // run executes one invocation.
 //
-// liveHosts is the seam the rack-fan guard consults; a nil one means the real
-// ICMP probe on the engine runFans builds, which is what both exported entry
-// points pass. Only the tests substitute anything else.
+// liveHosts is the seam the fans/AC off guard consults; a nil one means the
+// plug's real ICMP probe on the engine runPlug builds, which is what both
+// exported entry points pass. Only the tests substitute anything else.
 func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer,
 	reporter power.Reporter, forceLocal bool, liveHosts liveHostsFunc) error {
 
@@ -134,9 +134,9 @@ func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr i
 	case "power":
 		return runPower(ctx, cfg, args[1:], flags.local, stdout, stderr, reporter)
 	case "fans":
-		return runFans(ctx, cfg, args[1:], flags.force, liveHosts, stdout, stderr)
+		return runPlug(ctx, cfg, fansPlug, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "ac":
-		return runAC(ctx, cfg, args[1:], flags.force, liveHosts, stdout, stderr)
+		return runPlug(ctx, cfg, acPlug, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "monitoring":
 		return runMonitoring(ctx, cfg, args[1:], stdout, stderr)
 	case "gogios":

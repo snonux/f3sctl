@@ -178,9 +178,10 @@ func TestGogiosLocalHonoursTheCallersContext(t *testing.T) {
 }
 
 // TestFansOffForceSwitchesThePlugWhileAHostIsUp is the regression test for the
-// bug where --force never reached fansOff: parseGlobalFlags consumes it, so the
-// old scan of the remaining arguments always found nothing and every
-// `fans off --force` hit the refusal instead of switching the plug.
+// bug where --force never reached the fans off guard (plugOff):
+// parseGlobalFlags consumes it, so the old scan of the remaining arguments
+// always found nothing and every `fans off --force` hit the refusal instead
+// of switching the plug.
 //
 // The injected liveness reporting f0 up is what gives the test its teeth: any
 // build that loses the flag on the way down consults the guard, sees a host
@@ -428,8 +429,8 @@ func TestUnknownFansVerbPrintsUsage(t *testing.T) {
 }
 
 // TestFansRejectsTrailingArgs is the regression test for the iz0 bug: fans has
-// no per-host concept, so runFans used to resolve its verb from args[0] alone
-// and silently drop everything after it. "fans on f0" switched the WHOLE
+// no per-host concept, so the fans command used to resolve its verb from
+// args[0] alone and silently drop everything after it. "fans on f0" switched the WHOLE
 // rack's fans on and discarded "f0" -- a misleading success (the action named
 // did happen) rather than a wrong target, but the same "malformed spelling
 // silently reinterpreted" hazard hy0 fixed for power. Every case here must be
@@ -535,9 +536,9 @@ func TestMonitoringRejectsTrailingArgs(t *testing.T) {
 }
 
 // TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected covers the nil
-// default in runFans, the single line stopping the exported entry points from
+// default in runPlug, the single line stopping the exported entry points from
 // calling a nil function: Run and RunLocal both pass a nil liveHostsFunc, so
-// without the fallback `f3sctl fans off` panics in fansOff -- on the thermal
+// without the fallback `f3sctl fans off` panics in plugOff -- on the thermal
 // guard path, the one that must never fail open or crash.
 //
 // It has to drive the exported Run, not runCLI: runCLI takes a *fakeLiveness
@@ -562,9 +563,9 @@ func TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected(t *testing.T) {
 	}
 }
 
-// TestParseGlobalFlagsConsumesForce pins down why fansOff cannot re-derive the
+// TestParseGlobalFlagsConsumesForce pins down why plugOff cannot re-derive the
 // flag from its arguments: it is gone by the time any command sees them. If
-// this ever changes, the threading in run/runFans should be revisited rather
+// this ever changes, the threading in run/runPlug should be revisited rather
 // than quietly duplicated.
 func TestParseGlobalFlagsConsumesForce(t *testing.T) {
 	rest, flags := parseGlobalFlags([]string{"fans", "off", "--force"})

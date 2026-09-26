@@ -373,7 +373,7 @@ func TestRunRemoteForceFlagReachesTheServer(t *testing.T) {
 	api := newFakeRemoteAPI(t, "correct-key")
 	cfg := remoteConfig(t, api, "correct-key")
 
-	// fansOff's local thermal guard (runFans/fansOff in cli.go) never gets a
+	// The local thermal guard (runPlug/plugOff in plugs.go) never gets a
 	// look-in here: "fans off" alone is not classified a shutdown by
 	// isShutdown, so only the explicit --remote flag sends this through the
 	// API rather than the local engine.

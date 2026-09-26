@@ -36,8 +36,9 @@ func (e *Engine) ProbeAll(ctx context.Context) []HostStatus {
 // that rack", which is what the fan guards need to know. A host mid-boot has
 // no sshd yet but is very much running and generating heat.
 //
-// This is the CLI's view of the guard (cli.fansOff). It is one of three; see
-// RackActivity for the rule they share and for what separates them.
+// This is the CLI's view of the guard (cli.plugOff, for the fans). It is one
+// of three; see RackActivity for the rule they share and for what separates
+// them.
 func (e *Engine) LiveHosts(ctx context.Context) []string {
 	return e.RackActivity(ctx).Hosts()
 }
@@ -55,7 +56,7 @@ func (e *Engine) LiveHosts(ctx context.Context) []string {
 //
 // There are three guards, and this type is the single rule behind all of them:
 //
-//   - `f3sctl fans off` refuses while the rack is busy (cli.fansOff, via
+//   - `f3sctl fans off` refuses while the rack is busy (cli.plugOff, via
 //     Engine.LiveHosts),
 //   - the last step of a rack-wide shutdown leaves the plug alone while the
 //     rack is busy (Engine.fansOffOnceTheRackIsIdle),

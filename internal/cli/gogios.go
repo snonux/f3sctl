@@ -26,7 +26,7 @@ func runMonitoring(ctx context.Context, cfg config.Config, args []string, stdout
 	}
 
 	// Resolved before building an Engine: what was asked for is decided from
-	// the arguments alone, the same reasoning as powerActionFor/parseFansArgs.
+	// the arguments alone, the same reasoning as powerActionFor/parsePlugArgs.
 	// `monitoring mute junk` used to dispatch on args[0] alone, silently mute
 	// Gogios, and drop "junk" on the floor.
 	verb, ok := parseMonitoringArgs(args)

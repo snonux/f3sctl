@@ -176,8 +176,8 @@ func New(cfg config.Config) (*Engine, error) {
 // Engine is exported and isUp is a plain func field, so an Engine built by
 // anything other than New carries a nil there and would panic on the first
 // probe -- on the fan guard's path, the one thing here that must neither crash
-// nor fail open. cli.liveHostsFunc grew the same fallback (see runFans) for the
-// same reason; this is the engine's half of it.
+// nor fail open. cli.liveHostsFunc grew the same fallback (see cli.runPlug)
+// for the same reason; this is the engine's half of it.
 func (e *Engine) liveness() func(ctx context.Context, ip string) (up, known bool) {
 	if e.isUp == nil {
 		return e.pingOnce
