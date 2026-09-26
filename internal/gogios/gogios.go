@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
@@ -34,6 +35,13 @@ import (
 // federated report is a few tens of KiB; anything past this is a
 // misconfigured or hostile endpoint, not a report.
 const maxReportBytes = 1 << 20
+
+// staleTempAge is how old a leftover cache temp file must be before a writer
+// removes it. A temp file only lives for the write+sync+rename of an already
+// fetched body (the fetch itself happens before it is created), so a live
+// writer's file is seconds old at most; anything older belongs to a CGI
+// process that was killed mid-write.
+const staleTempAge = 5 * time.Minute
 
 // ErrReportTooLarge is returned by Fetch when the Gogios response body
 // exceeds maxReportBytes. It is reported explicitly rather than silently
@@ -122,10 +130,13 @@ func Fetch(ctx context.Context, cfg config.Config) (*Report, error) {
 	return r, nil
 }
 
-// ClearCache removes the cached report so the next Fetch call re-fetches. It
-// is not an error if there is nothing to clear.
+// ClearCache removes the cached report so the next Fetch call re-fetches, and
+// sweeps stale temp files a killed writer left behind. It is not an error if
+// there is nothing to clear.
 func ClearCache(cfg config.Config) error {
-	if err := os.Remove(cachePath(cfg)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	p := cachePath(cfg)
+	removeStaleTemps(p, staleTempAge)
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	return nil
@@ -205,7 +216,7 @@ func readBody(r io.Reader, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("reading the Gogios report: %w", err)
 	}
 	if int64(len(raw)) > limit {
-		return nil, fmt.Errorf("%w (%d bytes)", ErrReportTooLarge, limit)
+		return nil, fmt.Errorf("%w of %d bytes", ErrReportTooLarge, limit)
 	}
 	return raw, nil
 }
@@ -230,17 +241,23 @@ func readCache(path string, ttl time.Duration) (*Report, bool) {
 }
 
 // writeCache writes the report body atomically: it writes a uniquely named
-// temp file in the cache's directory and renames it over the cache. Each
-// writer gets its own temp file, so concurrent writers -- goroutines in one
-// process or, as in production, separate CGI processes -- never share bytes;
-// the last rename wins and a reader only ever sees a complete file.
+// temp file in the cache's directory, fsyncs it, and renames it over the
+// cache. Each writer gets its own temp file, so concurrent writers --
+// goroutines in one process or, as in production, separate CGI processes --
+// never share bytes; the last rename wins and a reader only ever sees a
+// complete file. The fsync keeps a power loss from leaving a renamed but torn
+// file; the rename itself may still be lost, which only means an older (or
+// no) cache and a re-fetch. Temp files orphaned by killed writers are swept
+// on each write.
 func writeCache(path string, raw []byte) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating the Gogios cache dir: %w", err)
 	}
+	removeStaleTemps(path, staleTempAge)
+
 	// os.CreateTemp creates the file with mode 0600.
-	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	f, err := os.CreateTemp(dir, filepath.Base(path)+tempInfix+"*"+tempSuffix)
 	if err != nil {
 		return fmt.Errorf("creating the Gogios cache temp file: %w", err)
 	}
@@ -253,17 +270,63 @@ func writeCache(path string, raw []byte) (err error) {
 		}
 	}()
 
-	if _, err := f.Write(raw); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("writing the Gogios cache temp file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing the Gogios cache temp file: %w", err)
+	if err := writeAndSync(f, raw); err != nil {
+		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("renaming the Gogios cache into place: %w", err)
 	}
 	return nil
+}
+
+// writeAndSync writes raw to f, fsyncs it, and closes it. f is closed on
+// every path.
+func writeAndSync(f *os.File, raw []byte) error {
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("writing the Gogios cache temp file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("syncing the Gogios cache temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing the Gogios cache temp file: %w", err)
+	}
+	return nil
+}
+
+// tempInfix and tempSuffix frame the random part of a cache temp file's name:
+// <cache base>.<random>.tmp.
+const (
+	tempInfix  = "."
+	tempSuffix = ".tmp"
+)
+
+// removeStaleTemps deletes cache temp siblings of path older than maxAge.
+// It is best-effort: a CGI process killed between CreateTemp and Rename
+// leaves its uniquely named temp file behind, and without this sweep those
+// would accumulate forever. Fresh temp files are left alone, since they may
+// belong to a writer that is still running. Errors are ignored; the next
+// write retries.
+func removeStaleTemps(path string, maxAge time.Duration) {
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := filepath.Base(path) + tempInfix
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, tempSuffix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) <= maxAge {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, name))
+	}
 }
 
 func parse(raw []byte) (*Report, error) {

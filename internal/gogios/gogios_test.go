@@ -451,6 +451,70 @@ func TestWriteCacheCleansUpWhenTheRenameFails(t *testing.T) {
 	assertNoTempFiles(t, dir)
 }
 
+// seedTemp writes a cache temp file named like writeCache's into dir, with
+// its mtime set age in the past, and returns its path.
+func seedTemp(t *testing.T, dir, name string, age time.Duration) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("seeding %s: %v", name, err)
+	}
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(p, when, when); err != nil {
+		t.Fatalf("backdating %s: %v", name, err)
+	}
+	return p
+}
+
+// TestWriteCacheSweepsStaleTempFiles pins the orphan cleanup: a temp file
+// left by a writer killed mid-write (older than staleTempAge) is removed on
+// the next write, while a fresh one -- possibly a concurrent writer still in
+// flight -- and unrelated files that merely look similar are left alone.
+func TestWriteCacheSweepsStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gogios-report.json")
+	stale := seedTemp(t, dir, "gogios-report.json.111.tmp", staleTempAge+time.Minute)
+	fresh := seedTemp(t, dir, "gogios-report.json.222.tmp", time.Second)
+	// Old, but not one of ours: a different base name and a non-.tmp suffix.
+	other := seedTemp(t, dir, "other.json.333.tmp", time.Hour)
+	notTmp := seedTemp(t, dir, "gogios-report.json.444.bak", time.Hour)
+
+	if err := writeCache(path, []byte(reportJSON)); err != nil {
+		t.Fatalf("writeCache: %v", err)
+	}
+
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stale temp file survived the write: err=%v", err)
+	}
+	for _, keep := range []string{fresh, other, notTmp} {
+		if _, err := os.Stat(keep); err != nil {
+			t.Errorf("%s was removed, want it kept: %v", filepath.Base(keep), err)
+		}
+	}
+}
+
+// TestClearCacheSweepsStaleTempFiles pins that ClearCache also removes stale
+// temp files, but not fresh ones.
+func TestClearCacheSweepsStaleTempFiles(t *testing.T) {
+	srv, _ := countingServer(t, reportJSON, http.StatusOK)
+	cfg := testCfg(t, srv)
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stale := seedTemp(t, cfg.StateDir, "gogios-report.json.111.tmp", staleTempAge+time.Minute)
+	fresh := seedTemp(t, cfg.StateDir, "gogios-report.json.222.tmp", time.Second)
+
+	if err := ClearCache(cfg); err != nil {
+		t.Fatalf("ClearCache: %v", err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stale temp file survived ClearCache: err=%v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file removed by ClearCache: %v", err)
+	}
+}
+
 // TestFetchErrorsOnAnOversizedBody pins the size cap: a body larger than
 // maxReportBytes is an explicit ErrReportTooLarge, not a silently truncated
 // body surfacing as a baffling JSON parse error, and it is not cached.
@@ -478,8 +542,12 @@ func TestReadBodyBoundary(t *testing.T) {
 	if err != nil || len(got) != limit {
 		t.Errorf("readBody(exactly limit) = %d bytes, err %v; want %d bytes, nil", len(got), err, limit)
 	}
-	if _, err := readBody(strings.NewReader(strings.Repeat("a", limit+1)), limit); !errors.Is(err, ErrReportTooLarge) {
-		t.Errorf("readBody(limit+1) err = %v, want ErrReportTooLarge", err)
+	_, err = readBody(strings.NewReader(strings.Repeat("a", limit+1)), limit)
+	if !errors.Is(err, ErrReportTooLarge) {
+		t.Fatalf("readBody(limit+1) err = %v, want ErrReportTooLarge", err)
+	}
+	if !strings.Contains(err.Error(), "of 8 bytes") {
+		t.Errorf("error = %q, want it to state the limit", err)
 	}
 }
 
