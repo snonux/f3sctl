@@ -14,12 +14,16 @@ import (
 
 // fakeAC fakes ACBackend, recording each Set into a shared sequence so a test
 // can check where the plug was switched relative to the poweroffs and wakes.
-// setErr scripts a failure for one requested state.
+// setErr scripts a failure for one requested state; switchErr scripts the
+// nastier one where the relay DID switch and the call still failed (a
+// read-back cut short). onSet runs at the start of every Set, outside a.mu.
 type fakeAC struct {
-	mu     sync.Mutex
-	seq    *sequence
-	state  bool
-	setErr map[bool]error
+	mu        sync.Mutex
+	seq       *sequence
+	state     bool
+	setErr    map[bool]error
+	switchErr map[bool]error
+	onSet     func(on bool)
 }
 
 func (a *fakeAC) Status(context.Context) (ACState, error) {
@@ -29,10 +33,14 @@ func (a *fakeAC) Status(context.Context) (ACState, error) {
 }
 
 func (a *fakeAC) Set(_ context.Context, on bool) (ACState, error) {
+	if a.onSet != nil {
+		a.onSet(on)
+	}
 	a.mu.Lock()
 	err := a.setErr[on]
 	if err == nil {
 		a.state = on
+		err = a.switchErr[on]
 	}
 	st := ACState{On: a.state}
 	a.mu.Unlock()
@@ -184,7 +192,109 @@ func TestCycleAllRestoresACEvenWhenCancelledMidDwell(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
+	if !strings.Contains(err.Error(), "interrupted") || !strings.Contains(err.Error(), "f3sctl power all on") {
+		t.Errorf("err = %v, want it to say the cycle was interrupted and name `f3sctl power all on`", err)
+	}
 	if !rig.ac.state {
 		t.Errorf("AC left off after a cancelled cycle: %v", rig.seq.get())
+	}
+}
+
+// cancelOnCut returns a fakeAC hook that cancels the run's context the moment
+// AC is cut -- the signal arriving while the cut is still in flight.
+func cancelOnCut(cancel context.CancelFunc) func(bool) {
+	return func(on bool) {
+		if !on {
+			cancel()
+		}
+	}
+}
+
+// assertACBackWithoutWake checks the end state every interrupted or failed
+// cut must reach: the plug was cut and then switched back on, and no magic
+// packet went out.
+func assertACBackWithoutWake(t *testing.T, rig *cycleRig) {
+	t.Helper()
+	steps := rig.seq.get()
+	if !rig.ac.state || indexOf(steps, "ac:true") < indexOf(steps, "ac:false") {
+		t.Errorf("AC not switched back on after the cut: %v", steps)
+	}
+	for _, s := range steps {
+		if strings.HasPrefix(s, "wake:") {
+			t.Errorf("woke a host after an interrupted cycle: %v", steps)
+		}
+	}
+}
+
+// TestCycleAllRestoresACWhenCancelledDuringTheCut covers a signal landing
+// while the cut is still settling: the relay has switched, but the call
+// fails with the cancellation. That used to take the "cut failed, hosts left
+// off" exit with AC actually off -- the rack left unwakeable.
+func TestCycleAllRestoresACWhenCancelledDuringTheCut(t *testing.T) {
+	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.ac.onSet = cancelOnCut(cancel)
+	rig.ac.switchErr = map[bool]error{false: context.Canceled}
+
+	err := rig.eng.CycleAll(ctx, &rig.log)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "switched back on") {
+		t.Errorf("err = %v, want it to say AC was switched back on", err)
+	}
+	assertACBackWithoutWake(t, rig)
+}
+
+// TestCycleAllRestoresACWhenCancelledJustAfterTheCut: the cut succeeds with
+// the cancel already pending, so the dwell must return at once and the
+// restore still run -- and the error must say what state the rack is in.
+func TestCycleAllRestoresACWhenCancelledJustAfterTheCut(t *testing.T) {
+	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
+	rig.eng.acOffDwell = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.ac.onSet = cancelOnCut(cancel)
+
+	err := rig.eng.CycleAll(ctx, &rig.log)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "power cycle interrupted") {
+		t.Fatalf("err = %v, want a wrapped context.Canceled saying the cycle was interrupted", err)
+	}
+	assertACBackWithoutWake(t, rig)
+}
+
+// TestCycleAllRestoresACWhenTheCutFails is the non-cancelled variant: a cut
+// that errors may still have switched the relay, so it is followed by a
+// restore rather than trusting the error.
+func TestCycleAllRestoresACWhenTheCutFails(t *testing.T) {
+	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
+	boom := errors.New("read-back timed out")
+	rig.ac.switchErr = map[bool]error{false: boom}
+
+	err := rig.eng.CycleAll(context.Background(), &rig.log)
+	if !errors.Is(err, boom) || errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the cut failure and no cancellation", err)
+	}
+	assertACBackWithoutWake(t, rig)
+}
+
+// TestCycleACCancelledBeforeTheCutLeavesACOn: a cancel between the shutdown
+// and the cut must not cut, and must not be misreported as a busy rack (the
+// dark check's probes, cut short, read as "unknown", which counts as busy).
+func TestCycleACCancelledBeforeTheCutLeavesACOn(t *testing.T) {
+	rig := newCycleRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := rig.eng.cycleAC(ctx, &rig.log)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("err = %v, want a wrapped context.Canceled, not a refusal", err)
+	}
+	if !strings.Contains(err.Error(), "AC left ON") {
+		t.Errorf("err = %v, want it to say AC was left on", err)
+	}
+	if steps := rig.seq.get(); len(steps) != 0 {
+		t.Errorf("plug touched after the run was cancelled: %v", steps)
 	}
 }

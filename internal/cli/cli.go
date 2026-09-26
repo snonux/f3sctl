@@ -93,10 +93,11 @@ type liveHostsFunc func(ctx context.Context) []string
 
 // Run executes one CLI invocation.
 //
-// ctx is what an operator's Ctrl-C or a SIGTERM cancels (main binds it to
-// both). Cancelling it does not abandon the work mid-step: every wait honours
-// it, and the steps that must still happen -- restoring f-host AC after an
-// interrupted `power all cycle` -- run on a context detached from it.
+// ctx is what an operator's Ctrl-C, a SIGTERM or a dropped session's SIGHUP
+// cancels (main binds it to all three). Cancelling it does not abandon the
+// work mid-step: every wait honours it, and the steps that must still happen
+// -- restoring f-host AC after an interrupted `power all cycle` -- run on a
+// context detached from it.
 func Run(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	return run(ctx, cfg, args, stdout, stderr, nil, false, nil)
 }

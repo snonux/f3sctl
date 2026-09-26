@@ -94,6 +94,11 @@ func (e *Engine) off(ctx context.Context, log io.Writer, hosts []inventory.Host,
 
 	accepted, failed := e.shutdownEach(ctx, log, tl, hosts)
 	failed = append(failed, e.confirmPowerDown(ctx, log, tl, accepted)...)
+	// Before shutdownFailure: a cancelled wait reports every host it had not
+	// confirmed yet, which is not evidence that any of them failed.
+	if err := ctx.Err(); err != nil {
+		return shutdownInterrupted(failed, err)
+	}
 	if len(failed) > 0 {
 		return shutdownFailure(failed)
 	}

@@ -136,14 +136,16 @@ func isShutdown(args []string) bool {
 // runRemote drives the command through the HTTP API.
 //
 // The work -- a remote power-off -- is long: the job it starts polls for up
-// to jobWaitTimeout (~25m) while the rack shuts down and comes back up. ctx
-// is bound to SIGINT/SIGTERM by main, which lets a Ctrl-C cancel that poll
-// (and any in-flight HTTP request) instead of being ignored for the whole
-// wait, which is the
+// to jobWaitTimeout (~25m) while the rack shuts down and comes back up. main
+// binds ctx to SIGINT/SIGTERM/SIGHUP, so a Ctrl-C cancels that poll (and any
+// in-flight HTTP request) instead of being ignored for the whole wait: the
 // difference between an interruptible tool and one a stuck operator has to
 // kill from another terminal. The cancellation is cooperative: every client
-// round trip and waitForJob's loop honors ctx.Done().
-func runRemote(ctx context.Context, cfg config.Config, args []string, flags globalFlags, stdout, stderr io.Writer) error {
+// round trip and waitForJob's loop honors ctx.Done(). It stops only this
+// client; the job itself runs on in the API's detached child.
+func runRemote(ctx context.Context, cfg config.Config, args []string, flags globalFlags,
+	stdout, stderr io.Writer) error {
+
 	key, err := cfg.ResolveAPIKey()
 	if err != nil {
 		return err

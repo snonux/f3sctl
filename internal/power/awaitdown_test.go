@@ -1,10 +1,14 @@
 package power
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/inventory"
 )
 
 // TestShutdownWorstCaseAtDefaults pins ShutdownWorstCase's formula against the
@@ -34,5 +38,42 @@ func TestShutdownWorstCaseScalesWithVMShutdownTimeout(t *testing.T) {
 	want := 4*10*time.Minute + powerDownTimeout
 	if got := ShutdownWorstCase(cfg); got != want {
 		t.Errorf("ShutdownWorstCase with VMShutdownTimeout=10m = %s, want %s", got, want)
+	}
+}
+
+// TestOffInterruptedWhileConfirmingIsNotAShutdownFailure pins what a Ctrl-C
+// during the power-down wait reports. awaitPowerDown returns every host it
+// had not confirmed yet when cancelled, and off() used to pass that list to
+// shutdownFailure -- "did not complete shutdown", the hung-host emergency --
+// for hosts that were simply still going down when the operator gave up.
+func TestOffInterruptedWhileConfirmingIsNotAShutdownFailure(t *testing.T) {
+	rig := newOffTestRig(t, "f0", "f1", "f2", "f3")
+	rig.power.onPowerOff = nil // hosts keep answering: the wait never ends by itself
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.power.onPowerOffEnd = func(h inventory.Host) {
+		if h.Name == inventory.StorageMaster {
+			go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+		}
+	}
+
+	err := rig.eng.OffAll(ctx, &rig.log)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want a wrapped context.Canceled", err)
+	}
+	if strings.Contains(err.Error(), "did not complete shutdown") {
+		t.Errorf("err = %v, want an interruption, not a shutdown failure", err)
+	}
+	if !strings.Contains(err.Error(), "interrupted") || !strings.Contains(err.Error(), "f0") {
+		t.Errorf("err = %v, want it to say interrupted and name the unconfirmed hosts", err)
+	}
+}
+
+// TestShutdownInterruptedWithNothingPending covers the other shape: every
+// host confirmed off, the cancel landing just before the fans step.
+func TestShutdownInterruptedWithNothingPending(t *testing.T) {
+	err := shutdownInterrupted(nil, context.Canceled)
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "every host was confirmed off") {
+		t.Errorf("err = %v, want every host confirmed off and a wrapped context.Canceled", err)
 	}
 }

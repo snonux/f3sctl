@@ -124,6 +124,11 @@ func (r *runner) agentVerbFull(ctx context.Context, h inventory.Host, verb strin
 		if msg == "" {
 			msg = runErr.Error()
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			// Killed by the cancel or the verb's deadline, not by the remote
+			// side: wrap the cause so callers can tell with errors.Is.
+			return outStr, errStr, fmt.Errorf("%s: %s: %s: %w", h.Name, verb, msg, ctxErr)
+		}
 		return outStr, errStr, fmt.Errorf("%s: %s: %s", h.Name, verb, msg)
 	}
 

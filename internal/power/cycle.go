@@ -60,7 +60,7 @@ func (e *Engine) CycleAll(ctx context.Context, log io.Writer) error {
 	fmt.Fprintf(log, "Waiting %s for the f-hosts' NICs to come up on standby power...\n",
 		e.acSettle())
 	if err := sleepCtx(ctx, e.acSettle()); err != nil {
-		return err
+		return cycleInterrupted(err)
 	}
 	return e.OnAll(ctx, log)
 }
@@ -74,36 +74,87 @@ func (e *Engine) CycleAll(ctx context.Context, log io.Writer) error {
 // skipped the ones that were already off by a single ping, and it is this
 // step -- not OffAll -- that is about to remove their power, so it asks again
 // with the stricter evidence.
+//
+// A cancelled ctx (Ctrl-C, SIGTERM) cuts the dwell short but never skips the
+// restore: a run that is being torn down must not leave the rack without
+// mains, which is the one state nothing remote can wake it from.
 func (e *Engine) cycleAC(ctx context.Context, log io.Writer) error {
 	e.reporter().Step("confirming every f-host is dark before cutting AC")
 	fmt.Fprintln(log, "Confirming every f-host is dark before cutting mains AC...")
-	if busy := e.ACActivity(ctx); busy.Busy() {
+	busy := e.ACActivity(ctx)
+	if err := ctx.Err(); err != nil {
+		// Checked first: probes cut short by the cancel read as "unknown",
+		// which Busy counts as running, and "refusing" would misreport it.
+		return fmt.Errorf("power cycle interrupted before AC was cut: AC left ON, the hosts "+
+			"left powered off; wake them with `f3sctl power all on`: %w", err)
+	}
+	if busy.Busy() {
 		return fmt.Errorf("refusing to cut f-host AC: %s; AC left ON", busy.Why())
 	}
 
-	e.reporter().Step("cutting f-host mains AC")
-	fmt.Fprintln(log, "Cutting f-host mains AC...")
-	if _, err := e.acBackend().Set(ctx, false); err != nil {
-		// The plug may or may not have switched; either way the hosts are
-		// off, so nothing is at risk -- but the cycle did not happen, and
-		// waking them now would hide that.
-		return fmt.Errorf("cutting f-host AC failed, hosts left powered off: %w. "+
-			"Check with `f3sctl ac status`, then `f3sctl ac on` and `f3sctl power all on`", err)
+	if err := e.cutAC(ctx, log); err != nil {
+		return err
 	}
 
 	fmt.Fprintf(log, "AC is off; waiting %s before restoring it...\n", e.acDwell())
 	dwellErr := sleepCtx(ctx, e.acDwell())
+	if err := e.restoreAC(ctx, log); err != nil {
+		return err
+	}
+	if dwellErr != nil {
+		return cycleInterrupted(dwellErr)
+	}
+	return nil
+}
 
-	// Restored whether or not the dwell was interrupted, and on a context that
-	// cannot be cancelled: a run that is being torn down must not leave the
-	// rack without mains, which is the one state nothing remote can wake it
-	// from. The Shelly client's own HTTP timeout still bounds the call.
-	e.reporter().Step("restoring f-host mains AC")
-	fmt.Fprintln(log, "Restoring f-host mains AC...")
-	if _, err := e.acBackend().Set(context.WithoutCancel(ctx), true); err != nil {
+// cutAC switches the f-host mains AC off.
+//
+// The switch runs on a context detached from ctx. Cancelling it half way --
+// Switch.Set already sent, settleShelly still polling for the read-back --
+// would turn an interrupt into "cut failed" with the plug in an unknown
+// state; the Shelly client's HTTP timeout and the settle budget bound it
+// instead, a few seconds at most. An interrupt that lands meanwhile is seen by
+// the dwell, which then returns at once.
+//
+// A cut that fails may still have switched the plug, so it is followed by a
+// restore: the hosts are off either way, and waking them later needs mains.
+func (e *Engine) cutAC(ctx context.Context, log io.Writer) error {
+	e.reporter().Step("cutting f-host mains AC")
+	fmt.Fprintln(log, "Cutting f-host mains AC...")
+	_, err := e.acBackend().Set(context.WithoutCancel(ctx), false)
+	if err == nil {
+		return nil
+	}
+	if rerr := e.restoreAC(ctx, log); rerr != nil {
+		return fmt.Errorf("cutting f-host AC failed (%v), and then: %w", err, rerr)
+	}
+	return fmt.Errorf("cutting f-host AC failed, AC switched back on and the hosts left "+
+		"powered off: %w. Wake them with `f3sctl power all on`", err)
+}
+
+// restoreAC switches the f-host mains AC back on, on a context that cannot be
+// cancelled; the Shelly client's own HTTP timeout still bounds the call.
+//
+// The Set goes out before anything is logged. After an interrupt the log's
+// reader may be gone (a Ctrl-C that also killed a `| tee`), and nothing may
+// stand between a run being torn down and mains coming back.
+func (e *Engine) restoreAC(ctx context.Context, log io.Writer) error {
+	_, err := e.acBackend().Set(context.WithoutCancel(ctx), true)
+	if err != nil {
 		return e.restoreACAfter(err)
 	}
-	return dwellErr
+	e.reporter().Step("f-host mains AC restored")
+	fmt.Fprintln(log, "Restored f-host mains AC.")
+	return nil
+}
+
+// cycleInterrupted is the error for a cycle cancelled after AC was cut. By
+// then AC has been restored (restoreAC runs regardless), so what is left is a
+// rack that is powered off and muted but wakeable, and the command that
+// finishes the job.
+func cycleInterrupted(err error) error {
+	return fmt.Errorf("power cycle interrupted: f-host AC is back on, but the hosts are "+
+		"left powered off and Gogios muted; wake them with `f3sctl power all on`: %w", err)
 }
 
 // restoreACAfter is the error for a cycle that cut AC and then could not

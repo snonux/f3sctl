@@ -61,7 +61,7 @@ func (c *Client) jobWaitTimeout() time.Duration {
 // Run executes a CLI command against the remote API.
 //
 // ctx bounds every round trip and the job poll: a `--remote` run interrupted
-// with Ctrl-C (runRemote wires signal.NotifyContext) stops mid-poll rather
+// with Ctrl-C (main binds ctx to the termination signals) stops mid-poll rather
 // than looping for up to jobWaitTimeout (~25m) with no way out, and a
 // cancelled HTTP call stops the in-flight request rather than running the
 // client's own 60s timeout out first.
@@ -284,9 +284,10 @@ func (c *Client) waitForJob(ctx context.Context, root Entity, id string, serverC
 	poll := c.poll.withDefaults()
 	timeout := c.jobDeadline(serverCeiling)
 	// Bound the wait by BOTH the caller's ctx and the server's worst-case
-	// runtime: a Ctrl-C (runRemote wires signal.NotifyContext) cancels ctx, and
-	// a caller that handed over an unbounded context still gives up after
-	// jobDeadline(serverCeiling) rather than looping forever. Whichever fires first wins.
+	// runtime: a Ctrl-C (main binds ctx to the signals) cancels ctx, and a
+	// caller that handed over an unbounded context still gives up after
+	// jobDeadline(serverCeiling) rather than looping forever. Whichever fires
+	// first wins.
 	// The cause tells the two apart below: a deadline the caller's own ctx
 	// carried is the caller's, not this function's "gave up".
 	ctx, cancel := context.WithTimeoutCause(ctx, timeout, errJobWaitTimeout)

@@ -109,11 +109,15 @@ func TestRunHonoursTheCallersContext(t *testing.T) {
 		{"ac", "status"},
 		{"fans", "on"},
 		{"fans", "status"},
+		// runPower: the wake switches the fans on first, so a context that
+		// never reached the engine would switch the plug and succeed.
+		{"power", "on"},
+		{"power", "all", "on"},
 	}
 	for _, args := range cases {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			shelly := powertest.NewFakeShelly(t, false)
-			cfg := testConfig(t, shelly)
+			cfg := powerConfig(t, shelly)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 
@@ -125,6 +129,23 @@ func TestRunHonoursTheCallersContext(t *testing.T) {
 				t.Errorf("Switch.Set calls = %v, want none on a cancelled context", got)
 			}
 		})
+	}
+}
+
+// TestGogiosLocalHonoursTheCallersContext is the same pin for runGogios: a
+// cancelled context must stop the fetch before it reaches the server.
+func TestGogiosLocalHonoursTheCallersContext(t *testing.T) {
+	srv, hits := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+	cfg := gogiosTestConfig(t, srv)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := runCLICtx(t, ctx, cfg, hostsUp(), "--local", "gogios")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("server hit %d times, want none on a cancelled context", n)
 	}
 }
 

@@ -236,3 +236,18 @@ func namesOf(hosts map[string]inventory.Host) []string {
 	}
 	return out
 }
+
+// shutdownInterrupted is off()'s error when its context was cancelled (Ctrl-C,
+// SIGTERM to the API's job). unconfirmed are the hosts that failed or were
+// still pending when the wait was abandoned -- awaitPowerDown returns every
+// pending host on cancellation -- so they are named as unconfirmed rather than
+// as hosts that "did not complete shutdown", which would send the operator
+// to fetch a console for hosts that may well be powering down cleanly.
+func shutdownInterrupted(unconfirmed []string, err error) error {
+	if len(unconfirmed) == 0 {
+		return fmt.Errorf("shutdown interrupted after every host was confirmed off. %s: %w",
+			fansLeftOn, err)
+	}
+	return fmt.Errorf("shutdown interrupted before these hosts were confirmed off: %v; "+
+		"check them with `f3sctl power status`. %s: %w", unconfirmed, fansLeftOn, err)
+}
