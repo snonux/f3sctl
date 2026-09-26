@@ -2,6 +2,7 @@ package powerapi
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 	"github.com/snonux/f3sctl/internal/inventory"
@@ -131,7 +132,7 @@ func (sf *Surface) acResourceRoutes() []contract.Route {
 func (sf *Surface) clusterRoutes() []contract.Route {
 	return []contract.Route{
 		{
-			Name: "power-on", Title: "Power on f0/f1/f2",
+			Name: "power-on", Title: "Power on " + hostList(sf.Inv.PowerGroup()),
 			Method: http.MethodPost, Path: "/power/on", Action: true,
 			CLIVerb: "power on", JobActionName: "on",
 			// Offered only when something is actually off. When the whole
@@ -144,7 +145,7 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 			Handle: sf.action("on"),
 		},
 		{
-			Name: "power-off", Title: "Power off f0/f1/f2",
+			Name: "power-off", Title: "Power off " + hostList(sf.Inv.PowerGroup()),
 			Method: http.MethodPost, Path: "/power/off", Action: true,
 			CLIVerb: "power off", JobActionName: "off",
 			// Requires SSH, not just ping: the whole shutdown runs over
@@ -166,7 +167,7 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 func (sf *Surface) allHostsRoutes() []contract.Route {
 	return []contract.Route{
 		{
-			Name: "all-on", Title: "Power on every f-host (f0-f3)",
+			Name: "all-on", Title: "Power on every f-host (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/on", Action: true,
 			CLIVerb: "power all on",
 			Available: func(s contract.State) bool {
@@ -176,7 +177,7 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 			Handle: sf.action("all-on"),
 		},
 		{
-			Name: "all-off", Title: "Power off every f-host (f0-f3)",
+			Name: "all-off", Title: "Power off every f-host (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/off", Action: true,
 			CLIVerb: "power all off",
 			// SSH, not ping, for the same reason as power-off: the whole
@@ -188,7 +189,7 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 			Handle: sf.action("all-off"),
 		},
 		{
-			Name: "all-cycle", Title: "Power-cycle every f-host through mains AC (f0-f3)",
+			Name: "all-cycle", Title: "Power-cycle every f-host through mains AC (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/cycle", Action: true,
 			CLIVerb: "power all cycle",
 			// Needs the AC plug readable: the cycle's middle is cutting and
@@ -354,4 +355,21 @@ func (sf *Surface) hostRoutes(name string) []contract.Route {
 			Handle: sf.action(name + "-off"),
 		},
 	}
+}
+
+// hostList names hosts for an action title ("f0/f1/f2"), in inventory order.
+//
+// The group actions are titled from the served inventory, the same way the
+// per-host actions are, so a title never names a host the action does not
+// touch. An empty group -- which a loaded config cannot produce, but a
+// hand-built Inventory can -- says so rather than rendering a dangling title.
+func hostList(hosts []inventory.Host) string {
+	if len(hosts) == 0 {
+		return "none configured"
+	}
+	names := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		names = append(names, h.Name)
+	}
+	return strings.Join(names, "/")
 }

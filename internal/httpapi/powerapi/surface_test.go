@@ -121,3 +121,54 @@ func TestStatusMarksThePowerGroupOnHostEntities(t *testing.T) {
 		})
 	}
 }
+
+// TestGroupActionTitlesNameTheInventorysHosts pins that the group power
+// actions are titled from the served inventory, like the per-host ones: a
+// renamed inventory (g0/g1 in the power group, g9 standalone) must not be
+// offered "Power off f0/f1/f2", and an empty one says so rather than naming
+// nobody.
+func TestGroupActionTitlesNameTheInventorysHosts(t *testing.T) {
+	renamed := inventory.Inventory{Hosts: []inventory.Host{
+		{Name: "g0", Role: inventory.RoleF},
+		{Name: "g1", Role: inventory.RoleF},
+		{Name: "g9", Role: inventory.RoleF, Standalone: true},
+		{Name: "q0", Role: inventory.RoleCluster},
+	}}
+
+	for _, tc := range []struct {
+		name string
+		inv  inventory.Inventory
+		want map[string]string
+	}{
+		{"default", inventory.Default(), map[string]string{
+			"power-on":  "Power on f0/f1/f2",
+			"power-off": "Power off f0/f1/f2",
+			"all-on":    "Power on every f-host (f0/f1/f2/f3)",
+			"all-off":   "Power off every f-host (f0/f1/f2/f3)",
+			"all-cycle": "Power-cycle every f-host through mains AC (f0/f1/f2/f3)",
+		}},
+		{"renamed", renamed, map[string]string{
+			"power-on":  "Power on g0/g1",
+			"power-off": "Power off g0/g1",
+			"all-on":    "Power on every f-host (g0/g1/g9)",
+			"all-off":   "Power off every f-host (g0/g1/g9)",
+			"all-cycle": "Power-cycle every f-host through mains AC (g0/g1/g9)",
+		}},
+		{"empty", inventory.Inventory{}, map[string]string{
+			"power-on": "Power on none configured",
+			"all-on":   "Power on every f-host (none configured)",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := map[string]string{}
+			for _, r := range New("test", contract.Hrefs(""), tc.inv, nil, nil, nil).Routes() {
+				if _, ok := tc.want[r.Name]; ok {
+					got[r.Name] = r.Title
+				}
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("titles = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -265,6 +265,14 @@ func TestUnmarshalRejectsInvalidHostLists(t *testing.T) {
 			`hosts[1] (f1): unknown role "fhost"`},
 		{"empty role", `{"hosts":[` + f + `,{"name":"x"}]}`, `hosts[1] (x): unknown role ""`},
 		{"empty name", `{"hosts":[` + f + `,{"name":"","role":"cluster"}]}`, `hosts[1] (): empty name`},
+		{"upper-case name", `{"hosts":[` + f + `,{"name":"F1","role":"cluster"}]}`,
+			`hosts[1] (F1): name "F1" is not a simple token`},
+		{"name with a slash", `{"hosts":[` + f + `,{"name":"f1/on","role":"cluster"}]}`,
+			`name "f1/on" is not a simple token`},
+		{"name with a space", `{"hosts":[` + f + `,{"name":"f 1","role":"cluster"}]}`,
+			`name "f 1" is not a simple token`},
+		{"name starting with a dash", `{"hosts":[` + f + `,{"name":"-f1","role":"cluster"}]}`,
+			`name "-f1" is not a simple token`},
 		{"every f-host standalone",
 			`{"hosts":[{"name":"f3","role":"f","standalone":true},{"name":"r0","role":"cluster"}]}`,
 			"power group would be empty"},
@@ -279,6 +287,28 @@ func TestUnmarshalRejectsInvalidHostLists(t *testing.T) {
 				t.Error("a rejected Unmarshal modified the inventory")
 			}
 		})
+	}
+}
+
+// TestReservedHostNamesAreRejected pins every reserved word: each is already a
+// CLI word or route segment, so a host by that name would shadow it.
+func TestReservedHostNamesAreRejected(t *testing.T) {
+	const f = `{"name":"f0","role":"f","standalone":false}`
+	for _, name := range []string{"all", "on", "off", "status", "cycle", "power"} {
+		inv := Default()
+		raw := `{"hosts":[` + f + `,{"name":"` + name + `","role":"f","standalone":false}]}`
+		err := json.Unmarshal([]byte(raw), &inv)
+		if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("host %q: err = %v, want ErrInvalid saying the name is reserved", name, err)
+		}
+	}
+}
+
+// TestDefaultHostNamesAreValid keeps the compiled-in inventory inside the
+// rules a configured one is held to.
+func TestDefaultHostNamesAreValid(t *testing.T) {
+	if err := validateHosts(Default().Hosts); err != nil {
+		t.Errorf("Default() fails validation: %v", err)
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 )
 
 // Role classifies a host by what f3sctl may do with it.
@@ -172,13 +174,25 @@ func validateHosts(hosts []Host) error {
 	return nil
 }
 
-// validateHost rejects a host that would silently fall out of every group: no
-// name, or a role f3sctl does not know (a typo such as "F" matches neither
-// RoleF nor anything else). The standalone flag is refused on a non-f host,
-// where it means nothing.
+// hostNamePattern is what a host name must look like: a simple lower-case
+// token. Names become URL path segments (/power/<name>/on), action names
+// (<name>-on), CLI words and job argv entries, so anything with slashes,
+// spaces or upper case would break one of those rather than fail here.
+var hostNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
+
+// reservedHostNames are the words a host must not be called: each is already
+// a CLI word or route segment (`power all on`, `/power/all/cycle`, `power
+// status`), so a host by that name would shadow it or be shadowed by it.
+var reservedHostNames = []string{"all", "on", "off", "status", "cycle", "power"}
+
+// validateHost rejects a host that would silently fall out of every group or
+// collide with the command and route vocabulary: no name, a name that is not
+// a simple token or is a reserved word, or a role f3sctl does not know (a
+// typo such as "F" matches neither RoleF nor anything else). The standalone
+// flag is refused on a non-f host, where it means nothing.
 func validateHost(h Host) error {
-	if h.Name == "" {
-		return errors.New("empty name")
+	if err := validateHostName(h.Name); err != nil {
+		return err
 	}
 	switch h.Role {
 	case RoleF:
@@ -189,6 +203,19 @@ func validateHost(h Host) error {
 	}
 	if h.Standalone {
 		return fmt.Errorf(`"standalone" is only meaningful for role "f", not %q`, h.Role)
+	}
+	return nil
+}
+
+// validateHostName applies hostNamePattern and reservedHostNames.
+func validateHostName(name string) error {
+	switch {
+	case name == "":
+		return errors.New("empty name")
+	case !hostNamePattern.MatchString(name):
+		return fmt.Errorf("name %q is not a simple token (want %s)", name, hostNamePattern)
+	case slices.Contains(reservedHostNames, name):
+		return fmt.Errorf("name %q is reserved: it is already a command or route word", name)
 	}
 	return nil
 }

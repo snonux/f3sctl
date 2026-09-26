@@ -127,8 +127,9 @@ var sections = []section{
 	},
 	{
 		Name: contract.SectionPower,
-		Description: "Host power control: the status and job resources, the " +
-			"cluster-wide (f0/f1/f2), all-hosts (f0-f3) and per-host power pairs.",
+		Description: "Host power control: the status and job resources, and the " +
+			"power pairs for the power group (the cluster), for every f-host, " +
+			"and for each f-host on its own.",
 	},
 	{
 		Name: contract.SectionAC,
