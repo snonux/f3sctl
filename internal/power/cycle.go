@@ -30,6 +30,10 @@ const acOffDwell = 15 * time.Second
 // (2m), so skipping this wait would delay the wake by minutes, not save time.
 const acSettleWait = 30 * time.Second
 
+// stepACOffDwell is the job step reported while the cycle waits out
+// acOffDwell with the f-host mains AC cut.
+const stepACOffDwell = "waiting with f-host mains AC off"
+
 // CycleAll power-cycles every f-host, f3 included, through mains AC:
 //
 //  1. power all off -- the full graceful OffAll sequence (NFS and zusb
@@ -104,6 +108,9 @@ func (e *Engine) cycleAC(ctx context.Context, log io.Writer) error {
 		return err
 	}
 
+	// Its own step, so a client polling job.json sees the dwell rather than
+	// "cutting" standing for the whole wait.
+	e.reporter().Step(stepACOffDwell)
 	fmt.Fprintf(log, "AC is off; waiting %s before restoring it...\n", e.acDwell())
 	dwellErr := sleepCtx(ctx, e.acDwell())
 	if err := e.restoreAC(ctx, log); err != nil {

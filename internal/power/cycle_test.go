@@ -1,14 +1,13 @@
 package power
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -183,54 +182,50 @@ func TestCycleAllReportsAnACRestoreFailureLoudly(t *testing.T) {
 	}
 }
 
-// hookWriter forwards every write to w and then hands it to onWrite, so a
-// test can act at the moment a given log line goes out.
-type hookWriter struct {
-	w       io.Writer
-	onWrite func(p []byte)
-}
-
-func (h *hookWriter) Write(p []byte) (int, error) {
-	n, err := h.w.Write(p)
-	h.onWrite(p)
-	return n, err
-}
-
-// dwellStarted is the start of the line cycleAC logs between a successful cut
-// and the dwell.
-const dwellStarted = "AC is off; waiting"
-
 // TestCycleAllRestoresACEvenWhenCancelledMidDwell pins that tearing a run
 // down while AC is off still brings AC back: a rack without mains is the one
 // state nothing remote can recover from.
 //
-// The cancel lands at a fixed point rather than after a guessed delay: when
-// the dwell begins, i.e. once the cut has returned and before the restore. A
-// cancel that landed any earlier would leave AC untouched and prove nothing;
-// the hour-long dwell means only the cancel can end the wait.
+// The cancel is tied to the dwell step, not to a guessed delay from some
+// earlier point: a cancel that landed before the cut would leave AC untouched
+// and prove nothing. It is sent from outside the run a moment after the step,
+// so the run is already blocked in the dwell; were the delay to lapse first,
+// the dwell would still start cancelled and the outcome is the same --
+// TestSleepCtxReturnsWhenCancelledMidSleep pins the blocked case exactly. The
+// hour-long dwell means only that cancel can end the wait.
 func TestCycleAllRestoresACEvenWhenCancelledMidDwell(t *testing.T) {
 	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
 	rig.eng.acOffDwell = time.Hour
-	ctx, cancel := context.WithCancel(context.Background())
+	// Watchdog: should the hook never fire, the run ends in seconds with
+	// DeadlineExceeded rather than sitting out the hour.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Written to from the run's goroutines, but serially (off() serializes
-	// its log), and read only after CycleAll has returned.
+	// Set on the run's goroutine, read only once its result is received.
 	inDwell := false
-	log := &hookWriter{w: &rig.log, onWrite: func(p []byte) {
-		if inDwell || !bytes.Contains(p, []byte(dwellStarted)) {
+	rig.eng.WithReporter(&hookReporter{onStep: func(name string) {
+		if name != stepACOffDwell {
 			return
 		}
 		inDwell = true
 		if st, _ := rig.ac.Status(ctx); st.On {
 			t.Errorf("dwell began with AC still on: %v", rig.seq.get())
 		}
-		cancel()
-	}}
+		go func() { time.Sleep(20 * time.Millisecond); cancel() }()
+	}})
 
-	err := rig.eng.CycleAll(ctx, log)
+	done := make(chan error, 1)
+	go func() { done <- rig.eng.CycleAll(ctx, &rig.log) }()
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("cycle still running 30s after starting: the cancelled dwell was not cut short: %v",
+			rig.seq.get())
+	}
+
 	if !inDwell {
-		t.Fatalf("the run never reached the dwell (err = %v)\n%s", err, rig.log.String())
+		t.Fatalf("the run never reached the dwell step %q (err = %v)\n%s", stepACOffDwell, err, rig.log.String())
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
@@ -239,6 +234,29 @@ func TestCycleAllRestoresACEvenWhenCancelledMidDwell(t *testing.T) {
 		t.Errorf("err = %v, want it to say the cycle was interrupted and name `f3sctl power all on`", err)
 	}
 	assertACBackWithoutWake(t, rig)
+}
+
+// TestSleepCtxReturnsWhenCancelledMidSleep pins that a cancel arriving while
+// sleepCtx is already blocked ends the wait at once. synctest makes "already
+// blocked" exact: Wait returns only once the sleeper is parked in its select,
+// and the bubble's clock shows no time passed before it returned.
+func TestSleepCtxReturnsWhenCancelledMidSleep(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		start := time.Now()
+		errc := make(chan error, 1)
+		go func() { errc <- sleepCtx(ctx, time.Hour) }()
+
+		synctest.Wait()
+		cancel()
+		if err := <-errc; !errors.Is(err, context.Canceled) {
+			t.Errorf("sleepCtx = %v, want context.Canceled", err)
+		}
+		if waited := time.Since(start); waited != 0 {
+			t.Errorf("sleepCtx returned after %s of fake time, want at once", waited)
+		}
+	})
 }
 
 // TestCycleAllReportsTheRestoreBeforeSwitching pins what a client polling
@@ -272,6 +290,10 @@ func TestCycleAllReportsTheRestoreBeforeSwitching(t *testing.T) {
 	cut, restoring := indexOf(got, "cutting f-host mains AC"), indexOf(got, "restoring f-host mains AC")
 	if cut < 0 || restoring < cut {
 		t.Errorf("steps = %v, want \"restoring f-host mains AC\" after the cut", got)
+	}
+	// The dwell is a step of its own, so "cutting" does not stand through it.
+	if dwell := indexOf(got, stepACOffDwell); dwell < cut || dwell > restoring {
+		t.Errorf("steps = %v, want %q between the cut and the restore", got, stepACOffDwell)
 	}
 	if indexOf(got, "f-host mains AC restored") >= 0 {
 		t.Errorf("steps = %v, claim AC was restored although the switch failed", got)

@@ -52,14 +52,22 @@ func TestOffInterruptedWhileConfirmingIsNotAShutdownFailure(t *testing.T) {
 	rig.power.onPowerOff = nil // hosts keep answering: the wait never ends by itself
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Bounds the wait should the hook below miss: it then times out in
+	// seconds (and the test fails on hooked) rather than sitting out 2m.
+	rig.eng.powerDownTimeout = 3 * time.Second
 	// Cancel as the wait begins: every shutdown accepted, none confirmed.
+	hooked := false
 	rig.eng.WithReporter(&hookReporter{onStep: func(name string) {
 		if name == "confirming the hosts actually powered down" {
+			hooked = true
 			cancel()
 		}
 	}})
 
 	err := rig.eng.OffAll(ctx, &rig.log)
+	if !hooked {
+		t.Fatalf("the power-down wait step was never reported (err = %v)", err)
+	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want a wrapped context.Canceled", err)
 	}
