@@ -134,14 +134,14 @@ func (sf *Surface) acResourceRoutes() []contract.Route {
 
 // clusterRoutes is the cluster-wide power pair: f0/f1/f2 only, f3 excluded.
 // The every-f-host pair lives in allHostsRoutes, and per-host actions in
-// hostRoutes, generated from the inventory.
+// hostRoutes, generated from the inventory. Like both of those, every route
+// here is a power operation, so jobRoutes sets its Handle and Response.
 func (sf *Surface) clusterRoutes() []contract.Route {
-	return []contract.Route{
+	return sf.jobRoutes([]contract.Route{
 		{
 			Name: "power-on", Title: "Power on " + hostList(sf.Inv.PowerGroup()),
 			Method: http.MethodPost, Path: "/power/on", Action: true,
 			CLIVerb: "power on", JobActionName: "on",
-			Response: contract.ResponseJob,
 			// Offered only when something is actually off. When the whole
 			// group already answers, waking it again is a no-op that would
 			// still cost the caller a job slot.
@@ -149,13 +149,11 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 				up, _, total := sf.clusterHostsUp(s)
 				return !JobRunning(s) && up < total
 			},
-			Handle: sf.action("on"),
 		},
 		{
 			Name: "power-off", Title: "Power off " + hostList(sf.Inv.PowerGroup()),
 			Method: http.MethodPost, Path: "/power/off", Action: true,
 			CLIVerb: "power off", JobActionName: "off",
-			Response: contract.ResponseJob,
 			// Requires SSH, not just ping: the whole shutdown runs over
 			// SSH, so a host that is only mid-boot cannot be shut down and
 			// must not be offered as if it could.
@@ -163,9 +161,8 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 				_, sshUp, _ := sf.clusterHostsUp(s)
 				return !JobRunning(s) && sshUp > 0
 			},
-			Handle: sf.action("off"),
 		},
-	}
+	})
 }
 
 // allHostsRoutes is the every-f-host set: f0-f3, f3 included -- the on/off
@@ -173,36 +170,31 @@ func (sf *Surface) clusterRoutes() []contract.Route {
 // and restored in between (see power.Engine.CycleAll). See clusterRoutes for
 // the cluster-only pair this complements.
 func (sf *Surface) allHostsRoutes() []contract.Route {
-	return []contract.Route{
+	return sf.jobRoutes([]contract.Route{
 		{
 			Name: "all-on", Title: "Power on every f-host (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/on", Action: true,
-			CLIVerb:  "power all on",
-			Response: contract.ResponseJob,
+			CLIVerb: "power all on",
 			Available: func(s contract.State) bool {
 				up, _, total := sf.everyFHostUp(s)
 				return !JobRunning(s) && up < total
 			},
-			Handle: sf.action("all-on"),
 		},
 		{
 			Name: "all-off", Title: "Power off every f-host (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/off", Action: true,
-			CLIVerb:  "power all off",
-			Response: contract.ResponseJob,
+			CLIVerb: "power all off",
 			// SSH, not ping, for the same reason as power-off: the whole
 			// shutdown runs over SSH.
 			Available: func(s contract.State) bool {
 				_, sshUp, _ := sf.everyFHostUp(s)
 				return !JobRunning(s) && sshUp > 0
 			},
-			Handle: sf.action("all-off"),
 		},
 		{
 			Name: "all-cycle", Title: "Power-cycle every f-host through mains AC (" + hostList(sf.Inv.EveryFHost()) + ")",
 			Method: http.MethodPost, Path: "/power/all/cycle", Action: true,
-			CLIVerb:  "power all cycle",
-			Response: contract.ResponseJob,
+			CLIVerb: "power all cycle",
 			// Needs the AC plug readable: the cycle's middle is cutting and
 			// restoring it, and a plug that cannot be read back cannot be
 			// confirmed restored. Host state does not gate it -- hosts that
@@ -212,9 +204,8 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil
 			},
-			Handle: sf.action("all-cycle"),
 		},
-	}
+	})
 }
 
 // fanRoutes is the rack-fan plug's on/off pair.
@@ -345,23 +336,20 @@ func (sf *Surface) acRoutes() []contract.Route {
 // f1 stays up. The danger is only in shutting f0 down and then f1 moments
 // later, which is why the cluster-wide sequence orders f0 last.
 func (sf *Surface) hostRoutes(name string) []contract.Route {
-	return []contract.Route{
+	return sf.jobRoutes([]contract.Route{
 		{
 			Name: name + "-on", Title: "Power on " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/on", Action: true,
-			CLIVerb:  "power " + name + " on",
-			Response: contract.ResponseJob,
+			CLIVerb: "power " + name + " on",
 			Available: func(s contract.State) bool {
 				h, ok := Host(s, name)
 				return ok && !JobRunning(s) && !h.Ping
 			},
-			Handle: sf.action(name + "-on"),
 		},
 		{
 			Name: name + "-off", Title: "Power off " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/off", Action: true,
-			CLIVerb:  "power " + name + " off",
-			Response: contract.ResponseJob,
+			CLIVerb: "power " + name + " off",
 			// SSH, not ping: the shutdown runs over SSH, so a host that is
 			// only mid-boot cannot be shut down and must not be offered as if
 			// it could.
@@ -369,9 +357,21 @@ func (sf *Surface) hostRoutes(name string) []contract.Route {
 				h, ok := Host(s, name)
 				return ok && !JobRunning(s) && h.SSH
 			},
-			Handle: sf.action(name + "-off"),
 		},
+	})
+}
+
+// jobRoutes completes rs as power operations: each route's Handle starts the
+// detached job for its own JobAction, and its Response says it answers 202
+// with that job. Setting both here, from the route itself, is what keeps a
+// route from being declared a job without starting one (or the reverse), and
+// its handler from starting a different job than JobArgsFrom maps it to.
+func (sf *Surface) jobRoutes(rs []contract.Route) []contract.Route {
+	for i := range rs {
+		rs[i].Handle = sf.action(rs[i].JobAction())
+		rs[i].Response = contract.ResponseJob
 	}
+	return rs
 }
 
 // hostList names hosts for an action title ("f0/f1/f2"), in inventory order.

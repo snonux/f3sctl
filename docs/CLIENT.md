@@ -499,7 +499,9 @@ Use the field's **`title` as the label**. Do not write your own wording for a
 field you think you recognise — the title explains the *current* reason the
 field is there, and that reason is not always the same.
 
-Send fields as `application/x-www-form-urlencoded` using the action's `type`.
+Send fields as `application/x-www-form-urlencoded` using the action's `type`. The
+server also accepts a field as a query parameter of the same name, but the
+form body is the documented way; a new client should use it.
 
 **Always send a `Content-Length` on POST, even when the action takes no fields.**
 bozohttpd rejects a POST with no `Content-Length` header at all with a **400**,

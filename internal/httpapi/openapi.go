@@ -87,9 +87,12 @@ func (b *OpenAPIBuilder) Build() map[string]any {
 				"Gogios (alerting -- the mute pair and the alert-report browse), " +
 				"with API covering the entry point itself. Hypermedia (Siren): " +
 				"fetch the root and follow what it offers rather than hard-coding " +
-				"these paths. Every error is a Siren entity of class \"error\"; " +
-				"a path not listed here answers 404, and a method not listed for " +
-				"a path answers 405.",
+				"these paths. Every error is a Siren entity of class \"error\". " +
+				"Every request, whatever its path, is authenticated first (401); " +
+				"after that, a path not listed here (other than this document, " +
+				"/openapi.json) answers 404, and a method not listed for a path " +
+				"answers 405. An action's form fields may also be sent as query " +
+				"parameters of the same name.",
 		},
 		// The sections: one tag object per contract.Route.Section a route
 		// declares, in the fixed order of the sections table below. This is
@@ -184,15 +187,14 @@ func operationFor(r contract.Route, widest contract.State) map[string]any {
 	}
 
 	if r.Action {
-		// Availability is state-dependent and therefore cannot be expressed
-		// here; it is described in prose so a reader of the static document
-		// is not misled into thinking every action is always callable.
-		op["description"] = "Advertised in the parent entity's actions only when currently available. " +
-			"A 409 means it was attempted when it was not. " + completionNote(r.Response)
+		op["description"] = availabilityNote(r) + completionNote(r.Response)
 
 		if fields := describeFields(r, widest); len(fields) > 0 {
 			op["requestBody"] = map[string]any{
 				"required": false,
+				// contract.Request.BoolField reads a field from the form body
+				// or the query string alike; say so rather than hide it.
+				"description": "Each field may also be sent as a query parameter of the same name.",
 				"content": map[string]any{
 					"application/x-www-form-urlencoded": map[string]any{
 						"schema": map[string]any{"type": "object", "properties": fields},
@@ -203,6 +205,20 @@ func operationFor(r contract.Route, widest contract.State) map[string]any {
 	}
 
 	return op
+}
+
+// availabilityNote says, in prose, when an action is offered.
+//
+// Availability is state-dependent and therefore cannot be expressed as data
+// here; it is described so a reader of the static document is not misled
+// into thinking every action is always callable -- or, for an action with no
+// Available predicate (the cache clear), into expecting a 409 it never gets.
+func availabilityNote(r contract.Route) string {
+	if r.Available == nil {
+		return "Always advertised in the parent entity's actions. "
+	}
+	return "Advertised in the parent entity's actions only when currently available. " +
+		"A 409 means it was attempted when it was not. "
 }
 
 // completionNote says, in prose, how an action of kind k completes -- the
@@ -253,8 +269,9 @@ func successDescription(r contract.Route) string {
 // pipelineErrors is every error status that can answer a request for r
 // without r's own handler deciding it: ServeCGI's malformed-body (400, POST
 // only) and server-construction (500) failures, serve()'s auth check (401),
-// its availability backstop for actions (409), and, for a job route, the
-// job manager's refusal or failure to start one. A route's Errors add to
+// its availability backstop for actions with an Available predicate (409),
+// and, for a job route, the job manager's or the peer's refusal (409) or a
+// failure to start the job (500). See conflictReasons. A route's Errors add to
 // these, or add a reason to one of them.
 //
 // 404 and 405 are not here: they answer paths and methods no route declares,
@@ -266,18 +283,29 @@ func pipelineErrors(r contract.Route) []contract.ErrorResponse {
 		fault += ", or the job could not be started"
 	}
 	out := []contract.ErrorResponse{
-		{Status: http.StatusUnauthorized, Description: "missing or bad X-API-Key"},
+		{Status: http.StatusUnauthorized, Description: "missing or bad X-API-Key, or this node's key file cannot be read"},
 		{Status: http.StatusInternalServerError, Description: fault},
 	}
 	if r.Method == http.MethodPost {
 		out = append(out, contract.ErrorResponse{Status: http.StatusBadRequest, Description: "the request body could not be read"})
 	}
-	if r.Action {
-		conflict := "not available now: re-fetch the parent resource and read its actions"
-		if job {
-			conflict += "; or a power job is already running on either API node"
-		}
-		out = append(out, contract.ErrorResponse{Status: http.StatusConflict, Description: conflict})
+	if c := conflictReasons(r); len(c) > 0 {
+		out = append(out, contract.ErrorResponse{Status: http.StatusConflict, Description: strings.Join(c, "; or ")})
+	}
+	return out
+}
+
+// conflictReasons lists why the pipeline can answer r with 409: serve()'s
+// availability backstop, which only an action with an Available predicate
+// can trip, and, for a job route, the job manager or the peer node already
+// running a job.
+func conflictReasons(r contract.Route) []string {
+	var out []string
+	if r.Action && r.Available != nil {
+		out = append(out, "not available now: re-fetch the parent resource and read its actions")
+	}
+	if r.Response == contract.ResponseJob {
+		out = append(out, "a power job is already running on either API node")
 	}
 	return out
 }

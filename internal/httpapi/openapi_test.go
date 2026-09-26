@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
@@ -66,6 +68,20 @@ func (f fakeJobs) Start(action string, _ []string) (coordination.Job, error) {
 func (fakeJobs) StaleCeiling() time.Duration { return time.Minute }
 func (fakeJobs) Read() *coordination.Job     { return nil }
 
+// fakePeers is a powerapi.Peers whose other node reports busy as set, and
+// which counts the peer-job fetches made through it.
+type fakePeers struct {
+	busy    bool
+	fetches int
+}
+
+func (p *fakePeers) Busy(context.Context, string, string) (bool, string) { return p.busy, "pi1" }
+
+func (p *fakePeers) FetchJob(context.Context, string, string) *coordination.Job {
+	p.fetches++
+	return nil
+}
+
 // failingPlug is a plugRecorder whose plug writes fail, the way an
 // unreachable Shelly does.
 type failingPlug struct{ plugRecorder }
@@ -78,11 +94,36 @@ func (*failingPlug) ACSet(context.Context, bool) (power.ACState, error) {
 	return power.ACState{}, errFake{}
 }
 
-// docServer is a Server over a cold fleet (every f-host down, so the power-on
-// family is available) whose fan plug reads fansOn, with eng and jobs behind
-// the power surface. Jobs never spawn a real child.
-func docServer(t *testing.T, eng powerapi.Engine, jobs powerapi.Jobs, fansOn bool) *Server {
+// fakeMonitor is a gogiosapi.Monitor whose mute writes succeed, or fail with
+// err when one is set.
+type fakeMonitor struct{ err error }
+
+func (m fakeMonitor) MuteGogios(context.Context, io.Writer) error { return m.err }
+func (m fakeMonitor) UnmuteNow(context.Context, io.Writer) error  { return m.err }
+func (fakeMonitor) MonitoringStatus(context.Context) []power.GatewayMute {
+	return []power.GatewayMute{{Name: "gw"}}
+}
+
+// docOpts shapes a docServer: what the fleet, the plugs and the gateways
+// read as, and the collaborators behind the two surfaces. A nil collaborator
+// is a well-behaved fake (writes succeed, no job, idle peer).
+type docOpts struct {
+	hostsUp, plugsOn, muted bool
+
+	eng     powerapi.Engine
+	jobs    powerapi.Jobs
+	peers   powerapi.Peers
+	monitor gogiosapi.Monitor
+}
+
+// docServer is a Server driven entirely by fakes -- no job child is ever
+// spawned, no plug, gateway or Gogios endpoint is reached -- so a test can
+// put any route into any outcome and read back the status it serves. The
+// server's own peer set is always idle: a busy opts.peers is seen only by the
+// power surface's handlers, not by serve()'s availability check.
+func docServer(t *testing.T, o docOpts) *Server {
 	t.Helper()
+	o = o.withDefaults()
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "apikey")
 	if err := os.WriteFile(keyFile, []byte("sekrit\n"), 0o600); err != nil {
@@ -90,79 +131,186 @@ func docServer(t *testing.T, eng powerapi.Engine, jobs powerapi.Jobs, fansOn boo
 	}
 	var hosts []power.HostStatus
 	for _, name := range []string{"f0", "f1", "f2", "f3"} {
-		hosts = append(hosts, power.HostStatus{Name: name, Role: "f", PingKnown: true})
+		hosts = append(hosts, power.HostStatus{Name: name, Role: "f", PingKnown: true, Ping: o.hostsUp, SSH: o.hostsUp})
 	}
 
 	cfg := config.Default()
-	peers := coordination.NewPeerSet(nil, "")
+	cfg.StateDir = dir
+	cfg.GogiosURL = "http://127.0.0.1:1" // refused instantly: no network in tests
+	cfg.GogiosFetchTimeout = config.Duration(time.Second)
 	inv := inventory.Default()
-	surface := powerapi.New("test", contract.Hrefs(""), inv, eng, jobs, peers)
+	pw := powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers)
+	gg := gogiosapi.New("test", contract.Hrefs(""), cfg, o.monitor)
 	return (&Server{
-		cfg: cfg, jobs: coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0), peers: peers,
-		auth: NewAuthenticator(keyFile), siren: NewSirenRenderer(), node: "test",
+		cfg: cfg, jobs: coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0),
+		peers: coordination.NewPeerSet(nil, ""),
+		auth:  NewAuthenticator(keyFile), siren: NewSirenRenderer(), node: "test",
 		probeHosts: func(context.Context) []power.HostStatus { return hosts },
-		fansStatus: func(context.Context) (power.FansState, error) {
-			return power.FansState{On: fansOn}, nil
+		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{On: o.plugsOn}, nil },
+		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{On: o.plugsOn}, nil },
+		monitorStatus: func(context.Context) []power.GatewayMute {
+			return []power.GatewayMute{{Name: "gw", Muted: o.muted}}
 		},
-		acStatus: func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
-	}).assemble(inv, surface, testGogiosSurface(), "")
+	}).assemble(inv, pw, gg, "")
 }
 
-// TestOpenAPIDocumentsTheStatusesHandlersReturn drives a synchronous action
-// (fans-on) and a job action (power-on) through the real pipeline, on their
-// success and their failure paths, and requires every status served to be
-// documented for that operation. The success rows are the audit's finding:
-// fans-on used to be documented as a 202 job while it answers 200.
+// withDefaults fills every nil collaborator with its well-behaved fake.
+func (o docOpts) withDefaults() docOpts {
+	if o.eng == nil {
+		o.eng = &plugRecorder{}
+	}
+	if o.jobs == nil {
+		o.jobs = fakeJobs{}
+	}
+	if o.peers == nil {
+		o.peers = &fakePeers{}
+	}
+	if o.monitor == nil {
+		o.monitor = fakeMonitor{}
+	}
+	return o
+}
+
+// TestOpenAPIDocumentsTheStatusesHandlersReturn drives synchronous actions
+// (the plugs, the mute pair) and a job action (power-on) through the real
+// pipeline, on their success and their failure paths, and requires every
+// status served to be documented for that operation. The first row is the
+// audit's finding: fans-on used to be documented as a 202 job while it
+// answers 200.
 func TestOpenAPIDocumentsTheStatusesHandlersReturn(t *testing.T) {
+	cold, hot := docOpts{}, docOpts{hostsUp: true, plugsOn: true, muted: true}
+	busyPeer := docOpts{plugsOn: true, peers: &fakePeers{busy: true}}
 	for _, tc := range []struct {
 		name   string
-		srv    *Server
+		opts   docOpts
 		path   string
 		apiKey string
 		want   int
 	}{
-		{name: "sync action performed", srv: docServer(t, &plugRecorder{}, fakeJobs{}, false),
-			path: "/fans/on", want: http.StatusOK},
-		{name: "sync action plug write fails", srv: docServer(t, &failingPlug{}, fakeJobs{}, false),
+		{name: "sync action performed", opts: cold, path: "/fans/on", want: http.StatusOK},
+		{name: "sync action plug write fails", opts: docOpts{eng: &failingPlug{}},
 			path: "/fans/on", want: http.StatusBadGateway},
-		{name: "sync action not available", srv: docServer(t, &plugRecorder{}, fakeJobs{}, true),
-			path: "/fans/on", want: http.StatusConflict},
-		{name: "job action accepted", srv: docServer(t, &plugRecorder{}, fakeJobs{}, false),
-			path: "/power/on", want: http.StatusAccepted},
-		{name: "job action lock held", srv: docServer(t, &plugRecorder{}, fakeJobs{err: coordination.ErrJobRunning}, false),
+		{name: "sync action not available", opts: hot, path: "/fans/on", want: http.StatusConflict},
+		{name: "ac-off without force while hosts run", opts: hot, path: "/ac/off", want: http.StatusConflict},
+		{name: "ac-off while a job started meanwhile", opts: busyPeer, path: "/ac/off", want: http.StatusConflict},
+		{name: "mute gateway write fails", opts: docOpts{monitor: fakeMonitor{err: errFake{}}},
+			path: "/monitoring/mute", want: http.StatusBadGateway},
+		{name: "unmute gateway write fails", opts: docOpts{muted: true, monitor: fakeMonitor{err: errFake{}}},
+			path: "/monitoring/unmute", want: http.StatusBadGateway},
+		{name: "job action accepted", opts: cold, path: "/power/on", want: http.StatusAccepted},
+		{name: "job action peer busy", opts: docOpts{peers: &fakePeers{busy: true}},
 			path: "/power/on", want: http.StatusConflict},
-		{name: "job action spawn fails", srv: docServer(t, &plugRecorder{}, fakeJobs{err: errors.New("fork failed")}, false),
+		{name: "job action lock held", opts: docOpts{jobs: fakeJobs{err: coordination.ErrJobRunning}},
+			path: "/power/on", want: http.StatusConflict},
+		{name: "job action spawn fails", opts: docOpts{jobs: fakeJobs{err: errors.New("fork failed")}},
 			path: "/power/on", want: http.StatusInternalServerError},
-		{name: "bad API key", srv: docServer(t, &plugRecorder{}, fakeJobs{}, false),
-			path: "/power/on", apiKey: "wrong", want: http.StatusUnauthorized},
+		{name: "bad API key", opts: cold, path: "/power/on", apiKey: "wrong", want: http.StatusUnauthorized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			key := tc.apiKey
-			if key == "" {
-				key = "sekrit"
+			srv := docServer(t, tc.opts)
+			req := postRequest(tc.path, nil)
+			if tc.apiKey != "" {
+				req.APIKey = tc.apiKey
 			}
-			got := serveStatus(t, tc.srv, http.MethodPost, tc.path, key)
+			got := serveStatus(t, srv, req)
 			if got != tc.want {
 				t.Fatalf("POST %s = %d, want %d (the precondition this row exists to document)", tc.path, got, tc.want)
 			}
-			if !documented(t, tc.srv.openapi.Build(), http.MethodPost, tc.path, got) {
+			if !documented(t, srv.openapi.Build(), http.MethodPost, tc.path, got) {
 				t.Errorf("POST %s answered %d, which the OpenAPI document does not declare for it", tc.path, got)
 			}
 		})
 	}
 }
 
+// TestEveryActionAnswersItsDeclaredSuccessStatus drives every action route
+// to success -- on a cold fleet or a hot one, whichever it is offered on,
+// with force=true so the off switches skip their confirming probe -- and
+// requires the status it answers to be exactly its Response.Status(). This is
+// what ties Response to the handler that actually serves the route.
+func TestEveryActionAnswersItsDeclaredSuccessStatus(t *testing.T) {
+	servers := []*Server{
+		docServer(t, docOpts{}),
+		docServer(t, docOpts{hostsUp: true, plugsOn: true, muted: true}),
+	}
+	force := url.Values{"force": {"true"}}
+	for _, r := range testRoutes(inventory.Default()) {
+		if !r.Action {
+			continue
+		}
+		var got []int
+		for _, srv := range servers {
+			status := serveStatus(t, srv, postRequest(r.Path, force))
+			got = append(got, status)
+			if status/100 == 2 {
+				if status != r.Response.Status() {
+					t.Errorf("route %q answered %d, but declares Response status %d", r.Name, status, r.Response.Status())
+				}
+				got = nil
+				break
+			}
+		}
+		if got != nil {
+			t.Errorf("route %q never succeeded (answered %v): no fixture offers it", r.Name, got)
+		}
+	}
+}
+
+// postRequest is an authenticated POST to path carrying form as its body.
+func postRequest(path string, form url.Values) contract.Request {
+	if form == nil {
+		form = url.Values{}
+	}
+	return contract.Request{Method: http.MethodPost, Path: path, APIKey: "sekrit", Query: url.Values{}, Form: form}
+}
+
 // serveStatus serves one request through the real pipeline and returns the
 // CGI status code it wrote.
-func serveStatus(t *testing.T, srv *Server, method, path, apiKey string) int {
+func serveStatus(t *testing.T, srv *Server, req contract.Request) int {
 	t.Helper()
 	var out strings.Builder
-	req := contract.Request{Method: method, Path: path, APIKey: apiKey, Query: url.Values{}, Form: url.Values{}}
 	if err := srv.serve(&out, req); err != nil {
-		t.Fatalf("serve(%s %s): %v", method, path, err)
+		t.Fatalf("serve(%s %s): %v", req.Method, req.Path, err)
 	}
 	status, _ := splitGogiosE2EResponse(t, out.String())
 	return status
+}
+
+// TestJobPeerParameterIsDeclaredAndHonoured pins the /job route's one query
+// parameter from both sides: the document declares it (optional), and the
+// handler really reads it -- a GET carrying it skips the peer-job fetch a
+// plain GET makes -- with both answers documented.
+func TestJobPeerParameterIsDeclaredAndHonoured(t *testing.T) {
+	peers := &fakePeers{}
+	srv := docServer(t, docOpts{peers: peers})
+	doc := srv.openapi.Build()
+
+	params, _ := operation(t, doc, http.MethodGet, powerapi.JobPath)["parameters"].([]any)
+	if len(params) != 1 {
+		t.Fatalf("job declares %d parameters, want exactly 1 (%s)", len(params), coordination.PeerQueryParam)
+	}
+	if p, _ := params[0].(map[string]any); p["name"] != coordination.PeerQueryParam || p["in"] != "query" || p["required"] != false {
+		t.Errorf("job parameter = %v, want name=%s, in=query, required=false", p, coordination.PeerQueryParam)
+	}
+
+	for _, tc := range []struct {
+		query       url.Values
+		wantFetches int
+	}{
+		{query: url.Values{}, wantFetches: 1},
+		{query: url.Values{coordination.PeerQueryParam: {"1"}}, wantFetches: 0},
+	} {
+		peers.fetches = 0
+		req := getRequest(powerapi.JobPath)
+		req.Query = tc.query
+		got := serveStatus(t, srv, req)
+		if !documented(t, doc, http.MethodGet, powerapi.JobPath, got) {
+			t.Errorf("GET /job?%s answered %d, which is not documented", tc.query.Encode(), got)
+		}
+		if peers.fetches != tc.wantFetches {
+			t.Errorf("GET /job?%s made %d peer-job fetches, want %d", tc.query.Encode(), peers.fetches, tc.wantFetches)
+		}
+	}
 }
 
 // TestOpenAPISuccessStatusFollowsResponseKind is the negative half, over the
@@ -191,6 +339,46 @@ func TestOpenAPISuccessStatusFollowsResponseKind(t *testing.T) {
 	if jobs == 0 {
 		t.Error("no route declares contract.ResponseJob: the power operations must")
 	}
+}
+
+// TestOpenAPIDocumentsOnlyReachableErrors is the reverse check over the
+// whole table: a generated error status must be one the route can reach. No
+// 409 without an Available predicate or a job behind the route (the cache
+// clear is always offered and starts no job), no 400 on anything but a POST.
+// A route's own Errors may add either back, so those are exempted.
+func TestOpenAPIDocumentsOnlyReachableErrors(t *testing.T) {
+	doc := testServer().openapi.Build()
+	for _, r := range testRoutes(inventory.Default()) {
+		if r.Path == openAPIPath {
+			continue
+		}
+		mayConflict := r.Available != nil || r.Response == contract.ResponseJob || declares(r, http.StatusConflict)
+		if got := documented(t, doc, r.Method, r.Path, http.StatusConflict); got != mayConflict {
+			t.Errorf("route %q documents 409 = %v, want %v", r.Name, got, mayConflict)
+		}
+		mayBadRequest := r.Method == http.MethodPost || declares(r, http.StatusBadRequest)
+		if got := documented(t, doc, r.Method, r.Path, http.StatusBadRequest); got != mayBadRequest {
+			t.Errorf("route %q documents 400 = %v, want %v", r.Name, got, mayBadRequest)
+		}
+	}
+
+	if documented(t, doc, http.MethodPost, "/gogios/cache/clear", http.StatusConflict) {
+		t.Error("gogios-cache-clear documents a 409, but it has no Available predicate and starts no job")
+	}
+	desc, _ := operation(t, doc, http.MethodPost, "/gogios/cache/clear")["description"].(string)
+	if strings.Contains(desc, "409") {
+		t.Errorf("gogios-cache-clear's description %q mentions a 409 it can never answer", desc)
+	}
+}
+
+// declares reports whether r's own Errors list status.
+func declares(r contract.Route, status int) bool {
+	for _, e := range r.Errors {
+		if e.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 // TestJobRoutesAreExactlyThePowerOperations pins which routes declare
