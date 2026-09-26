@@ -279,9 +279,16 @@ func writeCache(path string, raw []byte) (err error) {
 	return nil
 }
 
+// syncWriteCloser is the slice of *os.File that writeAndSync needs; it is an
+// interface so a test can make each step fail.
+type syncWriteCloser interface {
+	io.WriteCloser
+	Sync() error
+}
+
 // writeAndSync writes raw to f, fsyncs it, and closes it. f is closed on
 // every path.
-func writeAndSync(f *os.File, raw []byte) error {
+func writeAndSync(f syncWriteCloser, raw []byte) error {
 	if _, err := f.Write(raw); err != nil {
 		_ = f.Close()
 		return fmt.Errorf("writing the Gogios cache temp file: %w", err)

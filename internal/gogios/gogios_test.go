@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
@@ -548,6 +549,114 @@ func TestReadBodyBoundary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "of 8 bytes") {
 		t.Errorf("error = %q, want it to state the limit", err)
+	}
+
+	// A read failure is passed through wrapped, not mistaken for oversize.
+	readErr := errors.New("connection reset")
+	_, err = readBody(iotest.ErrReader(readErr), limit)
+	if !errors.Is(err, readErr) {
+		t.Errorf("readBody(failing reader) err = %v, want it to wrap %v", err, readErr)
+	}
+	if errors.Is(err, ErrReportTooLarge) {
+		t.Errorf("readBody(failing reader) err = %v, must not be ErrReportTooLarge", err)
+	}
+}
+
+// TestWriteCacheErrorsWhenTheTempFileCannotBeCreated pins the CreateTemp
+// failure path: in a read-only cache dir writeCache returns a wrapped error
+// naming the temp file and leaves nothing behind.
+func TestWriteCacheErrorsWhenTheTempFileCannotBeCreated(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("making the dir read-only: %v", err)
+	}
+	// Restore write permission so t.TempDir's cleanup can remove it.
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+
+	err := writeCache(filepath.Join(dir, "gogios-report.json"), []byte(reportJSON))
+	if err == nil {
+		t.Fatal("writeCache into a read-only dir succeeded, want an error")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("error = %v, want it to wrap fs.ErrPermission", err)
+	}
+	if !strings.Contains(err.Error(), "cache temp file") {
+		t.Errorf("error = %v, want it to name the cache temp file", err)
+	}
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatalf("reading the dir: %v", rerr)
+	}
+	if len(entries) != 0 {
+		t.Errorf("read-only dir holds %d entries after a failed write, want 0", len(entries))
+	}
+}
+
+// fakeFile is a syncWriteCloser whose steps can each be made to fail; it
+// records what was called so a test can check Close always runs.
+type fakeFile struct {
+	writeErr, syncErr, closeErr error
+	synced, closed              bool
+}
+
+func (f *fakeFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f *fakeFile) Sync() error {
+	f.synced = true
+	return f.syncErr
+}
+
+func (f *fakeFile) Close() error {
+	f.closed = true
+	return f.closeErr
+}
+
+// TestWriteAndSyncFailures pins writeAndSync's error handling: a failure at
+// Write, Sync or Close is returned wrapped with the failing step named, a
+// Write failure skips the Sync, and Close runs on every path so no file
+// descriptor leaks.
+func TestWriteAndSyncFailures(t *testing.T) {
+	boom := errors.New("boom")
+	cases := []struct {
+		name       string
+		f          *fakeFile
+		wantStep   string
+		wantSynced bool
+	}{
+		{"write", &fakeFile{writeErr: boom}, "writing", false},
+		{"sync", &fakeFile{syncErr: boom}, "syncing", true},
+		{"close", &fakeFile{closeErr: boom}, "closing", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := writeAndSync(tc.f, []byte("x"))
+			if !errors.Is(err, boom) {
+				t.Fatalf("err = %v, want it to wrap %v", err, boom)
+			}
+			if !strings.Contains(err.Error(), tc.wantStep) {
+				t.Errorf("err = %v, want it to name the %q step", err, tc.wantStep)
+			}
+			if tc.f.synced != tc.wantSynced {
+				t.Errorf("synced = %v, want %v", tc.f.synced, tc.wantSynced)
+			}
+			if !tc.f.closed {
+				t.Error("Close was not called after the failure")
+			}
+		})
+	}
+
+	// Happy path: all three steps run and no error is returned.
+	ok := &fakeFile{}
+	if err := writeAndSync(ok, []byte("x")); err != nil || !ok.synced || !ok.closed {
+		t.Errorf("writeAndSync(ok) = %v, synced=%v closed=%v; want nil, true, true", err, ok.synced, ok.closed)
 	}
 }
 
