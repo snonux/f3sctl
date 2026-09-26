@@ -137,12 +137,16 @@ func (e *Engine) cutAC(ctx context.Context, log io.Writer) error {
 //
 // The Set goes out before anything is logged. After an interrupt the log's
 // reader may be gone (a Ctrl-C that also killed a `| tee`), and nothing may
-// stand between a run being torn down and mains coming back.
+// stand between a run being torn down and mains coming back. The job step is
+// recorded first all the same: it is a best-effort write to job.json that
+// never blocks, and without it a polling client would read "cutting" through
+// the whole restore.
 //
 // It returns the plug's error as is: what that failure means for the rack
 // depends on whether the cut before it is known to have worked, which only
 // the caller knows.
 func (e *Engine) restoreAC(ctx context.Context, log io.Writer) error {
+	e.reporter().Step("restoring f-host mains AC")
 	_, err := e.acBackend().Set(context.WithoutCancel(ctx), true)
 	if err != nil {
 		return err

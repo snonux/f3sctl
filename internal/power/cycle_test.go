@@ -211,6 +211,31 @@ func TestCycleAllRestoresACEvenWhenCancelledMidDwell(t *testing.T) {
 	}
 }
 
+// TestCycleAllReportsTheRestoreBeforeSwitching pins what a client polling
+// job.json sees while mains comes back: a "restoring" step recorded before the
+// switch, not "cutting" left standing through the restore. A restore that
+// then fails would otherwise never show up in the job's progress at all.
+func TestCycleAllReportsTheRestoreBeforeSwitching(t *testing.T) {
+	rig := newCycleRig(t, "f0", "f1", "f2", "f3")
+	steps := &recordingReporter{}
+	rig.eng.WithReporter(steps)
+	rig.ac.setErr = map[bool]error{true: errors.New("plug unreachable")}
+
+	if err := rig.eng.CycleAll(context.Background(), &rig.log); err == nil {
+		t.Fatal("cycle with a failing restore succeeded")
+	}
+	steps.mu.Lock()
+	got := append([]string(nil), steps.steps...)
+	steps.mu.Unlock()
+	cut, restoring := indexOf(got, "cutting f-host mains AC"), indexOf(got, "restoring f-host mains AC")
+	if cut < 0 || restoring < cut {
+		t.Errorf("steps = %v, want \"restoring f-host mains AC\" after the cut", got)
+	}
+	if indexOf(got, "f-host mains AC restored") >= 0 {
+		t.Errorf("steps = %v, claim AC was restored although the switch failed", got)
+	}
+}
+
 // cancelOnCut returns a fakeAC hook that cancels the run's context the moment
 // AC is cut -- the signal arriving while the cut is still in flight.
 func cancelOnCut(cancel context.CancelFunc) func(bool) {
