@@ -188,48 +188,54 @@ func (sf *Surface) handleFansOn(ctx context.Context, state contract.State, req c
 // renders what it was given normally never hits this path -- normally, because
 // this one is the stricter of the two. See rackStillBusy.
 //
-// A request that passes the guard has just spent up to a minute probing, and
-// a job may have started on either node in that time; see jobStartedMeanwhile.
+// The guard may have spent up to a minute probing, and a job may have started
+// on either node in that time; see jobStartedMeanwhile. That is checked
+// before the probe's own verdict, whatever it was: a job waking the hosts
+// makes the probe hear them, and "re-send with force=true" would then be
+// exactly the wrong advice.
 func (sf *Surface) handleFansOff(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
 	if !req.BoolField("force") {
-		if busy := sf.rackStillBusy(ctx, state); busy.Busy() {
+		busy := sf.rackStillBusy(ctx, state)
+		if sf.jobStartedMeanwhile(ctx, req.APIKey) {
+			return contract.Entity{}, http.StatusConflict, contract.NotAvailableError("fans-off")
+		}
+		if busy.Busy() {
 			return contract.Entity{}, http.StatusConflict, fmt.Errorf(
 				"the rack may still be drawing power (%s) and the rack fans cool it; "+
 					"re-send with force=true if you really mean to switch the plug off",
 				busy.Why())
 		}
-		if sf.jobStartedMeanwhile(ctx, req.APIKey) {
-			return contract.Entity{}, http.StatusConflict, contract.NotAvailableError("fans-off")
-		}
 	}
 	return sf.setFans(ctx, state, req, false)
 }
 
-// jobStartedMeanwhile re-reads this node's and the peer's job state, fresh
-// rather than from the request's snapshot, right before a plug write that
-// followed a confirming probe.
+// jobStartedMeanwhile re-reads the peer's and this node's job state, fresh
+// rather than from the request's snapshot, after an off handler's confirming
+// probe and right before its plug write.
 //
 // serve() refuses a plug switch while a job runs, but it judges that once, up
 // front, and the off handlers then probe for the better part of a minute. A
 // power-on or all-cycle started on either node inside that window would have
-// its plug flipped under it. This narrows the gap to what remains between
-// this read and the plug actually switching -- the peer answer's own travel
-// time plus FansSet/ACSet's digest-authenticated Shelly round trip, so well
-// under a second rather than a minute. It is a re-check, not a lock: the plug
-// has no lock to take, and Manager.Start's flock only serialises jobs. The
-// switches without a probe (on, and off with force) have no such window
-// beyond serve()'s own check, so they are not re-checked.
+// its plug flipped under it. This shrinks the window rather than closing it:
+// it is a re-check, not a lock -- the plug has no lock to take, and
+// Manager.Start's flock only serialises jobs. The switches without a probe
+// (on, and off with force) have no such window beyond serve()'s own check, so
+// they are not re-checked.
 //
-// The peer half costs one more round trip to the other node, bounded by the
-// peer client's 3s timeout. A peer that is down or does not answer in time
-// counts as idle, the same fail-open PeerSet.Busy applies everywhere else: if
-// one node is down the other must still be able to switch the plugs.
+// The peer is asked first and the local job file read last, so the local gap
+// left is only FansSet/ACSet's digest-authenticated Shelly round trip. The
+// peer's answer is older by the local read plus that round trip, and by up to
+// the peer client's 3s timeout on top when the peer is slow: that one extra
+// round trip is the price of the check. A peer that is down or does not
+// answer in time counts as idle, the same fail-open PeerSet.Busy applies
+// everywhere else: if one node is down the other must still be able to switch
+// the plugs.
 func (sf *Surface) jobStartedMeanwhile(ctx context.Context, apiKey string) bool {
-	if j := sf.Jobs.Read(); j != nil && j.State == coordination.JobRunning {
+	if busy, _ := sf.Peers.Busy(ctx, sf.Node, apiKey); busy {
 		return true
 	}
-	busy, _ := sf.Peers.Busy(ctx, sf.Node, apiKey)
-	return busy
+	j := sf.Jobs.Read()
+	return j != nil && j.State == coordination.JobRunning
 }
 
 // rackStillBusy is the enforcement half of the fan guard: the same question the
@@ -312,17 +318,19 @@ func (sf *Surface) handleACOn(ctx context.Context, state contract.State, req con
 // AC is never an automatic side-effect of a graceful shutdown.
 //
 // As for fans-off, a job that started during the confirming probe is caught
-// by jobStartedMeanwhile before the plug is touched.
+// by jobStartedMeanwhile before the plug is touched, and reported ahead of
+// whatever the probe found.
 func (sf *Surface) handleACOff(ctx context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
 	if !req.BoolField("force") {
-		if busy := sf.acStillBusy(ctx, state); busy.Busy() {
+		busy := sf.acStillBusy(ctx, state)
+		if sf.jobStartedMeanwhile(ctx, req.APIKey) {
+			return contract.Entity{}, http.StatusConflict, contract.NotAvailableError("ac-off")
+		}
+		if busy.Busy() {
 			return contract.Entity{}, http.StatusConflict, fmt.Errorf(
 				"hosts may still be drawing power (%s); cutting mains AC hard-powers them off "+
 					"and risks ZFS / bhyve damage; re-send with force=true if you really mean it",
 				busy.Why())
-		}
-		if sf.jobStartedMeanwhile(ctx, req.APIKey) {
-			return contract.Entity{}, http.StatusConflict, contract.NotAvailableError("ac-off")
 		}
 	}
 	return sf.setAC(ctx, state, req, false)

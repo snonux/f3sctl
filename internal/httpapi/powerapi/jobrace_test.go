@@ -125,3 +125,46 @@ func TestPlugOffReCheckTreatsADownPeerAsIdle(t *testing.T) {
 		t.Fatalf("Switch.Set calls = %v, want exactly one with on=false", got)
 	}
 }
+
+// TestJobStartedDuringTheProbeOutranksTheProbesVerdict pins the order of the
+// two refusals. A job that starts during the probe usually wakes the hosts, so
+// the probe hears them and says "busy"; answering that with the probe's
+// "re-send with force=true" would invite a client to force a plug switch
+// under a running job. The job's not-available refusal must win.
+func TestJobStartedDuringTheProbeOutranksTheProbesVerdict(t *testing.T) {
+	handlers := map[string]func(*Surface) contract.Handle{
+		"fans-off": func(sf *Surface) contract.Handle { return sf.handleFansOff },
+		"ac-off":   func(sf *Surface) contract.Handle { return sf.handleACOff },
+	}
+	for action, handler := range handlers {
+		for _, src := range []string{"local job", "peer job"} {
+			t.Run(action+" "+src, func(t *testing.T) {
+				plug := newFakePlug(t)
+				dir := t.TempDir()
+				peers, peerRunning := switchablePeer(t)
+				sf := testSurface(t, plug, func(context.Context) power.RackActivity {
+					if src == "local job" {
+						startLocalJob(t, dir)
+					} else {
+						peerRunning.Store(true)
+					}
+					// The job's wake is under way: the probe hears f1.
+					return power.RackActivityFrom([]power.HostStatus{fState("f1", true, true)})
+				})
+				sf.Jobs = coordination.NewManager(dir, config.Default().UnmuteTimeout.D(), 0)
+				sf.Peers = peers
+
+				_, status, err := handler(sf)(context.Background(), coldSnapshot(), contract.Request{})
+				if status != http.StatusConflict {
+					t.Fatalf("status = %d, want %d", status, http.StatusConflict)
+				}
+				if err == nil || !strings.Contains(err.Error(), "not available right now") {
+					t.Errorf("error = %v, want the not-available refusal, not the probe's force advice", err)
+				}
+				if got := plug.setCalls(); len(got) != 0 {
+					t.Fatalf("Switch.Set calls = %v, want none", got)
+				}
+			})
+		}
+	}
+}
