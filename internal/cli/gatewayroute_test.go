@@ -62,7 +62,9 @@ func TestGatewaySwitchForUsesTheAPIOnlyWithoutAKey(t *testing.T) {
 }
 
 // fakeMonitorAPI is a minimal /monitoring surface: every gateway muted until
-// the unmute action is posted, except the ones listed in stuck.
+// the unmute action is posted, except the ones listed in stuck. Like the real
+// server, it advertises un-mute while any gateway is muted and mute while any
+// is alerting -- both after a partial mute.
 type fakeMonitorAPI struct {
 	srv   *httptest.Server
 	mu    sync.Mutex
@@ -95,24 +97,36 @@ func (f *fakeMonitorAPI) handle(w http.ResponseWriter, r *http.Request) {
 		})
 	case "/gogios":
 		writeRemoteEntity(w, client.Entity{Links: []client.Link{{Rel: []string{"monitoring"}, Href: "/monitoring"}}})
-	case "/monitoring/unmute":
+	case "/monitoring/mute", "/monitoring/unmute":
 		f.posts++
 		for gw := range f.muted {
 			if !f.stuck[gw] {
-				f.muted[gw] = false
+				f.muted[gw] = r.URL.Path == "/monitoring/mute"
 			}
 		}
-		fallthrough
+		writeRemoteEntity(w, f.monitoring())
 	case "/monitoring":
-		e := client.Entity{}
-		for _, gw := range []string{"blowfish", "fishfinger"} {
-			e.Entities = append(e.Entities, client.Entity{Properties: map[string]any{"name": gw, "muted": f.muted[gw]}})
-		}
-		e.Actions = []client.Action{{Name: "monitoring-unmute", Method: "POST", Href: "/monitoring/unmute", CLIVerb: "monitoring unmute"}}
-		writeRemoteEntity(w, e)
+		writeRemoteEntity(w, f.monitoring())
 	default:
 		http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 	}
+}
+
+func (f *fakeMonitorAPI) monitoring() client.Entity {
+	e := client.Entity{}
+	anyMuted, anyAlerting := false, false
+	for _, gw := range []string{"blowfish", "fishfinger"} {
+		e.Entities = append(e.Entities, client.Entity{Properties: map[string]any{"name": gw, "muted": f.muted[gw]}})
+		anyMuted = anyMuted || f.muted[gw]
+		anyAlerting = anyAlerting || !f.muted[gw]
+	}
+	if anyMuted {
+		e.Actions = append(e.Actions, client.Action{Name: "monitoring-unmute", Method: "POST", Href: "/monitoring/unmute", CLIVerb: "monitoring unmute"})
+	}
+	if anyAlerting {
+		e.Actions = append(e.Actions, client.Action{Name: "monitoring-mute", Method: "POST", Href: "/monitoring/mute", CLIVerb: "monitoring mute"})
+	}
+	return e
 }
 
 func apiConfig(t *testing.T, url, key string) config.Config {
@@ -149,6 +163,43 @@ func TestAPIGatewaySwitchNamesAGatewayLeftMuted(t *testing.T) {
 
 	err := sw.SetMute(context.Background(), &bytes.Buffer{}, false)
 	if err == nil || err.Error() != "could not gogios-unmute Gogios on: [fishfinger]" {
+		t.Fatalf("err = %v, want fishfinger named", err)
+	}
+}
+
+// A mute that reached one gateway but not the other can be finished through
+// the API: the server offers the mute again while a gateway is alerting, so
+// the switch reaches both instead of reporting fishfinger "still alerting"
+// (task ka).
+func TestAPIGatewaySwitchFinishesAPartialMute(t *testing.T) {
+	api := newFakeMonitorAPI(t)
+	api.muted["fishfinger"] = false
+	sw := gatewaySwitchFor(apiConfig(t, api.srv.URL, "secret"), false)
+
+	var log bytes.Buffer
+	if err := sw.SetMute(context.Background(), &log, true); err != nil {
+		t.Fatalf("SetMute: %v (log %q)", err, log.String())
+	}
+	if api.posts != 1 {
+		t.Errorf("mute posts = %d, want 1", api.posts)
+	}
+	for _, gw := range []string{"blowfish", "fishfinger"} {
+		if !strings.Contains(log.String(), "Gogios muted on "+gw+" (via the API)") {
+			t.Errorf("log = %q, want a line for %s", log.String(), gw)
+		}
+	}
+}
+
+// Negative: a gateway that ignores the finishing mute is still named, in the
+// same error shape the SSH path returns.
+func TestAPIGatewaySwitchNamesAGatewayLeftAlerting(t *testing.T) {
+	api := newFakeMonitorAPI(t)
+	api.muted["fishfinger"] = false
+	api.stuck["fishfinger"] = true
+	sw := gatewaySwitchFor(apiConfig(t, api.srv.URL, "secret"), false)
+
+	err := sw.SetMute(context.Background(), &bytes.Buffer{}, true)
+	if err == nil || err.Error() != "could not gogios-mute Gogios on: [fishfinger]" {
 		t.Fatalf("err = %v, want fishfinger named", err)
 	}
 }

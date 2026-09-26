@@ -101,6 +101,25 @@ func New(node string, href func(string) string, cfg config.Config, monitor Monit
 // over the gateways) -- so it is a plain function here.
 func Muted(s contract.State) bool { return power.AnyMuted(s.Monitoring) }
 
+// Alerting reports whether Gogios is still alerting on at least one gateway
+// that answered -- i.e. whether a mute would change anything.
+//
+// It is deliberately not !Muted: after a partial mute (one gateway muted, the
+// other alerting -- the mute runs on every gateway and keeps going past a
+// failure) both are true, and both actions are then worth offering. Keying
+// the mute on "nothing muted" would withhold the one call that finishes the
+// job. An unreadable gateway counts as neither: unknown is not alerting, the
+// same rule power.AnyMuted applies to muted, so with no gateway readable
+// neither action is offered.
+func Alerting(s contract.State) bool {
+	for _, gw := range s.Monitoring {
+		if gw.Err == nil && !gw.Muted {
+			return true
+		}
+	}
+	return false
+}
+
 // IsMonitorPath reports whether path belongs to the mute family (/monitoring
 // and its actions). The composition root uses it to decide whether to pay for
 // the SSH round trips that read the gateways -- see enrichState.

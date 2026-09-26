@@ -251,7 +251,17 @@ or on a slow timer.
 
 Treat `muted: true` while the fleet is up as a **warning worth surfacing**. It
 means a shutdown muted alerting and the un-mute never completed — the fleet is
-running with nobody watching it. `monitoring-unmute` is offered exactly then.
+running with nobody watching it. The top-level `muted` is true when **any**
+gateway is muted, so read the gateway entities for the detail.
+
+The two actions are judged per gateway, and only on gateways that answered:
+`monitoring-unmute` is offered while any gateway is muted, `monitoring-mute`
+while any gateway is still alerting. A uniform state gets exactly one of them;
+a **partial mute** (one gateway muted, the other alerting — the mute keeps
+going past a gateway it could not reach) gets **both**, so a client must not
+assume they are mutually exclusive. Offer whichever the user is after: mute to
+finish the job, un-mute to back it out. An unreachable gateway counts as
+neither, so with no gateway readable neither action is offered.
 
 ### Gogios alerting
 

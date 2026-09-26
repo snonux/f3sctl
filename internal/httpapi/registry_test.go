@@ -449,26 +449,42 @@ func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
 	}
 }
 
-// TestMonitoringActionsAreMutuallyExclusive pins that exactly one of mute and
-// un-mute is offered, so a client never renders both.
-func TestMonitoringActionsAreMutuallyExclusive(t *testing.T) {
+// TestMonitoringActionsFollowEachGatewaysState pins which of mute and un-mute
+// is offered for each gateway mute state: un-mute while any readable gateway
+// is muted, mute while any readable gateway is alerting. A uniform state gets
+// exactly one; a partial mute gets both.
+//
+// The partial case is the regression (task ka): mute used to key on "nothing
+// muted", so a mute that reached one gateway but not the other could never be
+// finished through the API -- the CLI said "not available right now", a POST
+// got 409 -- and the second gateway stayed alerting through the shutdown.
+func TestMonitoringActionsFollowEachGatewaysState(t *testing.T) {
+	down := errors.New("ssh: connect timed out")
 	for _, tc := range []struct {
-		name  string
-		muted bool
-		want  string
+		name       string
+		gateways   []power.GatewayMute
+		wantMute   bool
+		wantUnmute bool
 	}{
-		{"muted", true, "monitoring-unmute"},
-		{"alerting", false, "monitoring-mute"},
+		{"all muted", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, false, true},
+		{"all alerting", []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger"}}, true, false},
+		{"partial mute", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, true, true},
+		// An unreadable gateway is neither muted nor alerting: it neither
+		// earns the action nor blocks the one the other gateway earns.
+		{"muted and unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: down}}, false, true},
+		{"alerting and unreadable", []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: down}}, true, false},
+		{"all unreadable", []power.GatewayMute{{Name: "blowfish", Err: down}, {Name: "fishfinger", Err: down}}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := contract.State{Monitoring: []power.GatewayMute{{Name: "blowfish", Muted: tc.muted}}}
-			for _, name := range []string{"monitoring-mute", "monitoring-unmute"} {
+			s := contract.State{Monitoring: tc.gateways}
+			want := map[string]bool{"monitoring-mute": tc.wantMute, "monitoring-unmute": tc.wantUnmute}
+			for name, wantAvail := range want {
 				r, ok := routeByName(name)
 				if !ok {
 					t.Fatalf("no %q action", name)
 				}
-				if got := r.IsAvailable(s); got != (name == tc.want) {
-					t.Errorf("%s available=%v, want %v", name, got, name == tc.want)
+				if got := r.IsAvailable(s); got != wantAvail {
+					t.Errorf("%s available=%v, want %v", name, got, wantAvail)
 				}
 			}
 		})

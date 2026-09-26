@@ -69,7 +69,7 @@ func (f *fakeMonitoringAPI) handle(w http.ResponseWriter, r *http.Request) {
 
 func (f *fakeMonitoringAPI) monitoring() Entity {
 	e := Entity{}
-	anyMuted := false
+	anyMuted, anyAlerting := false, false
 	for _, name := range []string{"blowfish", "fishfinger"} {
 		props := map[string]any{"name": name}
 		if msg := f.gwErr[name]; msg != "" {
@@ -77,12 +77,16 @@ func (f *fakeMonitoringAPI) monitoring() Entity {
 		} else {
 			props["muted"] = f.muted[name]
 			anyMuted = anyMuted || f.muted[name]
+			anyAlerting = anyAlerting || !f.muted[name]
 		}
 		e.Entities = append(e.Entities, Entity{Properties: props})
 	}
+	// Both are offered after a partial mute, as the server does
+	// (gogiosapi.Alerting).
 	if anyMuted {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-unmute", Method: "POST", Href: "/monitoring/unmute", CLIVerb: "monitoring unmute"})
-	} else {
+	}
+	if anyAlerting {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-mute", Method: "POST", Href: "/monitoring/mute", CLIVerb: "monitoring mute"})
 	}
 	return e
@@ -213,5 +217,25 @@ func TestRunMonitoringStatusListsTheAvailableActions(t *testing.T) {
 				t.Errorf("output = %q, want it to contain %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// After a partial mute (one gateway muted, one still alerting) both actions
+// are advertised, and a mute picks the mute rather than mistaking the offered
+// un-mute for "nothing to do" (task ka).
+func TestSetMuteFinishesAPartialMute(t *testing.T) {
+	api := newFakeMonitoringAPI(t)
+	api.muted["blowfish"], api.muted["fishfinger"] = true, false
+	c := newTestClient(t, api.srv.URL, "k")
+
+	states, err := c.SetMute(context.Background(), true)
+	if err != nil {
+		t.Fatalf("SetMute: %v", err)
+	}
+	if len(api.posts) != 1 || api.posts[0] != "/monitoring/mute" {
+		t.Errorf("posts = %v, want one POST /monitoring/mute", api.posts)
+	}
+	if len(states) != 2 || !states[0].Muted || !states[1].Muted {
+		t.Errorf("states = %+v, want both muted", states)
 	}
 }

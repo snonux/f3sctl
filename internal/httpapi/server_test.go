@@ -611,17 +611,20 @@ func TestACControlFolderOffersThePlugActions(t *testing.T) {
 
 // TestGogiosFolderCarriesTheMutePair pins that the /gogios folder offers the
 // whole family's controls, not just the report browser's: the cache clear
-// always, and exactly one of mute/unmute judged on the same gateway mute
-// state /monitoring renders. This is what makes /gogios a folder rather than
-// only a report -- see handleOverview and enrichState's IsFolderPath fetch.
+// always, and the mute pair judged on the same gateway mute state /monitoring
+// renders -- one of them for a uniform state, both after a partial mute. This
+// is what makes /gogios a folder rather than only a report -- see
+// handleOverview and enrichState's IsFolderPath fetch.
 func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 	tests := []struct {
 		name string
 		mute []power.GatewayMute
-		want string // the mute action that must be offered
+		want []string // the mute actions that must be offered
+		not  []string // ...and the ones that must not
 	}{
-		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}}, "monitoring-unmute"},
-		{"alerting", []power.GatewayMute{{Name: "blowfish", Muted: false}}, "monitoring-mute"},
+		{"muted", []power.GatewayMute{{Name: "blowfish", Muted: true}}, []string{"monitoring-unmute"}, []string{"monitoring-mute"}},
+		{"alerting", []power.GatewayMute{{Name: "blowfish", Muted: false}}, []string{"monitoring-mute"}, []string{"monitoring-unmute"}},
+		{"partial", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, []string{"monitoring-mute", "monitoring-unmute"}, nil},
 	}
 
 	for _, tt := range tests {
@@ -629,8 +632,15 @@ func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 			srv := folderServer(t, nil, func(context.Context) []power.GatewayMute { return tt.mute })
 			e := getEntity(t, srv, "/gogios")
 
-			if !hasAction(e, tt.want) {
-				t.Errorf("gogios folder actions = %v, want %s offered while %s", actionNames(e), tt.want, tt.name)
+			for _, name := range tt.want {
+				if !hasAction(e, name) {
+					t.Errorf("gogios folder actions = %v, want %s offered while %s", actionNames(e), name, tt.name)
+				}
+			}
+			for _, name := range tt.not {
+				if hasAction(e, name) {
+					t.Errorf("gogios folder actions = %v, want %s withheld while %s", actionNames(e), name, tt.name)
+				}
 			}
 			if !hasAction(e, "gogios-cache-clear") {
 				t.Errorf("gogios folder actions = %v, want gogios-cache-clear offered (always available)", actionNames(e))
