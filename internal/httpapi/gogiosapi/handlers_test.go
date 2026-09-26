@@ -44,16 +44,17 @@ func testSurface() *Surface {
 
 // gogiosSample is a small, representative Gogios report for handler tests:
 // one unhandled CRITICAL, one stale WARNING (its lifecycle is stale, but its
-// own severity stays WARNING), one suppressed UNKNOWN, and two OK checks.
-// The CRITICAL and one OK changed since the last notification, so -- exactly
+// own severity stays WARNING), a suppressed UNKNOWN and a suppressed
+// CRITICAL, and two OK checks. The summary counts leave the suppressed checks
+// out, exactly as Gogios's countBy does. The unhandled CRITICAL and one OK changed since the last notification, so -- exactly
 // as Gogios writes it -- each is also listed in StatusChanged with its
 // PrevStatus. Mirrors the shape internal/gogios/gogios_test.go's own fixture
 // describes.
 func gogiosSample() *gogios.Report {
 	return &gogios.Report{
 		LastUpdated: "2026-08-27T08:58:18+02:00",
-		Subject:     "GOGIOS Report [C:1 W:1 U:1 S:1 SU:1 OK:2]",
-		Summary:     gogios.Summary{Critical: 1, Warning: 1, Unknown: 1, Stale: 1, Suppressed: 1, Ok: 2},
+		Subject:     "GOGIOS Report [C:1 W:1 U:0 S:1 SU:2 OK:2]",
+		Summary:     gogios.Summary{Critical: 1, Warning: 1, Unknown: 0, Stale: 1, Suppressed: 2, Ok: 2},
 		Sections: gogios.Sections{
 			StatusChanged: []gogios.Check{
 				{Name: "Check Ping6 r1.wg0.wan.buetow.org", Status: "CRITICAL", PrevStatus: "OK", Output: "timed out", Epoch: 1},
@@ -67,6 +68,7 @@ func gogiosSample() *gogios.Report {
 			},
 			Suppressed: []gogios.Check{
 				{Name: "Check Disk fishfinger", Status: "UNKNOWN", Output: "no data", Epoch: 3},
+				{Name: "Check Load r2.wg0.wan.buetow.org", Status: "CRITICAL", Output: "load 42", Epoch: 6},
 			},
 			Ok: []gogios.Check{
 				{Name: "Check Ping4 master.buetow.org", Status: "OK", Output: "PING OK", Epoch: 4},
@@ -135,7 +137,7 @@ func TestHandleGogiosReportsAFetchErrorAsAProperty(t *testing.T) {
 // TestHandleGogiosStatusFiltersBySeverity pins the four severity categories:
 // each is the union, across every lifecycle section, of checks with that
 // Status -- see checksForStatus. A check also listed in StatusChanged must
-// appear once, not twice.
+// appear once, not twice, and a suppressed check not at all.
 func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 	sf := testSurface()
 	state := contract.State{Gogios: gogiosSample()}
@@ -146,7 +148,7 @@ func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 	}{
 		{"critical", []string{"Check Ping6 r1.wg0.wan.buetow.org"}},
 		{"warning", []string{"Check SWAP blowfish"}},
-		{"unknown", []string{"Check Disk fishfinger"}},
+		{"unknown", nil}, // the only UNKNOWN is suppressed
 		{"ok", []string{"Check Ping4 master.buetow.org", "Check HTTP IPv4 foo.zone"}},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
@@ -189,26 +191,64 @@ func TestHandleGogiosCriticalListsAChangedCheckOnce(t *testing.T) {
 	}
 }
 
+// TestHandleGogiosSeverityDrillDownsMatchTheSummary pins that each severity
+// drill-down lists exactly as many checks as Gogios's summary counts for it:
+// suppressed checks (here a suppressed CRITICAL) are in neither, while the
+// per-check lookup still finds the suppressed CRITICAL by name.
+func TestHandleGogiosSeverityDrillDownsMatchTheSummary(t *testing.T) {
+	sf := testSurface()
+	state := contract.State{Gogios: gogiosSample()}
+	sum := state.Gogios.Summary
+
+	for status, want := range map[string]int{
+		"critical": sum.Critical, "warning": sum.Warning, "unknown": sum.Unknown, "ok": sum.Ok,
+	} {
+		e, _, err := sf.statusHandle(status)(context.Background(), state, contract.Request{})
+		if err != nil {
+			t.Fatalf("statusHandle(%q): %v", status, err)
+		}
+		if len(e.Entities) != want {
+			t.Errorf("%s entities = %d, want %d (the summary count): %+v", status, len(e.Entities), want, e.Entities)
+		}
+	}
+
+	name := "Check Load r2.wg0.wan.buetow.org"
+	e, status, err := sf.handleCheck(context.Background(), state, contract.Request{Query: url.Values{"name": {name}}})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("handleCheck(suppressed) = %d, %v; want 200", status, err)
+	}
+	if e.Properties["name"] != name || e.Properties["status"] != "CRITICAL" {
+		t.Errorf("suppressed check properties = %+v, want the suppressed CRITICAL", e.Properties)
+	}
+}
+
 // TestHandleGogiosStatusLifecycleGroupings pins the other two categories:
 // "stale" and "suppressed" read Sections.Stale/Suppressed directly rather
 // than filtering by Status, because a stale or suppressed check keeps
-// whatever severity it already had (here, WARNING and UNKNOWN respectively,
-// neither of which is the literal string "stale"/"suppressed").
+// whatever severity it already had (here, WARNING, and UNKNOWN plus CRITICAL,
+// none of which is the literal string "stale"/"suppressed").
 func TestHandleGogiosStatusLifecycleGroupings(t *testing.T) {
 	sf := testSurface()
 	state := contract.State{Gogios: gogiosSample()}
 
-	for _, tc := range []struct{ status, want string }{
-		{"stale", "Check SWAP blowfish"},
-		{"suppressed", "Check Disk fishfinger"},
+	for _, tc := range []struct {
+		status string
+		want   []string
+	}{
+		{"stale", []string{"Check SWAP blowfish"}},
+		{"suppressed", []string{"Check Disk fishfinger", "Check Load r2.wg0.wan.buetow.org"}},
 	} {
 		t.Run(tc.status, func(t *testing.T) {
 			e, _, err := sf.statusHandle(tc.status)(context.Background(), state, contract.Request{})
 			if err != nil {
 				t.Fatalf("statusHandle: %v", err)
 			}
-			if len(e.Entities) != 1 || e.Entities[0].Properties["name"] != tc.want {
-				t.Errorf("%s checks = %+v, want exactly [%s]", tc.status, e.Entities, tc.want)
+			var got []string
+			for _, sub := range e.Entities {
+				got = append(got, sub.Properties["name"].(string))
+			}
+			if !equalLists(got, tc.want) {
+				t.Errorf("%s checks = %v, want %v", tc.status, got, tc.want)
 			}
 		})
 	}

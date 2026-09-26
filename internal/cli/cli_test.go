@@ -924,18 +924,23 @@ func TestParseGogiosArgsValidatesSpellings(t *testing.T) {
 // tests below: one unhandled CRITICAL, one stale WARNING (lifecycle stale,
 // severity WARNING), one suppressed UNKNOWN (lifecycle suppressed, severity
 // UNKNOWN -- the other lifecycle-vs-severity case gogiosChecksForStatus'
-// split exists for), and one OK. The CRITICAL just changed, so -- as Gogios
-// writes it -- it is also listed in "statusChanged". Mirrors the shape
+// split exists for), a suppressed CRITICAL, and one OK. The summary counts
+// leave both suppressed checks out, as Gogios's countBy does. The unhandled
+// CRITICAL just changed, so -- as Gogios writes it -- it is also listed in
+// "statusChanged". Mirrors the shape
 // internal/gogios/gogios_test.go's own fixture documents.
 const gogiosReportJSON = `{
-  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:1 OK:1]",
+  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:2 OK:1]",
   "lastUpdated": "2026-08-27T08:58:18+02:00",
-  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":1,"ok":1},
+  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":2,"ok":1},
   "sections": {
     "statusChanged": [{"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","prevStatus":"OK","output":"timed out","epoch":1}],
     "unhandled": [{"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","output":"timed out","epoch":1}],
     "stale": [{"name":"Check SWAP blowfish","status":"WARNING","output":"SWAP WARNING","epoch":2,"lastCheckedAgeSeconds":99999}],
-    "suppressed": [{"name":"Check Disk fishfinger","status":"UNKNOWN","output":"no data","epoch":3}],
+    "suppressed": [
+      {"name":"Check Disk fishfinger","status":"UNKNOWN","output":"no data","epoch":3},
+      {"name":"Check Load r2.wg0.wan.buetow.org","status":"CRITICAL","output":"load 42","epoch":5}
+    ],
     "ok": [{"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":4}]
   }
 }`
@@ -1031,6 +1036,36 @@ func TestGogiosLocalCriticalListsAChangedCheckOnce(t *testing.T) {
 	}
 	if n := strings.Count(out, "Check Ping6 r1.wg0.wan.buetow.org"); n != 1 {
 		t.Errorf("output lists the changed CRITICAL %d times, want 1:\n%s", n, out)
+	}
+}
+
+// TestGogiosLocalSuppressedCriticalIsOnlyUnderSuppressed pins the local
+// path's half of the suppressed exclusion: "gogios critical" does not list
+// the suppressed CRITICAL (Gogios leaves it out of summary.critical),
+// "gogios suppressed" does, and "gogios detail" still finds it.
+func TestGogiosLocalSuppressedCriticalIsOnlyUnderSuppressed(t *testing.T) {
+	const name = "Check Load r2.wg0.wan.buetow.org"
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"critical"}, false},
+		{[]string{"suppressed"}, true},
+		{[]string{"detail", name}, true},
+	} {
+		t.Run(tc.args[0], func(t *testing.T) {
+			srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+			cfg := gogiosTestConfig(t, srv)
+
+			args := append([]string{"--local", "gogios"}, tc.args...)
+			out, _, err := runCLI(t, cfg, hostsUp(), args...)
+			if err != nil {
+				t.Fatalf("%v: %v", args, err)
+			}
+			if got := strings.Contains(out, name); got != tc.want {
+				t.Errorf("%v output lists %q = %v, want %v:\n%s", args, name, got, tc.want, out)
+			}
+		})
 	}
 }
 

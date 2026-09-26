@@ -186,12 +186,13 @@ func (sf *Surface) statusHandle(status string) contract.Handle {
 // checksForStatus selects the checks for one Statuses category.
 //
 // "critical"/"warning"/"unknown"/"ok" are severities: Report.ByStatus groups
-// every check, from every lifecycle section, by its own Status field.
-// "stale"/"suppressed" are lifecycle groupings instead -- a stale check keeps
-// whatever severity it already had, so filtering it out of ByStatus's result
-// would either double-count it under both a severity and a lifecycle
-// category, or require ByStatus to invent a status value Gogios itself never
-// writes. Reading Sections.Stale/Suppressed directly avoids both.
+// every check Gogios counts in its summary (Unhandled, Stale and Ok; not
+// Suppressed, which Gogios leaves out of those counts) by its own Status
+// field. "stale"/"suppressed" are lifecycle groupings instead -- a stale
+// check keeps whatever severity it already had, so filtering it out of
+// ByStatus's result would either double-count it under both a severity and a
+// lifecycle category, or require ByStatus to invent a status value Gogios
+// itself never writes. Reading Sections.Stale/Suppressed directly avoids both.
 func checksForStatus(r *gogios.Report, status string) []gogios.Check {
 	switch status {
 	case "stale":

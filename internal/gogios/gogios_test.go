@@ -24,11 +24,12 @@ import (
 // one stale WARNING, and two OKs, plus an unknown JSON key (defensive parsing).
 // The CRITICAL and one OK changed since the last notification, so -- exactly as
 // Gogios writes it -- each is listed twice: once in statusChanged (with
-// prevStatus) and once in its lifecycle section (without).
+// prevStatus) and once in its lifecycle section (without). A suppressed
+// CRITICAL is left out of the summary counts, as Gogios's countBy does.
 const reportJSON = `{
   "lastUpdated": "2026-08-27T08:58:18+02:00",
-  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:0 OK:2]",
-  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":0,"ok":2},
+  "subject": "GOGIOS Report [C:1 W:1 U:0 S:1 SU:1 OK:2]",
+  "summary": {"critical":1,"warning":1,"unknown":0,"stale":1,"suppressed":1,"ok":2},
   "futureField": "ignore me",
   "sections": {
     "statusChanged": [
@@ -41,7 +42,9 @@ const reportJSON = `{
     "stale": [
       {"name":"Check SWAP blowfish","status":"WARNING","output":"SWAP WARNING","epoch":1724000000,"lastCheckedAgeSeconds":99999}
     ],
-    "suppressed": [],
+    "suppressed": [
+      {"name":"Check Load r2.wg0.wan.buetow.org","status":"CRITICAL","output":"load 42","epoch":1724744302}
+    ],
     "ok": [
       {"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":1724744300},
       {"name":"Check HTTP IPv4 foo.zone","status":"OK","output":"HTTP OK","epoch":1724744301}
@@ -96,7 +99,7 @@ func TestFetchWritesAndReturnsTheReport(t *testing.T) {
 	if hits(n) != 1 {
 		t.Errorf("server hits = %d, want 1 (cold cache must fetch)", hits(n))
 	}
-	if got.Subject != "GOGIOS Report [C:1 W:1 U:0 S:1 SU:0 OK:2]" {
+	if got.Subject != "GOGIOS Report [C:1 W:1 U:0 S:1 SU:1 OK:2]" {
 		t.Errorf("Subject = %q", got.Subject)
 	}
 	if got.Summary.Critical != 1 || got.Summary.Warning != 1 || got.Summary.Stale != 1 || got.Summary.Ok != 2 {
@@ -681,7 +684,8 @@ func TestParseErrorsOnMalformedJSON(t *testing.T) {
 // TestByStatusGroupsAcrossSections pins the drill-down re-index: Gogios groups
 // checks by lifecycle (unhandled/stale/suppressed/ok), but a "show me every
 // CRITICAL" view wants them grouped by status. A CRITICAL that is stale and a
-// CRITICAL that is unhandled both land under CRITICAL here.
+// CRITICAL that is unhandled both land under CRITICAL here; a suppressed
+// check lands nowhere, as Gogios leaves it out of its summary counts.
 func TestByStatusGroupsAcrossSections(t *testing.T) {
 	r := &Report{
 		Sections: Sections{
@@ -709,8 +713,8 @@ func TestByStatusGroupsAcrossSections(t *testing.T) {
 	if len(by["WARNING"]) != 1 || by["WARNING"][0].Name != "w1" {
 		t.Errorf("WARNING = %+v, want [w1]", by["WARNING"])
 	}
-	if len(by["UNKNOWN"]) != 1 {
-		t.Errorf("UNKNOWN = %d, want 1", len(by["UNKNOWN"]))
+	if len(by["UNKNOWN"]) != 0 {
+		t.Errorf("UNKNOWN = %+v, want none (the only UNKNOWN is suppressed)", by["UNKNOWN"])
 	}
 	if len(by["OK"]) != 2 {
 		t.Errorf("OK = %d, want 2", len(by["OK"]))
@@ -776,6 +780,70 @@ func TestByStatusListsStatusChangedChecksOnce(t *testing.T) {
 	}
 	if r.Sections.Unhandled[0].PrevStatus != "" {
 		t.Errorf("ByStatus mutated the report: Unhandled[0].PrevStatus = %q", r.Sections.Unhandled[0].PrevStatus)
+	}
+}
+
+// TestByStatusLeavesOutSuppressedChecks pins that a suppressed CRITICAL is
+// not a CRITICAL drill-down entry (Gogios excludes it from summary.critical;
+// it has its own "suppressed" drill-down), while Check still finds it.
+func TestByStatusLeavesOutSuppressedChecks(t *testing.T) {
+	r, err := parse([]byte(reportJSON))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const name = "Check Load r2.wg0.wan.buetow.org"
+
+	for _, c := range r.ByStatus()["CRITICAL"] {
+		if c.Name == name {
+			t.Errorf("CRITICAL drill-down lists the suppressed %q", name)
+		}
+	}
+	if got, ok := r.Check(name); !ok || got.Status != "CRITICAL" {
+		t.Errorf("Check(suppressed) = %+v ok=%v, want the suppressed CRITICAL", got, ok)
+	}
+}
+
+// TestByStatusKeepsAnOrphanedStatusChange pins the safety net: a
+// statusChanged entry with no twin in any lifecycle section (Gogios never
+// writes one) is still listed once under its Status and found by Check,
+// rather than silently dropped -- while a statusChanged entry whose twin is
+// suppressed is not an orphan and stays out of the severity drill-down.
+func TestByStatusKeepsAnOrphanedStatusChange(t *testing.T) {
+	r := &Report{Sections: Sections{
+		StatusChanged: []Check{
+			{Name: "orphan", Status: "WARNING", PrevStatus: "OK"},
+			{Name: "muted", Status: "CRITICAL", PrevStatus: "OK"},
+		},
+		Unhandled:  []Check{{Name: "w1", Status: "WARNING"}},
+		Suppressed: []Check{{Name: "muted", Status: "CRITICAL"}},
+	}}
+
+	by := r.ByStatus()
+	if got := by["WARNING"]; len(got) != 2 || got[1].Name != "orphan" || got[1].PrevStatus != "OK" {
+		t.Errorf("WARNING = %+v, want [w1 orphan(prev OK)]", got)
+	}
+	if got := by["CRITICAL"]; len(got) != 0 {
+		t.Errorf("CRITICAL = %+v, want none (muted's twin is suppressed)", got)
+	}
+	if got, ok := r.Check("orphan"); !ok || got.PrevStatus != "OK" {
+		t.Errorf("Check(orphan) = %+v ok=%v, want the statusChanged entry", got, ok)
+	}
+}
+
+// TestPrevStatusKeepsTheLifecycleEntrysOwn pins withPrevStatus's other
+// branch: a lifecycle entry that already carries a PrevStatus keeps it rather
+// than being overwritten by its statusChanged twin's.
+func TestPrevStatusKeepsTheLifecycleEntrysOwn(t *testing.T) {
+	r := &Report{Sections: Sections{
+		StatusChanged: []Check{{Name: "c1", Status: "CRITICAL", PrevStatus: "OK"}},
+		Unhandled:     []Check{{Name: "c1", Status: "CRITICAL", PrevStatus: "WARNING"}},
+	}}
+
+	if got := r.ByStatus()["CRITICAL"]; len(got) != 1 || got[0].PrevStatus != "WARNING" {
+		t.Errorf("ByStatus CRITICAL = %+v, want one entry keeping prevStatus WARNING", got)
+	}
+	if got, ok := r.Check("c1"); !ok || got.PrevStatus != "WARNING" {
+		t.Errorf("Check(c1) = %+v ok=%v, want prevStatus WARNING", got, ok)
 	}
 }
 

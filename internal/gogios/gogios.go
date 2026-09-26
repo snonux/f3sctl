@@ -75,8 +75,8 @@ type Summary struct {
 // Suppressed, and an OK check lives in Ok. StatusChanged is the transient
 // "changed since the last notification" view: a second copy (with
 // PrevStatus) of checks already listed in Unhandled or Ok, not a section of
-// its own. ByStatus rebuilds a flat per-status index from the lifecycle
-// sections only.
+// its own. ByStatus rebuilds a flat per-status index from the sections
+// behind the summary counts (Unhandled, Stale, Ok).
 type Sections struct {
 	StatusChanged []Check `json:"statusChanged"`
 	Unhandled     []Check `json:"unhandled"`
@@ -144,29 +144,38 @@ func ClearCache(cfg config.Config) error {
 	return nil
 }
 
-// ByStatus indexes the report into a per-status map for drill-down: every
-// check, grouped by its Status (CRITICAL/WARNING/UNKNOWN/OK as Gogios spells
-// them), from the union of the lifecycle sections. A "show me every CRITICAL"
-// view is the union of CRITICALs across Unhandled, Stale and Suppressed --
+// ByStatus indexes the report into a per-status map for the severity
+// drill-downs: every check Gogios counts in its summary, grouped by its Status
+// (CRITICAL/WARNING/UNKNOWN/OK as Gogios spells them). A "show me every
+// CRITICAL" view is the union of CRITICALs across Unhandled and Stale --
 // Gogios groups by lifecycle, the caller wants them grouped by status, so
-// this re-indexes. Each check appears once: StatusChanged is not unioned in
-// (see lifecycleSections), only its PrevStatus is carried over.
+// this re-indexes. Suppressed checks are left out, as Gogios leaves them out
+// of its summary counts; they have their own drill-down (Sections.Suppressed).
+//
+// Each check appears once: StatusChanged is not unioned in (see
+// lifecycleSections), only its PrevStatus is carried over. A StatusChanged
+// entry with no twin in any lifecycle section is still listed (see
+// orphanedChanges), so a producer quirk never silently hides a check.
 func (r *Report) ByStatus() map[string][]Check {
 	prev := r.prevStatuses()
 	out := map[string][]Check{}
-	for _, cs := range r.lifecycleSections() {
+	for _, cs := range r.severitySections() {
 		for _, c := range cs {
 			c = withPrevStatus(c, prev)
 			out[c.Status] = append(out[c.Status], c)
 		}
 	}
+	for _, c := range r.orphanedChanges() {
+		out[c.Status] = append(out[c.Status], c)
+	}
 	return out
 }
 
-// Check finds one check by name across the lifecycle sections, with its
-// PrevStatus filled in when it changed since the last notification. ok is
-// false when no check has that name. Names are unique across the lifecycle
-// sections.
+// Check finds one check by name across the lifecycle sections, suppressed
+// ones included, with its PrevStatus filled in when it changed since the last
+// notification; failing that, it falls back to an orphaned StatusChanged
+// entry. ok is false when no check has that name. Names are unique across
+// the lifecycle sections.
 func (r *Report) Check(name string) (Check, bool) {
 	for _, cs := range r.lifecycleSections() {
 		for _, c := range cs {
@@ -175,7 +184,24 @@ func (r *Report) Check(name string) (Check, bool) {
 			}
 		}
 	}
+	// Not in any lifecycle section, so any StatusChanged match is an orphan.
+	for _, c := range r.Sections.StatusChanged {
+		if c.Name == name {
+			return c, true
+		}
+	}
 	return Check{}, false
+}
+
+// severitySections returns the sections behind Gogios's summary counts:
+// Unhandled, Stale and Ok. Suppressed is absent because Gogios excludes
+// suppressed checks from those counts.
+func (r *Report) severitySections() [][]Check {
+	return [][]Check{
+		r.Sections.Unhandled,
+		r.Sections.Stale,
+		r.Sections.Ok,
+	}
 }
 
 // lifecycleSections returns the sections that partition the report: every
@@ -184,12 +210,26 @@ func (r *Report) Check(name string) (Check, bool) {
 // section (Unhandled or Ok; a stale or suppressed check is never listed as
 // changed), so unioning it in would list every changed check twice.
 func (r *Report) lifecycleSections() [][]Check {
-	return [][]Check{
-		r.Sections.Unhandled,
-		r.Sections.Stale,
-		r.Sections.Suppressed,
-		r.Sections.Ok,
+	return append(r.severitySections(), r.Sections.Suppressed)
+}
+
+// orphanedChanges returns the StatusChanged entries whose name appears in no
+// lifecycle section. Gogios never writes one, but should a producer (or a
+// federated merge) ever do so, the check is listed rather than dropped.
+func (r *Report) orphanedChanges() []Check {
+	listed := map[string]bool{}
+	for _, cs := range r.lifecycleSections() {
+		for _, c := range cs {
+			listed[c.Name] = true
+		}
 	}
+	var out []Check
+	for _, c := range r.Sections.StatusChanged {
+		if !listed[c.Name] {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // prevStatuses maps each StatusChanged check's name to its PrevStatus. Only

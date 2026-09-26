@@ -660,7 +660,8 @@ func runGogios(cfg config.Config, args []string, stdout, stderr io.Writer) error
 //
 // Mirrors internal/httpapi/gogiosapi/handlers.go's checksForStatus exactly:
 // "critical"/"warning"/"unknown"/"ok" are severities (Report.ByStatus unions
-// every lifecycle section by each check's own Status); "stale"/"suppressed"
+// the Unhandled, Stale and Ok sections by each check's own Status, leaving
+// Suppressed out as Gogios's summary counts do); "stale"/"suppressed"
 // are lifecycle groupings instead, read from Sections directly, since a
 // stale or suppressed check keeps whatever severity it already had. Keep the
 // two implementations in sync if this split ever changes.

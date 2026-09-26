@@ -50,11 +50,13 @@ import (
 // one OK. The stale CRITICAL's name carries both a space and a dot, so it
 // doubles as the "detail by name" fixture (scope item 3). The unhandled
 // CRITICAL just changed, so -- as Gogios writes it -- it is also listed in
-// "statusChanged"; the drill-down must still name it only once.
+// "statusChanged"; the drill-down must still name it only once. A third,
+// suppressed CRITICAL is left out of summary.critical (as Gogios's countBy
+// does), so it must appear under /gogios/suppressed but not /gogios/critical.
 const gogiosE2EReportJSON = `{
-  "subject": "GOGIOS Report [C:2 W:1 U:0 S:1 SU:0 OK:1]",
+  "subject": "GOGIOS Report [C:2 W:1 U:0 S:1 SU:1 OK:1]",
   "lastUpdated": "2026-08-27T08:58:18+02:00",
-  "summary": {"critical":2,"warning":1,"unknown":0,"stale":1,"suppressed":0,"ok":1},
+  "summary": {"critical":2,"warning":1,"unknown":0,"stale":1,"suppressed":1,"ok":1},
   "sections": {
     "statusChanged": [
       {"name":"Check Ping6 r1.wg0.wan.buetow.org","status":"CRITICAL","prevStatus":"OK","output":"timed out","epoch":1724744298}
@@ -65,6 +67,9 @@ const gogiosE2EReportJSON = `{
     ],
     "stale": [
       {"name":"Check Disk r0.internal server.local","status":"CRITICAL","output":"disk full","epoch":1724000000,"lastCheckedAgeSeconds":99999}
+    ],
+    "suppressed": [
+      {"name":"Check Load r2.wg0.wan.buetow.org","status":"CRITICAL","output":"load 42","epoch":1724744302}
     ],
     "ok": [
       {"name":"Check Ping4 master.buetow.org","status":"OK","output":"PING OK","epoch":1724744300}
@@ -244,7 +249,7 @@ func TestGogiosE2EOverview(t *testing.T) {
 		t.Fatalf("Follow(gogios): %v", err)
 	}
 
-	if overview.Properties["subject"] != "GOGIOS Report [C:2 W:1 U:0 S:1 SU:0 OK:1]" {
+	if overview.Properties["subject"] != "GOGIOS Report [C:2 W:1 U:0 S:1 SU:1 OK:1]" {
 		t.Errorf("subject = %v", overview.Properties["subject"])
 	}
 	if overview.Properties["lastUpdated"] != "2026-08-27T08:58:18+02:00" {
@@ -304,6 +309,52 @@ func TestGogiosE2ECriticalDrillDownUnionsAcrossSections(t *testing.T) {
 	}
 	if got, _ := critical.Entities[0].Properties["prevStatus"].(string); got != "OK" {
 		t.Errorf("critical[0].prevStatus = %q, want OK (carried over from statusChanged)", got)
+	}
+}
+
+// TestGogiosE2ESuppressedCriticalIsOnlyUnderSuppressed pins, over the real
+// wire, that a suppressed CRITICAL is left out of /gogios/critical (whose
+// length equals summary.critical) but listed under /gogios/suppressed, and
+// that its self link still resolves to its detail.
+func TestGogiosE2ESuppressedCriticalIsOnlyUnderSuppressed(t *testing.T) {
+	upstream, _ := gogiosE2EUpstream(t, gogiosE2EReportJSON, http.StatusOK)
+	e2e, cfg, apiKey := gogiosE2EServer(t, upstream)
+	c := newGogiosE2EClient(t, e2e.URL, apiKey, cfg, io.Discard)
+	ctx := context.Background()
+	const name = "Check Load r2.wg0.wan.buetow.org"
+
+	root, _ := c.Root(ctx)
+	overview, err := c.Follow(ctx, root, "gogios")
+	if err != nil {
+		t.Fatalf("Follow(gogios): %v", err)
+	}
+	summary, _ := overview.Properties["summary"].(map[string]any)
+	critical, err := c.Follow(ctx, overview, "critical")
+	if err != nil {
+		t.Fatalf("Follow(critical): %v", err)
+	}
+	if want, _ := summary["critical"].(float64); float64(len(critical.Entities)) != want {
+		t.Errorf("critical checks = %d, want %v (summary.critical)", len(critical.Entities), want)
+	}
+	for _, e := range critical.Entities {
+		if e.Properties["name"] == name {
+			t.Errorf("/gogios/critical lists the suppressed %q", name)
+		}
+	}
+
+	suppressed, err := c.Follow(ctx, overview, "suppressed")
+	if err != nil {
+		t.Fatalf("Follow(suppressed): %v", err)
+	}
+	if len(suppressed.Entities) != 1 || suppressed.Entities[0].Properties["name"] != name {
+		t.Fatalf("suppressed checks = %+v, want exactly [%s]", suppressed.Entities, name)
+	}
+	check, err := c.Follow(ctx, suppressed.Entities[0], "self")
+	if err != nil {
+		t.Fatalf("Follow(self) on the suppressed check: %v", err)
+	}
+	if check.Properties["status"] != "CRITICAL" {
+		t.Errorf("suppressed check status = %v, want CRITICAL", check.Properties["status"])
 	}
 }
 
