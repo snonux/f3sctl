@@ -82,7 +82,7 @@ func (f *fakeMonitoringAPI) monitoring() Entity {
 	}
 	if anyMuted {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-unmute", Method: "POST", Href: "/monitoring/unmute", CLIVerb: "monitoring unmute"})
-	} else if len(f.gwErr) == 0 {
+	} else {
 		e.Actions = append(e.Actions, Action{Name: "monitoring-mute", Method: "POST", Href: "/monitoring/mute", CLIVerb: "monitoring mute"})
 	}
 	return e
@@ -185,17 +185,20 @@ func TestSetMuteReportsAPartialSuccess(t *testing.T) {
 
 // TestRunMonitoringStatusListsTheAvailableActions drives showMonitoring end
 // to end: the line lists the mute half the server currently offers, by CLI
-// verb, and is left out entirely when the server offers neither (the fake
-// withholds mute while a gateway is unreadable, as the real server does).
+// verb. An unreadable gateway does not withhold mute -- the real server
+// offers it whenever no readable gateway is muted (gogiosapi.Muted, via
+// power.AnyMuted, skips errored gateways) -- so that case still lists
+// "monitoring mute". The no-actions branch of printAvailable is covered by
+// TestRunStatusWithNoActionsPrintsNoAvailableLine.
 func TestRunMonitoringStatusListsTheAvailableActions(t *testing.T) {
 	cases := []struct {
 		name  string
 		setup func(*fakeMonitoringAPI)
-		want  string // "" means no available-now line at all
+		want  string
 	}{
 		{"nothing muted", func(*fakeMonitoringAPI) {}, "available now: monitoring mute\n"},
 		{"a gateway muted", func(f *fakeMonitoringAPI) { f.muted["blowfish"] = true }, "available now: monitoring unmute\n"},
-		{"no actions", func(f *fakeMonitoringAPI) { f.gwErr["fishfinger"] = "ssh: timeout" }, ""},
+		{"a gateway unreadable", func(f *fakeMonitoringAPI) { f.gwErr["fishfinger"] = "ssh: timeout" }, "available now: monitoring mute\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,11 +209,7 @@ func TestRunMonitoringStatusListsTheAvailableActions(t *testing.T) {
 			if err := Run(context.Background(), c, []string{"monitoring", "status"}, false); err != nil {
 				t.Fatalf("Run(monitoring status): %v", err)
 			}
-			got := out.String()
-			if tc.want == "" && strings.Contains(got, "available now") {
-				t.Errorf("output = %q, want no available-now line", got)
-			}
-			if tc.want != "" && !strings.Contains(got, tc.want) {
+			if got := out.String(); !strings.Contains(got, tc.want) {
 				t.Errorf("output = %q, want it to contain %q", got, tc.want)
 			}
 		})
