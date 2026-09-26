@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -109,6 +110,24 @@ func TestMonitorUnmuteGogiosReportsAFailingSwitch(t *testing.T) {
 	}
 }
 
+// After a timed-out wait, a failing switch's error must stay matchable next to
+// ErrClusterIncomplete: the API route's error wraps its cause (a cancelled
+// request, say), and the combined error must not flatten it.
+func TestMonitorUnmuteGogiosTimeoutKeepsTheSwitchErrorMatchable(t *testing.T) {
+	cause := errors.New("api: request cancelled")
+	sw := &fakeSwitch{err: fmt.Errorf("could not gogios-unmute Gogios via the API: %w", cause)}
+	m := newTestMonitor(t, &fakeGatewayVerb{}, oneNodeDown, []string{"blowfish"}, []string{"r0", "r1"}, -time.Second)
+	m.WithSwitch(sw)
+
+	err := m.UnmuteGogios(context.Background(), io.Discard, nil)
+	if !errors.Is(err, ErrClusterIncomplete) || !errors.Is(err, cause) {
+		t.Fatalf("err = %v, want both ErrClusterIncomplete and the switch's wrapped cause", err)
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("err = %q, want a single line", err)
+	}
+}
+
 // A cancelled wake with a switch installed must not suggest an SSH command
 // that this machine has no key for.
 func TestMonitorUnmuteGogiosCancelledWithSwitchSuggestsTheCLI(t *testing.T) {
@@ -120,8 +139,12 @@ func TestMonitorUnmuteGogiosCancelledWithSwitchSuggestsTheCLI(t *testing.T) {
 	cancel()
 
 	var log bytes.Buffer
-	if err := m.UnmuteGogios(ctx, &log, nil); !errors.Is(err, context.Canceled) {
+	err := m.UnmuteGogios(ctx, &log, nil)
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if !errors.Is(err, ErrWaitAbandoned) || errors.Is(err, ErrClusterIncomplete) {
+		t.Errorf("err = %v, want ErrWaitAbandoned and not ErrClusterIncomplete", err)
 	}
 	if len(sw.callsList()) != 0 {
 		t.Error("an aborted wake un-muted, want the mute kept")

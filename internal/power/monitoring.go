@@ -69,10 +69,16 @@ func (e *Engine) monitorBackend() gogiosMonitor {
 // installs the API route when no key is readable locally -- see
 // gogios.GatewaySwitch.
 //
-// It installs a fresh gogios.Monitor built exactly as New builds one, so it
-// replaces a monitor a test substituted; production only ever calls it on an
-// Engine from New.
+// When the Engine already holds a *gogios.Monitor (New wires one), the switch
+// is installed on that monitor, keeping everything else it was built with.
+// Otherwise -- a hand-built Engine, or a test's fake monitor, which has no
+// switch to set -- it installs a fresh gogios.Monitor built exactly as New
+// builds one.
 func (e *Engine) WithGatewaySwitch(s gogios.GatewaySwitch) *Engine {
+	if m, ok := e.monitor.(*gogios.Monitor); ok {
+		m.WithSwitch(s)
+		return e
+	}
 	e.monitor = e.newMonitor().WithSwitch(s)
 	return e
 }

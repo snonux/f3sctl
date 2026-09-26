@@ -10,10 +10,13 @@
 // copy so a browse session -- overview, drill-down by status, per-check
 // detail -- does not re-fetch on every click.
 //
-// Nothing here is policy: this package has no opinion on which alerts matter.
-// This file is the read side (alert browsing); monitor.go is its write-side
-// sibling, the Monitor that owns the mute-marker concern. Both live here, off
-// power.Engine, which only decides when to mute and un-mute.
+// This file is the read side (alert browsing), and it carries no policy: it
+// has no opinion on which alerts matter. monitor.go is its write-side
+// sibling, the Monitor that owns the mute-marker concern -- and that one does
+// carry policy: how long the wake waits for the k3s nodes, that the marker is
+// cleared anyway when the wait runs out, and how often magic packets are
+// re-sent meanwhile. power.Engine only decides when to mute (a shutdown) and
+// when to wake and ask for the un-mute.
 package gogios
 
 import (

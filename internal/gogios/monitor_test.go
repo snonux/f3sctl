@@ -267,8 +267,14 @@ func TestMonitorUnmuteGogiosLeavesTheMarkerWhenTheWakeIsCancelled(t *testing.T) 
 	cancel()
 
 	var log bytes.Buffer
-	if err := m.UnmuteGogios(ctx, &log, nil); !errors.Is(err, context.Canceled) {
+	err := m.UnmuteGogios(ctx, &log, nil)
+	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("UnmuteGogios err = %v, want context.Canceled", err)
+	}
+	// ErrWaitAbandoned is how power.Engine's wake tells "marker untouched"
+	// apart from a cancel during the un-mute itself.
+	if !errors.Is(err, ErrWaitAbandoned) || errors.Is(err, ErrClusterIncomplete) {
+		t.Errorf("UnmuteGogios err = %v, want ErrWaitAbandoned and not ErrClusterIncomplete", err)
 	}
 	if got := verb.callsList(); len(got) != 0 {
 		t.Errorf("gogios-unmute calls = %v, want none: an aborted wake keeps the mute", got)

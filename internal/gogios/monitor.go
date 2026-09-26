@@ -5,9 +5,14 @@ package gogios
 // wait for the k3s nodes before it clears a mute it made. It is the
 // write-side sibling of the report reader in gogios.go: both are about
 // Gogios, neither is about powering hosts, so both live here rather than in
-// internal/power (task ha). power.Engine keeps the sequencing policy (off
-// mutes, on un-mutes after the cluster answers) and reaches this mechanism
-// through a small interface of its own.
+// internal/power (task ha).
+//
+// The un-mute policy lives here too, on Monitor: the wake waits for the k3s
+// nodes (UnmuteGogios, bounded by UnmuteTimeout), clears the marker anyway
+// when that budget runs out, keeps it only when the wait is cancelled, and
+// throttles the rewake callback to one per rewakeGap. power.Engine decides
+// only when: a shutdown mutes, a wake sends its magic packets and then asks
+// for the un-mute, reaching this type through a small interface of its own.
 //
 // The transport is the allowlisted-agent-verb SSH call power's shutdown and
 // zusb paths make, narrowed to the one method this concern uses (GatewayVerb,
@@ -295,8 +300,10 @@ func (m *Monitor) UnmuteGogios(ctx context.Context, log io.Writer, rewake func()
 	case waitErr != nil && unmuteErr != nil:
 		// One line, like every other error this package returns; wrapping
 		// both keeps errors.Is(err, ErrClusterIncomplete) working for
-		// power.Engine's wake and still lets a caller match the gateway
-		// error (a cancelled un-mute, say).
+		// power.Engine's wake and lets a caller match whatever the un-mute
+		// error itself wraps. Only the GatewaySwitch (API) route's error
+		// wraps anything: the SSH route's eachGateway builds a fresh error
+		// naming the failed gateways, so there is nothing further to match.
 		return fmt.Errorf("%w; %w", waitErr, unmuteErr)
 	case waitErr != nil:
 		return waitErr
