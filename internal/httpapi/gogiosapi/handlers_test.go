@@ -137,8 +137,8 @@ func TestHandleGogiosReportsAFetchErrorAsAProperty(t *testing.T) {
 // TestHandleGogiosStatusFiltersBySeverity pins the four severity categories:
 // each is the union, across Unhandled, Stale and Ok (the sections behind
 // Gogios's summary counts), of checks with that Status -- see
-// checksForStatus. A check also listed in StatusChanged must appear once, not
-// twice, and a suppressed check not at all.
+// gogios.Report.ChecksFor. A check also listed in StatusChanged must appear
+// once, not twice, and a suppressed check not at all.
 func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 	sf := testSurface()
 	state := contract.State{Gogios: gogiosSample()}
@@ -436,4 +436,41 @@ func equalLists(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestDrillDownsFollowGogiosStatuses pins that the API's drill-down surface
+// is built from gogios.Statuses, the list the local CLI and remote client
+// also parse against: one /gogios/<status> route per category and one
+// overview link per category, both in Statuses order, so no consumer can
+// offer a category the others do not know.
+func TestDrillDownsFollowGogiosStatuses(t *testing.T) {
+	sf := testSurface()
+	want := gogios.Statuses()
+
+	// A drill-down is a GET /gogios/<status> named after its category; the
+	// per-check lookup (/gogios/check) also matches that shape but takes a
+	// ?name= query, which no drill-down does.
+	var routes []string
+	for _, r := range sf.Routes() {
+		if status, ok := strings.CutPrefix(r.Path, "/gogios/"); ok && r.Name == "gogios-"+status && len(r.Query) == 0 {
+			routes = append(routes, status)
+		}
+	}
+	if !equalLists(routes, want) {
+		t.Errorf("drill-down routes = %v, want %v", routes, want)
+	}
+
+	e, _, err := sf.handleOverview(context.Background(), contract.State{Gogios: gogiosSample()}, contract.Request{})
+	if err != nil {
+		t.Fatalf("handleOverview: %v", err)
+	}
+	var links []string
+	for _, l := range e.Links {
+		if status, ok := strings.CutPrefix(l.Href, "/gogios/"); ok && len(l.Rel) == 1 && l.Rel[0] == status {
+			links = append(links, status)
+		}
+	}
+	if !equalLists(links, want) {
+		t.Errorf("overview drill-down links = %v, want %v", links, want)
+	}
 }

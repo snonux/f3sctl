@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/powertest"
@@ -1015,7 +1016,7 @@ func TestParseGogiosArgsValidatesSpellings(t *testing.T) {
 // gogiosReportJSON is a small, valid Gogios report fixture for the local-path
 // tests below: one unhandled CRITICAL, one stale WARNING (lifecycle stale,
 // severity WARNING), one suppressed UNKNOWN (lifecycle suppressed, severity
-// UNKNOWN -- the other lifecycle-vs-severity case gogiosChecksForStatus'
+// UNKNOWN -- the other lifecycle-vs-severity case gogios.Report.ChecksFor's
 // split exists for), a suppressed CRITICAL, and one OK. The summary counts
 // leave both suppressed checks out, as Gogios's countBy does. The unhandled
 // CRITICAL just changed, so -- as Gogios writes it -- it is also listed in
@@ -1084,9 +1085,9 @@ func TestGogiosLocalShowsTheOverview(t *testing.T) {
 	}
 }
 
-// TestGogiosLocalDrillsDownByCategory pins gogiosChecksForStatus' full split
-// at the local layer, both branches: "critical" goes through the default
-// case (Report.ByStatus, a severity), while "stale" and "suppressed" go
+// TestGogiosLocalDrillsDownByCategory pins gogios.Report.ChecksFor's full
+// split at the local layer, both branches: "critical" goes through the
+// severity case (Report.ByStatus), while "stale" and "suppressed" go
 // through their own cases (Report.Sections, a lifecycle grouping) -- each
 // must list its check by lifecycle/severity, not by a (nonexistent) "STALE"
 // or "SUPPRESSED" Status value.
@@ -1245,6 +1246,51 @@ func TestGogiosRejectsUnknownVerbLocally(t *testing.T) {
 			}
 			if out != "" {
 				t.Errorf("stdout = %q, want nothing: no gogios read may have run", out)
+			}
+		})
+	}
+}
+
+// TestGogiosLocalCoversEveryStatus pins the local CLI against gogios.Statuses,
+// the list the API's drill-down routes and the remote client also use: every
+// category parses as its own verb, routes to the API by default (isGogios),
+// and --local prints exactly what gogios.Report.ChecksFor selects for it --
+// severities by Status, stale/suppressed by lifecycle section, and an empty
+// category as "no <status> checks". The table must cover Statuses exactly.
+func TestGogiosLocalCoversEveryStatus(t *testing.T) {
+	want := map[string]string{
+		"critical": "CRITICAL: Check Ping6 r1.wg0.wan.buetow.org - timed out\n",
+		"warning":  "WARNING: Check SWAP blowfish - SWAP WARNING\n",
+		"unknown":  "no unknown checks\n", // the only UNKNOWN is suppressed
+		"stale":    "WARNING: Check SWAP blowfish - SWAP WARNING\n",
+		"suppressed": "UNKNOWN: Check Disk fishfinger - no data\n" +
+			"CRITICAL: Check Load r2.wg0.wan.buetow.org - load 42\n",
+		"ok": "OK: Check Ping4 master.buetow.org - PING OK\n",
+	}
+	if len(want) != len(gogios.Statuses()) {
+		t.Fatalf("table covers %d categories, gogios.Statuses() has %d", len(want), len(gogios.Statuses()))
+	}
+
+	for _, status := range gogios.Statuses() {
+		t.Run(status, func(t *testing.T) {
+			wantOut, ok := want[status]
+			if !ok {
+				t.Fatalf("no expectation for gogios.Statuses() category %q", status)
+			}
+			if sp, ok := parseGogiosArgs([]string{status}); !ok || sp.verb != status {
+				t.Errorf("parseGogiosArgs([%s]) = %+v, %v; want verb %q", status, sp, ok, status)
+			}
+			if !isGogios([]string{"gogios", status}) {
+				t.Errorf("isGogios(gogios %s) = false, want true", status)
+			}
+
+			srv, _ := gogiosFakeServer(t, gogiosReportJSON, http.StatusOK)
+			out, _, err := runCLI(t, gogiosTestConfig(t, srv), hostsUp(), "--local", "gogios", status)
+			if err != nil {
+				t.Fatalf("--local gogios %s: %v", status, err)
+			}
+			if out != wantOut {
+				t.Errorf("--local gogios %s output = %q, want %q", status, out, wantOut)
 			}
 		})
 	}

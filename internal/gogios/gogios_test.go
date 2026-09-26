@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -892,5 +893,110 @@ func TestParseIgnoresUnknownFields(t *testing.T) {
 	}
 	if rep.Summary.Ok != 2 {
 		t.Errorf("reportJSON Summary.Ok = %d, want 2", rep.Summary.Ok)
+	}
+}
+
+// TestStatusesListsTheSixCategoriesInOrder pins the single source every
+// drill-down consumer (the API's routes and overview links, the local CLI
+// grammar, the remote client's grammar and detail search) now reads: the six
+// subject-headline categories, in headline order. It also pins that a caller
+// cannot mutate the list for everyone else.
+func TestStatusesListsTheSixCategoriesInOrder(t *testing.T) {
+	want := []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
+	got := Statuses()
+	if !slices.Equal(got, want) {
+		t.Fatalf("Statuses() = %v, want %v", got, want)
+	}
+
+	got[0] = "tampered"
+	if again := Statuses(); !slices.Equal(again, want) {
+		t.Errorf("Statuses() after a caller modified its copy = %v, want %v", again, want)
+	}
+}
+
+// checksForReport has at least one check in every Statuses category, so
+// ChecksFor is exercised non-empty for each: an unhandled CRITICAL (changed
+// from OK) and UNKNOWN, a stale WARNING, a suppressed CRITICAL, and an OK.
+func checksForReport() *Report {
+	return &Report{Sections: Sections{
+		StatusChanged: []Check{{Name: "c1", Status: "CRITICAL", PrevStatus: "OK"}},
+		Unhandled: []Check{
+			{Name: "c1", Status: "CRITICAL"},
+			{Name: "u1", Status: "UNKNOWN"},
+		},
+		Stale:      []Check{{Name: "w1", Status: "WARNING"}},
+		Suppressed: []Check{{Name: "s1", Status: "CRITICAL"}},
+		Ok:         []Check{{Name: "o1", Status: "OK"}},
+	}}
+}
+
+func checkNames(cs []Check) []string {
+	var out []string
+	for _, c := range cs {
+		out = append(out, c.Name)
+	}
+	return out
+}
+
+// TestChecksForSelectsEachCategory pins the status-to-checks split for every
+// Statuses category: severities come from ByStatus (a stale WARNING is a
+// WARNING, a suppressed CRITICAL is not a CRITICAL, a changed check is listed
+// once with its PrevStatus), while "stale" and "suppressed" read their
+// lifecycle sections. The table must cover Statuses exactly, so a category
+// added there without a case here fails.
+func TestChecksForSelectsEachCategory(t *testing.T) {
+	want := map[string][]string{
+		"critical":   {"c1"},
+		"warning":    {"w1"},
+		"unknown":    {"u1"},
+		"stale":      {"w1"},
+		"suppressed": {"s1"},
+		"ok":         {"o1"},
+	}
+	if len(want) != len(Statuses()) {
+		t.Fatalf("table covers %d categories, Statuses() has %d", len(want), len(Statuses()))
+	}
+
+	r := checksForReport()
+	for _, status := range Statuses() {
+		t.Run(status, func(t *testing.T) {
+			wantNames, ok := want[status]
+			if !ok {
+				t.Fatalf("no expectation for Statuses() category %q", status)
+			}
+			if got := checkNames(r.ChecksFor(status)); !slices.Equal(got, wantNames) {
+				t.Errorf("ChecksFor(%q) = %v, want %v", status, got, wantNames)
+			}
+		})
+	}
+
+	if got := r.ChecksFor("critical"); len(got) != 1 || got[0].PrevStatus != "OK" {
+		t.Errorf("ChecksFor(critical) = %+v, want c1 carrying prevStatus OK", got)
+	}
+}
+
+// TestChecksForRejectsAnUnknownStatus is the negative case: anything outside
+// Statuses -- a typo, the upper-case Status spelling Gogios itself writes, a
+// section name that is not a category -- selects nothing, rather than being
+// looked up in ByStatus and happening to match.
+func TestChecksForRejectsAnUnknownStatus(t *testing.T) {
+	r := checksForReport()
+	for _, status := range []string{"", "bogus", "CRITICAL", "Critical", "STALE", "statusChanged", "unhandled", " ok"} {
+		if got := r.ChecksFor(status); got != nil {
+			t.Errorf("ChecksFor(%q) = %+v, want nil", status, got)
+		}
+	}
+}
+
+// TestChecksForDoesNotAliasTheReport pins that a caller modifying the
+// returned lifecycle checks cannot rewrite the report's own sections.
+func TestChecksForDoesNotAliasTheReport(t *testing.T) {
+	r := checksForReport()
+	for _, status := range []string{"stale", "suppressed"} {
+		got := r.ChecksFor(status)
+		got[0].Name = "tampered"
+	}
+	if r.Sections.Stale[0].Name != "w1" || r.Sections.Suppressed[0].Name != "s1" {
+		t.Errorf("ChecksFor aliased the report: stale=%+v suppressed=%+v", r.Sections.Stale, r.Sections.Suppressed)
 	}
 }

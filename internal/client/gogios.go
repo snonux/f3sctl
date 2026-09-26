@@ -6,14 +6,9 @@ import (
 	"io"
 	"slices"
 	"strings"
-)
 
-// gogiosStatuses is the fixed set of Gogios drill-down categories, mirroring
-// internal/httpapi/gogiosapi/routes.go's Statuses var and
-// internal/cli.gogiosStatuses. Kept as a separate copy rather than exported
-// and shared across packages, the same deliberate duplication the route table
-// tolerates internally for these six literals.
-var gogiosStatuses = []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
+	"github.com/snonux/f3sctl/internal/gogios"
+)
 
 // runGogios dispatches a `gogios` command against the remote API. args has
 // the leading "gogios" token already stripped.
@@ -22,12 +17,22 @@ var gogiosStatuses = []string{"critical", "warning", "unknown", "stale", "suppre
 // via links (showGogios/showGogiosStatus/showGogiosCheck), not actions; only
 // "cache clear" is a POST, which reuses runAction the same way
 // monitoring-mute/unmute do -- see runAction's doc comment.
+//
+// The drill-down categories come from gogios.Statuses, the same list the
+// server builds its /gogios/<status> routes and overview links from, rather
+// than being derived from the overview's links at run time. They are CLI
+// grammar: `gogios <status>` must be accepted or rejected before any request
+// (as internal/cli's parseGogiosArgs does when routing here), and "detail"
+// searches them in a fixed order. Deriving them would cost a round trip just
+// to reject a typo and would mean guessing which overview rels (self, up,
+// monitoring, ...) are categories. Each category is still reached by
+// following its rel, never a literal path.
 func (c *Client) runGogios(ctx context.Context, args []string, force bool) error {
 	switch {
 	case len(args) == 0 || (len(args) == 1 && args[0] == "status"):
 		return c.showGogios(ctx)
 
-	case len(args) == 1 && slices.Contains(gogiosStatuses, args[0]):
+	case len(args) == 1 && slices.Contains(gogios.Statuses(), args[0]):
 		return c.showGogiosStatus(ctx, args[0])
 
 	case len(args) >= 2 && args[0] == "detail":
@@ -66,11 +71,11 @@ func (c *Client) showGogiosStatus(ctx context.Context, status string) error {
 	if err != nil {
 		return err
 	}
-	gogios, err := c.Follow(ctx, root, "gogios")
+	overview, err := c.Follow(ctx, root, "gogios")
 	if err != nil {
 		return err
 	}
-	list, err := c.Follow(ctx, gogios, status)
+	list, err := c.Follow(ctx, overview, status)
 	if err != nil {
 		return err
 	}
@@ -88,21 +93,21 @@ func (c *Client) showGogiosStatus(ctx context.Context, status string) error {
 // path in this whole package (see the package doc comment above). "detail
 // <name>" exists for the different case of an operator who already knows a
 // name (from an alert email, say) and has not browsed a drill-down first, so
-// this instead searches every category the same way the server's own
-// Report.Check does (a check's name is unique across the whole report), at
-// the cost of up to six requests instead of one.
+// this instead searches every gogios.Statuses category, in order, the same
+// way the server's own Report.Check does (a check's name is unique across
+// the whole report), at the cost of up to six requests instead of one.
 func (c *Client) showGogiosCheck(ctx context.Context, name string) error {
 	root, err := c.Root(ctx)
 	if err != nil {
 		return err
 	}
-	gogios, err := c.Follow(ctx, root, "gogios")
+	overview, err := c.Follow(ctx, root, "gogios")
 	if err != nil {
 		return err
 	}
 
-	for _, status := range gogiosStatuses {
-		list, err := c.Follow(ctx, gogios, status)
+	for _, status := range gogios.Statuses() {
+		list, err := c.Follow(ctx, overview, status)
 		if err != nil {
 			return err
 		}

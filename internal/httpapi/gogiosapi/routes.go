@@ -4,22 +4,9 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
 )
-
-// Statuses is the fixed set of Gogios drill-down categories, matching
-// the six counts in the report's own subject headline
-// ("[C:.. W:.. U:.. S:.. SU:.. OK:..]"). "stale" and "suppressed" are
-// lifecycle groupings (gogios.Report.Sections.Stale/Suppressed), not
-// severities -- a stale check keeps its own underlying CRITICAL/WARNING/
-// UNKNOWN/OK status -- which is why checksForStatus (handlers.go) handles
-// those two differently from the other four.
-//
-// internal/client and internal/cli keep their own copies of these six
-// literals, the same deliberate duplication the route table tolerates for
-// them (the client resolves from what the server advertises; these names are
-// also stable links).
-var Statuses = []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
 
 // Routes is this surface's complete slice of the API: the /monitoring
 // resource and its mute pair, then the read-only alert-browse family.
@@ -94,7 +81,7 @@ func (sf *Surface) monitoringRoutes() []contract.Route {
 }
 
 // reportRoutes is the read-only Gogios alert-browse surface: an overview, a
-// fixed drill-down route per Statuses category, a per-check detail lookup (by
+// fixed drill-down route per gogios.Statuses category, a per-check lookup (by
 // ?name=, not a path segment -- the composition root's Router matches exact
 // paths only, and a check name may itself contain spaces/slashes), and the
 // cache-clear action.
@@ -124,7 +111,7 @@ func (sf *Surface) reportRoutes() []contract.Route {
 		},
 	}
 
-	for _, status := range Statuses {
+	for _, status := range gogios.Statuses() {
 		out = append(out, contract.Route{
 			Name: "gogios-" + status, Title: "Gogios " + strings.ToUpper(status) + " checks",
 			Method: http.MethodGet, Path: "/gogios/" + status,

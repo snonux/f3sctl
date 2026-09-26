@@ -569,18 +569,9 @@ func printMonitoring(out io.Writer, states []power.GatewayMute) {
 	}
 }
 
-// gogiosStatuses is the fixed set of Gogios drill-down categories.
-//
-// Mirrors internal/httpapi/gogiosapi/routes.go's Statuses var. Kept as a
-// separate copy rather than exported and shared across packages, the same
-// duplication the route table already tolerates internally for these six
-// literals -- see that var's doc comment for the severity-vs-lifecycle split
-// this list spans.
-var gogiosStatuses = []string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
-
 // gogiosSpelling is the parsed shape of a `gogios` argument list.
 type gogiosSpelling struct {
-	verb string // "status", one of gogiosStatuses, "detail", or "cache-clear"
+	verb string // "status", one of gogios.Statuses(), "detail", or "cache-clear"
 	name string // the check name, for "detail" only
 }
 
@@ -603,7 +594,7 @@ func parseGogiosArgs(args []string) (sp gogiosSpelling, ok bool) {
 		return gogiosSpelling{verb: "status"}, true
 	case len(args) == 1 && args[0] == "status":
 		return gogiosSpelling{verb: "status"}, true
-	case len(args) == 1 && slices.Contains(gogiosStatuses, args[0]):
+	case len(args) == 1 && slices.Contains(gogios.Statuses(), args[0]):
 		return gogiosSpelling{verb: args[0]}, true
 	case len(args) >= 2 && args[0] == "detail":
 		// The name is everything after "detail", space-joined: a check's
@@ -656,30 +647,10 @@ func runGogios(ctx context.Context, cfg config.Config, args []string, stdout, st
 			return fmt.Errorf("no such Gogios check: %q", sp.name)
 		}
 		printGogiosCheck(stdout, check)
-	default: // one of gogiosStatuses
-		printGogiosChecks(stdout, sp.verb, gogiosChecksForStatus(report, sp.verb))
+	default: // one of gogios.Statuses()
+		printGogiosChecks(stdout, sp.verb, report.ChecksFor(sp.verb))
 	}
 	return nil
-}
-
-// gogiosChecksForStatus selects the checks for one gogiosStatuses category.
-//
-// Mirrors internal/httpapi/gogiosapi/handlers.go's checksForStatus exactly:
-// "critical"/"warning"/"unknown"/"ok" are severities (Report.ByStatus unions
-// the Unhandled, Stale and Ok sections by each check's own Status, leaving
-// Suppressed out as Gogios's summary counts do); "stale"/"suppressed"
-// are lifecycle groupings instead, read from Sections directly, since a
-// stale or suppressed check keeps whatever severity it already had. Keep the
-// two implementations in sync if this split ever changes.
-func gogiosChecksForStatus(r *gogios.Report, status string) []gogios.Check {
-	switch status {
-	case "stale":
-		return r.Sections.Stale
-	case "suppressed":
-		return r.Sections.Suppressed
-	default:
-		return r.ByStatus()[strings.ToUpper(status)]
-	}
 }
 
 func printGogiosOverview(out io.Writer, r *gogios.Report) {

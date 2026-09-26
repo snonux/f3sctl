@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -142,6 +143,52 @@ func ClearCache(cfg config.Config) error {
 		return err
 	}
 	return nil
+}
+
+// statuses is the fixed set of drill-down categories, in display order,
+// matching the six counts in the report's own subject headline
+// ("[C:.. W:.. U:.. S:.. SU:.. OK:..]"). An array rather than a slice, and
+// unexported, so no caller can reorder or grow it: Statuses hands out copies.
+//
+// Four are severities (a check's own Status, lower-cased) and two --
+// "stale" and "suppressed" -- are lifecycle groupings (Sections.Stale and
+// Sections.Suppressed): a stale or suppressed check keeps its own
+// CRITICAL/WARNING/UNKNOWN/OK status. ChecksFor owns that split.
+var statuses = [...]string{"critical", "warning", "unknown", "stale", "suppressed", "ok"}
+
+// Statuses returns the drill-down categories in display order. It is the
+// single source for the API's /gogios/<status> routes and overview links, the
+// local CLI's `gogios <status>` grammar, and the remote client's grammar and
+// detail search order. Each call returns a fresh copy, so a caller may keep or
+// modify the result without affecting anyone else.
+func Statuses() []string {
+	return slices.Clone(statuses[:])
+}
+
+// ChecksFor selects the checks in one Statuses category.
+//
+// "critical"/"warning"/"unknown"/"ok" are severities: the ByStatus entry for
+// the upper-cased status, i.e. every check Gogios counts in its summary with
+// that Status (suppressed ones excluded, changed ones listed once with their
+// PrevStatus). "stale"/"suppressed" are lifecycle groupings and read
+// Sections.Stale/Suppressed directly -- filtering ByStatus instead would
+// either double-count a stale check under its severity and "stale", or need a
+// Status value Gogios itself never writes.
+//
+// A status outside Statuses (misspelled, upper-cased, or a raw Gogios Status
+// such as "CRITICAL") selects nothing and returns nil. The result never
+// aliases the report's own sections.
+func (r *Report) ChecksFor(status string) []Check {
+	switch status {
+	case "stale":
+		return slices.Clone(r.Sections.Stale)
+	case "suppressed":
+		return slices.Clone(r.Sections.Suppressed)
+	}
+	if !slices.Contains(statuses[:], status) {
+		return nil
+	}
+	return r.ByStatus()[strings.ToUpper(status)]
 }
 
 // ByStatus indexes the report into a per-status map for the severity

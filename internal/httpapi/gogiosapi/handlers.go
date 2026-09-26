@@ -118,7 +118,7 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 		{Rel: []string{"up"}, Href: sf.Href("/")},
 		{Rel: []string{"monitoring"}, Href: sf.Href("/monitoring")},
 	}
-	for _, status := range Statuses {
+	for _, status := range gogios.Statuses() {
 		links = append(links, contract.Link{Rel: []string{status}, Href: sf.Href("/gogios/" + status)})
 	}
 
@@ -150,7 +150,7 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 	}, http.StatusOK, nil
 }
 
-// statusHandle returns the Handle for one Statuses drill-down route: the
+// statusHandle returns the Handle for one gogios.Statuses category route: the
 // checks in that category, or the fetch error, following the same "error is a
 // property, not a status code" convention as handleOverview.
 //
@@ -176,31 +176,10 @@ func (sf *Surface) statusHandle(status string) contract.Handle {
 			return e, http.StatusOK, nil
 		}
 
-		for _, c := range checksForStatus(state.Gogios, status) {
+		for _, c := range state.Gogios.ChecksFor(status) {
 			e.Entities = append(e.Entities, sf.checkEntity(c))
 		}
 		return e, http.StatusOK, nil
-	}
-}
-
-// checksForStatus selects the checks for one Statuses category.
-//
-// "critical"/"warning"/"unknown"/"ok" are severities: Report.ByStatus groups
-// every check Gogios counts in its summary (Unhandled, Stale and Ok; not
-// Suppressed, which Gogios leaves out of those counts) by its own Status
-// field. "stale"/"suppressed" are lifecycle groupings instead -- a stale
-// check keeps whatever severity it already had, so filtering it out of
-// ByStatus's result would either double-count it under both a severity and a
-// lifecycle category, or require ByStatus to invent a status value Gogios
-// itself never writes. Reading Sections.Stale/Suppressed directly avoids both.
-func checksForStatus(r *gogios.Report, status string) []gogios.Check {
-	switch status {
-	case "stale":
-		return r.Sections.Stale
-	case "suppressed":
-		return r.Sections.Suppressed
-	default:
-		return r.ByStatus()[strings.ToUpper(status)]
 	}
 }
 

@@ -5,9 +5,12 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/snonux/f3sctl/internal/gogios"
 )
 
 // TestPrintGogiosOverviewRendersTheSummary pins the happy path: the subject
@@ -114,6 +117,9 @@ type fakeGogiosAPI struct {
 
 	mu          sync.Mutex
 	cacheClears int
+	// drillDowns records, in order, each GET /gogios/<status> path's status,
+	// so a test can pin which categories were followed and in what order.
+	drillDowns []string
 }
 
 func newFakeGogiosAPI(t *testing.T) *fakeGogiosAPI {
@@ -125,6 +131,11 @@ func newFakeGogiosAPI(t *testing.T) *fakeGogiosAPI {
 }
 
 func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
+	if status, ok := strings.CutPrefix(r.URL.Path, "/gogios/"); ok && r.Method == http.MethodGet {
+		f.mu.Lock()
+		f.drillDowns = append(f.drillDowns, status)
+		f.mu.Unlock()
+	}
 	switch {
 	case r.URL.Path == "/" && r.Method == http.MethodGet:
 		writeEntity(w, Entity{
@@ -138,7 +149,7 @@ func (f *fakeGogiosAPI) handle(w http.ResponseWriter, r *http.Request) {
 			{Properties: map[string]any{"name": "Check Ping6 r1", "status": "CRITICAL", "output": "timed out"}},
 		}})
 	case r.URL.Path == "/gogios/suppressed" && r.Method == http.MethodGet:
-		// The last category gogiosStatuses tries before "ok": a check here
+		// The last gogios.Statuses() category searched before "ok": a check here
 		// proves showGogiosCheck's search keeps going past every earlier
 		// category's non-match rather than stopping at the first one tried.
 		writeEntity(w, Entity{Entities: []Entity{
@@ -246,8 +257,8 @@ func TestRunGogiosDetailFindsACheckAcrossCategories(t *testing.T) {
 
 // TestRunGogiosDetailFindsACheckInALaterCategory is
 // TestRunGogiosDetailFindsACheckAcrossCategories' complement: the check
-// lives under "suppressed", the last category gogiosStatuses tries before
-// "ok". A bug that stopped the search at the first non-matching category
+// lives under "suppressed", the last gogios.Statuses() category searched
+// before "ok". A bug that stopped the search at the first non-matching category
 // (e.g. an accidental early return instead of continuing the loop) would
 // report "no such Gogios check" here even though this test's earlier sibling
 // still passed.
@@ -372,4 +383,45 @@ func TestRunGogiosBrokenReportStillListsItsActions(t *testing.T) {
 			t.Errorf("output = %q, want it to contain %q", out.String(), want)
 		}
 	}
+}
+
+// TestRunGogiosCoversEveryStatus pins the remote client against
+// gogios.Statuses, the list the server builds its drill-down routes and
+// overview links from: every category is accepted as a verb and followed by
+// its own rel (exactly one drill-down GET, for that category), and "detail"
+// on an unknown name searches every category once, in Statuses order.
+func TestRunGogiosCoversEveryStatus(t *testing.T) {
+	for _, status := range gogios.Statuses() {
+		t.Run(status, func(t *testing.T) {
+			api := newFakeGogiosAPI(t)
+			c := newTestClient(t, api.srv.URL, "k")
+			var out bytes.Buffer
+			c.stdout = &out
+
+			if err := c.runGogios(context.Background(), []string{status}, false); err != nil {
+				t.Fatalf("runGogios(%s): %v", status, err)
+			}
+			api.mu.Lock()
+			got := slices.Clone(api.drillDowns)
+			api.mu.Unlock()
+			if !slices.Equal(got, []string{status}) {
+				t.Errorf("drill-downs followed = %v, want [%s]", got, status)
+			}
+		})
+	}
+
+	t.Run("detail search order", func(t *testing.T) {
+		api := newFakeGogiosAPI(t)
+		c := newTestClient(t, api.srv.URL, "k")
+
+		if err := c.runGogios(context.Background(), []string{"detail", "no", "such", "check"}, false); err == nil {
+			t.Fatal("runGogios(detail of an unknown name) = nil, want an error")
+		}
+		api.mu.Lock()
+		got := slices.Clone(api.drillDowns)
+		api.mu.Unlock()
+		if want := gogios.Statuses(); !slices.Equal(got, want) {
+			t.Errorf("detail searched %v, want every category once in order %v", got, want)
+		}
+	})
 }
