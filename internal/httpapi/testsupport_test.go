@@ -33,20 +33,30 @@ func testGogiosSurface() gogiosSurfaceFunc {
 	}
 }
 
-// testRoutes builds the same table newServer would, from the given inventory
-// and inert surfaces -- the pure-declaration subset of production wiring.
-//
-// The surfaces render through a Router over this very table, so any action a
-// route of it renders comes from the same table, as in production. That
-// Router is set directly rather than through build/NewRouter because some
-// inventories under test deliberately yield an ambiguous table (see
-// TestNewRouterRefusesAmbiguousTables), which NewRouter would refuse.
+// testRouter builds a Server for inv mounted at base, through Server.build
+// exactly as newServer does, and returns its Router -- the very Router the
+// table's handlers render their actions through, so hrefs a test builds with
+// it and hrefs a handler renders always share one base and one table.
+func testRouter(inv inventory.Inventory, base string) *Router {
+	return (&Server{}).assemble(inv, testPowerSurface(inv), testGogiosSurface(), base).router
+}
+
+// testRoutes is the route table of testRouter(inv, "") -- the same table
+// newServer would build from inv, over inert surfaces. A test that needs a
+// Router, or a non-empty base, uses testRouter instead, never a second Router
+// over this table.
 func testRoutes(inv inventory.Inventory) []contract.Route {
+	return testRouter(inv, "").routes
+}
+
+// declaredRoutes builds inv's route table without a Router at all, for the
+// one test that needs a table NewRouter would refuse (an ambiguous one). Its
+// handlers render through a Server that is never built, so serving any of
+// them panics rather than rendering some other Router's actions.
+func declaredRoutes(inv inventory.Inventory) []contract.Route {
 	srv := &Server{}
 	actions := srv.actionRenderer()
-	rs := srv.buildRoutes(inv, testPowerSurface(inv)(actions), testGogiosSurface()(actions))
-	srv.router = &Router{routes: rs}
-	return rs
+	return srv.buildRoutes(inv, testPowerSurface(inv)(actions), testGogiosSurface()(actions))
 }
 
 // assemble is Server.build for tests, whose route tables are known to be
@@ -58,16 +68,6 @@ func (s *Server) assemble(inv inventory.Inventory, pw powerSurfaceFunc, gg gogio
 		panic(err)
 	}
 	return srv
-}
-
-// mustRouter is NewRouter for tests whose route tables are known to be
-// unambiguous.
-func mustRouter(base string, rs []contract.Route) *Router {
-	rt, err := NewRouter(base, rs)
-	if err != nil {
-		panic(err)
-	}
-	return rt
 }
 
 // testServer returns a Server with no collaborators at all, for building the

@@ -46,7 +46,7 @@ func TestNewRouterRefusesAmbiguousTables(t *testing.T) {
 		name, want string
 		routes     []contract.Route
 	}{
-		{"host named fans", `duplicate route name "fans-on"`, testRoutes(fansHostInventory())},
+		{"host named fans", `duplicate route name "fans-on"`, declaredRoutes(fansHostInventory())},
 		{"same name", `duplicate route name "a"`, []contract.Route{get("a", "/a"), get("a", "/b")}},
 		{"same endpoint", `duplicate route GET /a ("b")`, []contract.Route{get("a", "/a"), get("b", "/a")}},
 	} {

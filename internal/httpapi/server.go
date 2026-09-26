@@ -94,11 +94,15 @@ func ServeCGI(cfg config.Config, out io.Writer) error {
 // constructor -- the seam that lets a test serve through a Server whose
 // handler panics.
 //
-// A panic anywhere below -- a violated invariant such as serverActions'
-// unbuilt Router, or a bug in a handler -- is recovered here: its value and
-// stack go to logw (the web server's error log, under CGI), and the client
-// gets a Siren 500 like any other server fault rather than a truncated or
-// empty response. The panic's text is deliberately not sent to the client.
+// A panic on this request's own goroutine -- a violated invariant such as
+// serverActions' unbuilt Router, or a bug in a handler or a snapshot hook --
+// is recovered here: its value and stack go to logw (the web server's error
+// log, under CGI), and the client gets a Siren 500 like any other server
+// fault rather than a truncated or empty response. The panic's text is
+// deliberately not sent to the client. A panic on any other goroutine --
+// the engine's concurrent per-host probes, say -- cannot be recovered here
+// and still crashes the process, as Go gives no way to catch it from outside
+// that goroutine.
 func serveCGI(cfg config.Config, stdin io.Reader, out, logw io.Writer, newSrv func(config.Config) (*Server, error)) (err error) {
 	// SirenRenderer is stateless, so it is safe to use ahead of a Server --
 	// the error paths below can fire before one exists at all (a malformed
@@ -166,9 +170,9 @@ func newServer(cfg config.Config) (*Server, error) {
 // Server -- the wiring that makes the Server servable.
 //
 // build owns the surfaces' construction, taking factories rather than
-// finished surfaces, so it alone decides which action renderer they get: this
-// Server's own (see serverActions), which resolves the Router built here.
-// A surface rendering some other Server's actions cannot be assembled. It is
+// finished surfaces, so the renderer is always build's to supply: each
+// factory is handed this Server's own (see serverActions), which resolves the
+// Router built here, and must pass it through to its surface's New. It is
 // its own step so tests can construct a Server literal, supply the surfaces
 // they want, and go through exactly the same path production takes (their
 // assemble helper wraps this one).

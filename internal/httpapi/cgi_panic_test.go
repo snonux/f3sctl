@@ -14,10 +14,10 @@ import (
 )
 
 // setCGIEnv sets the CGI environment parseCGIRequest reads for an
-// authenticated GET of path.
-func setCGIEnv(t *testing.T, path, apiKey string) {
+// authenticated, bodiless request of method on path.
+func setCGIEnv(t *testing.T, method, path, apiKey string) {
 	t.Helper()
-	t.Setenv("REQUEST_METHOD", http.MethodGet)
+	t.Setenv("REQUEST_METHOD", method)
 	t.Setenv("PATH_INFO", path)
 	t.Setenv("QUERY_STRING", "")
 	t.Setenv("HTTP_X_API_KEY", apiKey)
@@ -49,28 +49,55 @@ func assertPanicAnsweredAs500(t *testing.T, out, logw, panicText string) {
 	}
 }
 
-// TestServeCGIAnswersAHandlerPanicWithA500 drives a request whose serving
-// panics -- through the fleet-probe seam /status calls -- and requires a
-// Siren 500 for the client and the panic, with its stack, on the log.
-func TestServeCGIAnswersAHandlerPanicWithA500(t *testing.T) {
-	setCGIEnv(t, "/status", "sekrit")
-	srv := docServer(t, docOpts{})
-	srv.probeHosts = func(context.Context) []power.HostStatus { panic("probe exploded") }
-
-	var out, logw bytes.Buffer
-	err := serveCGI(srv.cfg, strings.NewReader(""), &out, &logw,
+// serveCGIThrough runs serveCGI against srv, returning what the client and
+// the log received.
+func serveCGIThrough(t *testing.T, srv *Server) (out, logw string) {
+	t.Helper()
+	var o, l bytes.Buffer
+	err := serveCGI(srv.cfg, strings.NewReader(""), &o, &l,
 		func(config.Config) (*Server, error) { return srv, nil })
 	if err != nil {
 		t.Fatalf("serveCGI: %v", err)
 	}
-	assertPanicAnsweredAs500(t, out.String(), logw.String(), "probe exploded")
+	return o.String(), l.String()
+}
+
+// TestServeCGIAnswersAProbeHookPanicWithA500 panics in the fleet-probe hook
+// snapshot() calls for /status, before any handler runs, and requires a
+// Siren 500 for the client and the panic, with its stack, on the log.
+func TestServeCGIAnswersAProbeHookPanicWithA500(t *testing.T) {
+	setCGIEnv(t, http.MethodGet, "/status", "sekrit")
+	srv := docServer(t, docOpts{})
+	srv.probeHosts = func(context.Context) []power.HostStatus { panic("probe exploded") }
+
+	out, logw := serveCGIThrough(t, srv)
+	assertPanicAnsweredAs500(t, out, logw, "probe exploded")
+}
+
+// panickingPlug is a powerapi.Engine whose fan-plug write panics, standing
+// in for a bug inside a route's own handler.
+type panickingPlug struct{ plugRecorder }
+
+func (*panickingPlug) FansSet(context.Context, bool) (power.FansState, error) {
+	panic("plug write exploded")
+}
+
+// TestServeCGIAnswersARouteHandlerPanicWithA500 panics inside a route's
+// Handle -- POST /fans/on, offered because the fans read as off, reaching
+// its plug write -- and requires the same Siren 500 and logged stack.
+func TestServeCGIAnswersARouteHandlerPanicWithA500(t *testing.T) {
+	setCGIEnv(t, http.MethodPost, "/fans/on", "sekrit")
+	srv := docServer(t, docOpts{eng: &panickingPlug{}})
+
+	out, logw := serveCGIThrough(t, srv)
+	assertPanicAnsweredAs500(t, out, logw, "plug write exploded")
 }
 
 // TestServeCGIAnswersAConstructionPanicWithA500 covers the other half of
 // what the recover guards: a panic while the Server is still being built
 // (a nil ActionRenderer handed to a surface constructor, say).
 func TestServeCGIAnswersAConstructionPanicWithA500(t *testing.T) {
-	setCGIEnv(t, "/status", "sekrit")
+	setCGIEnv(t, http.MethodGet, "/status", "sekrit")
 
 	var out, logw bytes.Buffer
 	err := serveCGI(config.Default(), strings.NewReader(""), &out, &logw,
