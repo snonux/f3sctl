@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +30,19 @@ func (b *lockedBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// waitForNotice waits for the winding-down notice. signalContext cancels
+// before it writes, so the notice can trail ctx.Done() by a moment.
+func waitForNotice(t *testing.T, notice *lockedBuffer) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(notice.String(), "winding down") {
+		if time.Now().After(deadline) {
+			t.Fatalf("notice = %q, want the winding-down message", notice.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // raise sends sig to this test process.
@@ -60,9 +75,7 @@ func TestSignalContextCancelsOnSignal(t *testing.T) {
 			if !errors.Is(ctx.Err(), context.Canceled) {
 				t.Errorf("ctx.Err() = %v, want context.Canceled", ctx.Err())
 			}
-			if !strings.Contains(notice.String(), "winding down") {
-				t.Errorf("notice = %q, want the winding-down message", notice.String())
-			}
+			waitForNotice(t, &notice)
 		})
 	}
 }
@@ -77,6 +90,7 @@ func TestSignalContextAbsorbsLaterSignals(t *testing.T) {
 
 	raise(t, syscall.SIGINT)
 	<-ctx.Done()
+	waitForNotice(t, &notice)
 	raise(t, syscall.SIGINT)
 	time.Sleep(100 * time.Millisecond)
 
@@ -85,21 +99,93 @@ func TestSignalContextAbsorbsLaterSignals(t *testing.T) {
 	}
 }
 
-// TestSignalContextSwallowsSIGPIPE: a closed log pipe must neither kill the
-// process (the default action) nor abort the run.
-func TestSignalContextSwallowsSIGPIPE(t *testing.T) {
-	var notice lockedBuffer
-	ctx, stop := signalContext(&notice)
+// helperEnv selects what TestSignalHelperProcess does when this test binary
+// is re-run as a child. Child processes are the only honest way to test
+// dispositions: a SIGPIPE raised by kill(2) is ignored by the Go runtime
+// whatever signalContext does, and a disposition ignored at startup cannot be
+// recreated inside an already-running process.
+const helperEnv = "F3SCTL_SIGNAL_HELPER"
+
+// Exit codes the helper reports with; anything else (or death by signal) is a
+// failure the parent names.
+const (
+	helperOK        = 0
+	helperCancelled = 3
+	helperNoEPIPE   = 4
+)
+
+// TestSignalHelperProcess is not a test: it is the child body for the tests
+// below, and returns at once in a normal run.
+func TestSignalHelperProcess(t *testing.T) {
+	mode := os.Getenv(helperEnv)
+	if mode == "" {
+		return
+	}
+	ctx, stop := signalContext(io.Discard)
 	defer stop()
 
-	raise(t, syscall.SIGPIPE)
-	select {
-	case <-ctx.Done():
-		t.Fatal("SIGPIPE cancelled the run")
-	case <-time.After(100 * time.Millisecond):
+	switch mode {
+	case "pipe":
+		// stdout's read end is already closed: without SIGPIPE caught, this
+		// write kills the process instead of returning EPIPE.
+		if _, err := os.Stdout.WriteString("into the void\n"); !errors.Is(err, syscall.EPIPE) {
+			os.Exit(helperNoEPIPE)
+		}
+		os.Exit(helperOK)
+	case "hup":
+		if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+			os.Exit(1)
+		}
+		select {
+		case <-ctx.Done():
+			os.Exit(helperCancelled)
+		case <-time.After(200 * time.Millisecond):
+			os.Exit(helperOK)
+		}
 	}
-	if notice.String() != "" {
-		t.Errorf("notice = %q, want nothing for SIGPIPE", notice.String())
+	os.Exit(1)
+}
+
+// helperCommand re-runs this test binary as the signal helper in mode.
+func helperCommand(mode string, argv0 ...string) *exec.Cmd {
+	args := append(argv0, os.Args[0], "-test.run=^TestSignalHelperProcess$")
+	cmd := exec.Command(args[0], args[1:]...)
+	cmd.Env = append(os.Environ(), helperEnv+"="+mode)
+	return cmd
+}
+
+// TestSignalContextSurvivesAClosedStdout is the `f3sctl power all cycle |
+// tee log` case: Ctrl-C kills tee too, and the next log line is a write to a
+// pipe nobody reads. That must fail with EPIPE, not kill the process between
+// cutting AC and restoring it.
+func TestSignalContextSurvivesAClosedStdout(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	r.Close()
+	defer w.Close()
+
+	cmd := helperCommand("pipe")
+	cmd.Stdout = w
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("helper with a closed stdout: %v, want a normal exit after EPIPE", err)
+	}
+}
+
+// TestSignalContextKeepsAStartupIgnoredSIGHUPIgnored is the nohup case: a
+// SIGHUP the process was started with ignored must not cancel the run, as it
+// would if signal.Notify un-ignored it. The shell's `trap "" HUP` before exec
+// is exactly how nohup(1) leaves it.
+func TestSignalContextKeepsAStartupIgnoredSIGHUPIgnored(t *testing.T) {
+	cmd := helperCommand("hup", "/bin/sh", "-c", `trap "" HUP; exec "$@"`, "sh")
+	out, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == helperCancelled {
+		t.Fatalf("a startup-ignored SIGHUP cancelled the run\n%s", out)
+	}
+	if err != nil {
+		t.Fatalf("helper: %v\n%s", err, out)
 	}
 }
 

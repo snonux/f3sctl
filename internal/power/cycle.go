@@ -126,7 +126,7 @@ func (e *Engine) cutAC(ctx context.Context, log io.Writer) error {
 		return nil
 	}
 	if rerr := e.restoreAC(ctx, log); rerr != nil {
-		return fmt.Errorf("cutting f-host AC failed (%v), and then: %w", err, rerr)
+		return fmt.Errorf("cutting f-host AC failed: %w; and then: %w", err, rerr)
 	}
 	return fmt.Errorf("cutting f-host AC failed, AC switched back on and the hosts left "+
 		"powered off: %w. Wake them with `f3sctl power all on`", err)

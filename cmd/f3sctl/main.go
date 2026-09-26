@@ -54,8 +54,9 @@ func run() error {
 
 	// job-run is the API's detached child: it performs a CLI action and then
 	// records the outcome for a polling client. Internal, not part of the
-	// documented CLI surface. Checked before the CGI switch because the child
-	// may inherit the CGI's GATEWAY_INTERFACE.
+	// documented CLI surface. Checked before the CGI switch as defence in
+	// depth: coordination's spawn already blanks GATEWAY_INTERFACE for the
+	// child, but a job-run must never be mistaken for a CGI request.
 	if len(os.Args) > 1 && os.Args[1] == "job-run" {
 		return withSignals(func(ctx context.Context) error {
 			return jobrun.Run(ctx, cfg, os.Args[2:])
@@ -64,9 +65,11 @@ func run() error {
 
 	// bozohttpd sets GATEWAY_INTERFACE=CGI/1.1 (verified on NetBSD 11.0), and
 	// nothing else in this deployment does, so it is a reliable mode switch.
-	// The CGI gets no signal handling: it takes no context and runs nothing
-	// long, so the default actions -- bozohttpd's SIGTERM ending it at once --
-	// are the right ones, and catching them would only make it unkillable.
+	// The CGI gets no signal handling. It bounds its own work with a
+	// CGITimeout context, and nothing it runs in-process is a multi-step AC
+	// cut -- a power cycle goes to the detached job-run above, it only ever
+	// does single plug switches -- so the default actions (bozohttpd's
+	// SIGTERM ending it at once) are the right ones.
 	if os.Getenv("GATEWAY_INTERFACE") != "" {
 		return httpapi.ServeCGI(cfg, os.Stdout)
 	}
@@ -86,6 +89,8 @@ func withSignals(fn func(ctx context.Context) error) error {
 
 // signalContext returns a context cancelled by the first SIGINT, SIGTERM or
 // SIGHUP, and a stop function that restores default signal behaviour.
+// A signal that was already ignored at startup stays ignored: see
+// terminationSignals.
 //
 // Catching them, rather than leaving the default action to kill the process,
 // is what lets an interrupted `power all cycle` restore f-host AC: the signal
@@ -106,7 +111,7 @@ func withSignals(fn func(ctx context.Context) error) error {
 func signalContext(notice io.Writer) (context.Context, func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE)
+	signal.Notify(sigs, terminationSignals()...)
 	done := make(chan struct{})
 
 	go func() {
@@ -116,9 +121,11 @@ func signalContext(notice io.Writer) (context.Context, func()) {
 				if sig == syscall.SIGPIPE || ctx.Err() != nil {
 					continue
 				}
+				// Cancel first: a blocked notice writer (a stalled
+				// terminal) must not delay the wind-down.
+				cancel()
 				fmt.Fprintf(notice, "f3sctl: %v received, winding down (an interrupted "+
 					"power cycle restores f-host AC first); please wait...\n", sig)
-				cancel()
 			case <-done:
 				return
 			}
@@ -130,4 +137,23 @@ func signalContext(notice io.Writer) (context.Context, func()) {
 		close(done)
 		cancel()
 	}
+}
+
+// terminationSignals is the list signalContext catches: SIGINT, SIGTERM,
+// SIGHUP and SIGPIPE, minus any the process was started with ignored.
+//
+// signal.Notify would un-ignore them, and an ignored disposition is a choice
+// the caller made: `nohup f3sctl power all cycle` ignores SIGHUP, and a shell
+// running it in the background with `&` (no job control) ignores SIGINT.
+// Catching those anyway would let the very hang-up or Ctrl-C the caller opted
+// out of cancel the run. A SIGPIPE ignored at startup needs no catching
+// either: writes to a closed pipe already fail with EPIPE.
+func terminationSignals() []os.Signal {
+	var sigs []os.Signal
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGPIPE} {
+		if !signal.Ignored(sig) {
+			sigs = append(sigs, sig)
+		}
+	}
+	return sigs
 }
