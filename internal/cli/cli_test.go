@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,9 +80,52 @@ func hostsUp(names ...string) *fakeLiveness { return &fakeLiveness{up: names} }
 // main takes.
 func runCLI(t *testing.T, cfg config.Config, live *fakeLiveness, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return runCLICtx(t, context.Background(), cfg, live, args...)
+}
+
+// runCLICtx is runCLI with the caller's context, standing in for the one main
+// binds to SIGINT/SIGTERM.
+func runCLICtx(t *testing.T, ctx context.Context, cfg config.Config, live *fakeLiveness,
+	args ...string) (stdout, stderr string, err error) {
+
+	t.Helper()
 	var outBuf, errBuf bytes.Buffer
-	err = run(cfg, args, &outBuf, &errBuf, nil, false, live.hosts)
+	err = run(ctx, cfg, args, &outBuf, &errBuf, nil, false, live.hosts)
 	return outBuf.String(), errBuf.String(), err
+}
+
+// TestRunHonoursTheCallersContext pins that the context main binds to
+// SIGINT/SIGTERM reaches the engine. Every local subcommand used to build its
+// own context.Background(), so a signal could only kill the process -- and a
+// `power all cycle` killed during its AC-off dwell left the rack without
+// mains, because the restore power.Engine.cycleAC runs on cancellation was
+// never given a cancellation to run on.
+//
+// An already-cancelled context must therefore stop the plug being switched: a
+// build that substitutes its own context would switch it and succeed.
+func TestRunHonoursTheCallersContext(t *testing.T) {
+	cases := [][]string{
+		{"ac", "on"},
+		{"ac", "status"},
+		{"fans", "on"},
+		{"fans", "status"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			shelly := powertest.NewFakeShelly(t, false)
+			cfg := testConfig(t, shelly)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			_, _, err := runCLICtx(t, ctx, cfg, hostsUp(), args...)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("err = %v, want context.Canceled", err)
+			}
+			if got := shelly.SetCalls(); len(got) != 0 {
+				t.Errorf("Switch.Set calls = %v, want none on a cancelled context", got)
+			}
+		})
+	}
 }
 
 // TestFansOffForceSwitchesThePlugWhileAHostIsUp is the regression test for the
@@ -460,7 +504,7 @@ func TestRunFallsBackToTheEngineProbeWhenNoLivenessIsInjected(t *testing.T) {
 	cfg.Inventory.Hosts = nil
 
 	var outBuf, errBuf bytes.Buffer
-	err := Run(cfg, []string{"fans", "off"}, &outBuf, &errBuf)
+	err := Run(context.Background(), cfg, []string{"fans", "off"}, &outBuf, &errBuf)
 	if err == nil || !strings.Contains(err.Error(), "no hosts configured") {
 		t.Fatalf("fans off with no liveness injected: err = %v, want the engine guard's empty-group refusal", err)
 	}

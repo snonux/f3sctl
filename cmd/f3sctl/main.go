@@ -12,8 +12,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/snonux/f3sctl/internal/agent"
 	"github.com/snonux/f3sctl/internal/cli"
@@ -48,11 +51,14 @@ func run() error {
 		return err
 	}
 
+	ctx, stop := signalContext()
+	defer stop()
+
 	// job-run is the API's detached child: it performs a CLI action and then
 	// records the outcome for a polling client. Internal, not part of the
 	// documented CLI surface.
 	if len(os.Args) > 1 && os.Args[1] == "job-run" {
-		return jobrun.Run(cfg, os.Args[2:])
+		return jobrun.Run(ctx, cfg, os.Args[2:])
 	}
 
 	// bozohttpd sets GATEWAY_INTERFACE=CGI/1.1 (verified on NetBSD 11.0), and
@@ -61,5 +67,18 @@ func run() error {
 		return httpapi.ServeCGI(cfg, os.Stdout)
 	}
 
-	return cli.Run(cfg, os.Args[1:], os.Stdout, os.Stderr)
+	return cli.Run(ctx, cfg, os.Args[1:], os.Stdout, os.Stderr)
+}
+
+// signalContext returns a context cancelled by SIGINT or SIGTERM.
+//
+// Catching them, rather than leaving the default action to kill the process,
+// is what lets an interrupted `power all cycle` restore f-host AC: the signal
+// cuts the AC-off dwell short and the cycle then switches mains back on
+// before returning. Dying mid-dwell would leave the rack without mains, the
+// one state nothing remote can wake it from. Once caught, a repeated Ctrl-C
+// is absorbed too until stop is called, so an impatient operator cannot
+// interrupt the restore itself.
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }

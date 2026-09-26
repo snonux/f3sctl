@@ -245,10 +245,8 @@ func (m *Monitor) Unmute(ctx context.Context, log io.Writer) error {
 //
 // Only a cancelled context leaves the marker, since then the caller abandoned
 // the wake and nobody asked for monitoring to resume yet; it prints how to
-// clear it by hand. No production path cancels today (the CLI and the API's
-// detached jobs both run on context.Background()), so this is a guard for a
-// future caller, not something an operator's Ctrl-C reaches: a killed local
-// run simply exits and leaves the mute for "f3sctl monitoring unmute".
+// clear it by hand. This is what an operator's Ctrl-C (or a SIGTERM to the
+// API's detached job) reaches: main binds the run's context to both signals.
 //
 // Gogios does expire the marker itself after PrometheusOnlyIfNotExistsMaxS
 // (24h). Relying on that expiry is what hid a two-day audiobookshelf outage in

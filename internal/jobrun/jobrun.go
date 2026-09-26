@@ -15,6 +15,7 @@
 package jobrun
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -60,14 +61,19 @@ func (r jobReporter) HostState(host string, phase power.HostPhase, detail string
 // Failures are still written to job.json rather than only being returned, so
 // a client that never sees this process's exit status can still see what
 // happened.
-func Run(cfg config.Config, args []string) error {
+//
+// ctx is cancelled by a SIGTERM (or SIGINT) to this child, bound in main. The
+// process then winds down through the normal return path instead of dying on
+// the default signal action, so an interrupted `power all cycle` still
+// restores f-host AC and the outcome still reaches job.json.
+func Run(ctx context.Context, cfg config.Config, args []string) error {
 	dir := os.Getenv("F3SCTL_JOB_DIR")
 	if dir == "" {
 		dir = cfg.StateDir
 	}
 	mgr := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg))
 
-	err := cli.RunLocal(cfg, args, os.Stdout, os.Stderr, jobReporter{rec: mgr})
+	err := cli.RunLocal(ctx, cfg, args, os.Stdout, os.Stderr, jobReporter{rec: mgr})
 
 	rc, msg := 0, ""
 	if err != nil {

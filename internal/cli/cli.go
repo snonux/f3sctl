@@ -92,8 +92,13 @@ way to power anything back on.
 type liveHostsFunc func(ctx context.Context) []string
 
 // Run executes one CLI invocation.
-func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
-	return run(cfg, args, stdout, stderr, nil, false, nil)
+//
+// ctx is what an operator's Ctrl-C or a SIGTERM cancels (main binds it to
+// both). Cancelling it does not abandon the work mid-step: every wait honours
+// it, and the steps that must still happen -- restoring f-host AC after an
+// interrupted `power all cycle` -- run on a context detached from it.
+func Run(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) error {
+	return run(ctx, cfg, args, stdout, stderr, nil, false, nil)
 }
 
 // RunLocal executes an invocation that must act on the homelab directly,
@@ -101,9 +106,12 @@ func Run(cfg config.Config, args []string, stdout, stderr io.Writer) error {
 //
 // This is what the API's own detached child uses. It has to bypass the routing
 // in globalFlags.useAPI: a shutdown started by the API which then called the
-// API would simply recurse.
-func RunLocal(cfg config.Config, args []string, stdout, stderr io.Writer, reporter power.Reporter) error {
-	return run(cfg, args, stdout, stderr, reporter, true, nil)
+// API would simply recurse. ctx is as for Run: a SIGTERM to that child cancels
+// it rather than killing the process outright.
+func RunLocal(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer,
+	reporter power.Reporter) error {
+
+	return run(ctx, cfg, args, stdout, stderr, reporter, true, nil)
 }
 
 // run executes one invocation.
@@ -111,7 +119,7 @@ func RunLocal(cfg config.Config, args []string, stdout, stderr io.Writer, report
 // liveHosts is the seam the rack-fan guard consults; a nil one means the real
 // ICMP probe on the engine runFans builds, which is what both exported entry
 // points pass. Only the tests substitute anything else.
-func run(cfg config.Config, args []string, stdout, stderr io.Writer,
+func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer,
 	reporter power.Reporter, forceLocal bool, liveHosts liveHostsFunc) error {
 
 	args, flags := parseGlobalFlags(args)
@@ -129,7 +137,7 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 	// the same command working everywhere and failing on a laptop. See
 	// globalFlags.useAPI.
 	if args[0] != "version" && args[0] != "help" && flags.useAPI(args) {
-		return runRemote(cfg, args, flags, stdout, stderr)
+		return runRemote(ctx, cfg, args, flags, stdout, stderr)
 	}
 
 	switch args[0] {
@@ -140,15 +148,15 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 		fmt.Fprint(stdout, usage)
 		return nil
 	case "power":
-		return runPower(cfg, args[1:], flags.local, stdout, stderr, reporter)
+		return runPower(ctx, cfg, args[1:], flags.local, stdout, stderr, reporter)
 	case "fans":
-		return runFans(cfg, args[1:], flags.force, liveHosts, stdout, stderr)
+		return runFans(ctx, cfg, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "ac":
-		return runAC(cfg, args[1:], flags.force, liveHosts, stdout, stderr)
+		return runAC(ctx, cfg, args[1:], flags.force, liveHosts, stdout, stderr)
 	case "monitoring":
-		return runMonitoring(cfg, args[1:], stdout, stderr)
+		return runMonitoring(ctx, cfg, args[1:], stdout, stderr)
 	case "gogios":
-		return runGogios(cfg, args[1:], stdout, stderr)
+		return runGogios(ctx, cfg, args[1:], stdout, stderr)
 	}
 
 	if hint := retiredVerbHint(args[0]); hint != "" {
@@ -161,7 +169,9 @@ func run(cfg config.Config, args []string, stdout, stderr io.Writer,
 // runPower performs a power command locally. local is --local (or RunLocal):
 // it keeps the Gogios mute on the SSH verb even without a readable key,
 // rather than letting gatewaySwitchFor route it through the API.
-func runPower(cfg config.Config, args []string, local bool, stdout, stderr io.Writer, reporter power.Reporter) error {
+func runPower(ctx context.Context, cfg config.Config, args []string, local bool,
+	stdout, stderr io.Writer, reporter power.Reporter) error {
+
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
@@ -196,7 +206,7 @@ func runPower(cfg config.Config, args []string, local bool, stdout, stderr io.Wr
 	// The wake's closing un-mute needs the key pinned to pi0/pi1; without one
 	// here, reach the gateways through the API like `monitoring unmute` does.
 	eng.WithGatewaySwitch(gatewaySwitchFor(cfg, local))
-	return act(context.Background(), eng, stdout)
+	return act(ctx, eng, stdout)
 }
 
 // powerEngine is the subset of *power.Engine methods a powerAction may call.
@@ -352,7 +362,7 @@ func powerActionForSpelling(sp powerSpelling) powerAction {
 //
 // liveHosts is that guard's view of what is still running. A nil one means ask
 // the engine over ICMP, which is what production does.
-func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFunc,
+func runFans(ctx context.Context, cfg config.Config, args []string, force bool, liveHosts liveHostsFunc,
 	stdout, stderr io.Writer) error {
 
 	if len(args) == 0 {
@@ -378,7 +388,6 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 	if liveHosts == nil {
 		liveHosts = eng.LiveHosts
 	}
-	ctx := context.Background()
 
 	switch verb {
 	case "status":
@@ -409,7 +418,7 @@ func runFans(cfg config.Config, args []string, force bool, liveHosts liveHostsFu
 // (f0–f3) may still be drawing power, because hard-cutting mains under a live
 // host risks ZFS / bhyve damage — use --force only after a graceful shutdown
 // (or when you mean a last-resort kill).
-func runAC(cfg config.Config, args []string, force bool, liveHosts liveHostsFunc,
+func runAC(ctx context.Context, cfg config.Config, args []string, force bool, liveHosts liveHostsFunc,
 	stdout, stderr io.Writer) error {
 
 	if len(args) == 0 {
@@ -430,7 +439,6 @@ func runAC(cfg config.Config, args []string, force bool, liveHosts liveHostsFunc
 	if liveHosts == nil {
 		liveHosts = func(ctx context.Context) []string { return eng.ACActivity(ctx).Hosts() }
 	}
-	ctx := context.Background()
 
 	switch verb {
 	case "status":
@@ -487,7 +495,7 @@ func parseFansArgs(args []string) (verb string, ok bool) {
 //
 // Separate from `power` on purpose: the mute outlives the operation that set
 // it, and clearing a stranded one must not require powering anything.
-func runMonitoring(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+func runMonitoring(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return errUsage
@@ -507,7 +515,6 @@ func runMonitoring(cfg config.Config, args []string, stdout, stderr io.Writer) e
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
 
 	switch verb {
 	case "status":
@@ -620,14 +627,12 @@ func parseGogiosArgs(args []string) (sp gogiosSpelling, ok bool) {
 // `gogios cache clear` run from a laptop would only ever clear a cache
 // nobody reads from. --local exists for debugging, or for running directly
 // on pi0/pi1, where the local cache and the CGI's are the same file.
-func runGogios(cfg config.Config, args []string, stdout, stderr io.Writer) error {
+func runGogios(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) error {
 	sp, ok := parseGogiosArgs(args)
 	if !ok {
 		fmt.Fprint(stderr, usage)
 		return fmt.Errorf("unknown gogios command %q", strings.Join(args, " "))
 	}
-
-	ctx := context.Background()
 
 	if sp.verb == "cache-clear" {
 		if err := gogios.ClearCache(cfg); err != nil {
