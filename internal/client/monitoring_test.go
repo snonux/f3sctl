@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,7 +13,10 @@ import (
 // fakeMonitoringAPI serves the discovery chain SetMute follows (root ->
 // /gogios -> /monitoring) and the mute pair, advertising an action only while
 // it would change something, as the real server does. Gateway state is
-// scripted per test.
+// scripted per test. As on the real server, a POST of an action not currently
+// advertised is refused with 409, and one that cannot reach an unreadable
+// (gwErr) gateway answers 502 naming it, with no gateway state -- the
+// engine's eachGateway error, via gogiosapi's setMute.
 type fakeMonitoringAPI struct {
 	srv *httptest.Server
 
@@ -57,21 +61,39 @@ func (f *fakeMonitoringAPI) handle(w http.ResponseWriter, r *http.Request) {
 			writeEntity(w, Entity{Properties: map[string]any{"message": "not available right now"}})
 			return
 		}
-		if f.failPost {
-			w.WriteHeader(http.StatusBadGateway)
-			writeEntity(w, Entity{Properties: map[string]any{"message": "could not gogios-unmute Gogios on: [blowfish]"}})
-			return
-		}
-		want := r.URL.Path == "/monitoring/mute"
-		for gw := range f.muted {
-			if !f.sticky[gw] {
-				f.muted[gw] = want
-			}
-		}
-		writeEntity(w, f.monitoring())
+		f.perform(w, r.URL.Path)
 	default:
 		http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 	}
+}
+
+// perform answers an advertised POST of the mute action at path.
+func (f *fakeMonitoringAPI) perform(w http.ResponseWriter, path string) {
+	if f.failPost {
+		w.WriteHeader(http.StatusBadGateway)
+		writeEntity(w, Entity{Properties: map[string]any{"message": "could not gogios-unmute Gogios on: [blowfish]"}})
+		return
+	}
+	mute := path == "/monitoring/mute"
+	var failed []string
+	for _, gw := range []string{"blowfish", "fishfinger"} {
+		switch {
+		case f.gwErr[gw] != "":
+			failed = append(failed, gw)
+		case !f.sticky[gw]:
+			f.muted[gw] = mute
+		}
+	}
+	if len(failed) > 0 {
+		verb := "gogios-unmute"
+		if mute {
+			verb = "gogios-mute"
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		writeEntity(w, Entity{Properties: map[string]any{"message": fmt.Sprintf("could not %s Gogios on: %v", verb, failed)}})
+		return
+	}
+	writeEntity(w, f.monitoring())
 }
 
 func (f *fakeMonitoringAPI) monitoring() Entity {
@@ -148,10 +170,10 @@ func TestSetMuteWithTheActionWithheldReturnsCurrentState(t *testing.T) {
 	}
 }
 
-// Negative: an unreadable gateway comes back as Err, not as "un-muted".
+// Negative: an unreadable gateway comes back as Err, not as "un-muted". Here
+// nothing is muted, so the un-mute is withheld and the state is read as is.
 func TestSetMuteSurfacesAnUnreadableGateway(t *testing.T) {
 	api := newFakeMonitoringAPI(t)
-	api.muted["blowfish"] = true
 	api.gwErr["fishfinger"] = "ssh: connect timed out"
 	c := newTestClient(t, api.srv.URL, "k")
 
@@ -159,8 +181,29 @@ func TestSetMuteSurfacesAnUnreadableGateway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetMute: %v", err)
 	}
+	if len(api.posts) != 0 {
+		t.Errorf("posts = %v, want none: nothing readable is muted", api.posts)
+	}
 	if states[1].Name != "fishfinger" || states[1].Err == nil || !strings.Contains(states[1].Err.Error(), "timed out") {
 		t.Errorf("fishfinger = %+v, want its read error", states[1])
+	}
+}
+
+// Negative: an action that cannot reach an unreadable gateway fails with the
+// server's 502 naming it -- the case where the state cannot be learned from
+// the response and has to be re-read.
+func TestSetMuteReportsAnUnreachableGatewayOnTheAction(t *testing.T) {
+	api := newFakeMonitoringAPI(t)
+	api.muted["blowfish"] = true
+	api.gwErr["fishfinger"] = "ssh: connect timed out"
+	c := newTestClient(t, api.srv.URL, "k")
+
+	_, err := c.SetMute(context.Background(), false)
+	if err == nil || !strings.Contains(err.Error(), "could not gogios-unmute Gogios on: [fishfinger]") {
+		t.Fatalf("err = %v, want fishfinger named", err)
+	}
+	if len(api.posts) != 1 {
+		t.Errorf("posts = %v, want the un-mute attempted once", api.posts)
 	}
 }
 

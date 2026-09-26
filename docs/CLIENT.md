@@ -225,8 +225,9 @@ API that is refusing. A client cannot do this for you; it can only say so.
 
 ### Monitoring mute
 
-Follow the root's `monitoring` link. It reports whether Gogios alerting is
-suppressed, as a top-level `muted` plus one entity per gateway:
+Follow the root's `gogios` link, then that folder's `monitoring` link (the
+root does not link `/monitoring` itself). It reports whether Gogios alerting
+is suppressed, as a top-level `muted` plus one entity per gateway:
 
 ```json
 { "class": ["monitoring"],
@@ -265,6 +266,13 @@ it cannot reach — a mute that silenced only one, or an un-mute that restored
 only one. So a client must not assume the two are mutually exclusive; offer
 both by direction: mute to silence both, un-mute to restore both. With no
 gateways at all, neither is offered.
+
+A mute or un-mute that succeeds answers with the re-read monitoring resource.
+One that fails on any gateway — typically an unreachable one — answers `502`
+with only the error message naming the gateways it could not reach, and **no
+gateway state**, even though the reachable gateway was changed. After a
+`502`, re-GET `/monitoring` to learn the current state and which actions are
+offered now.
 
 ### Gogios alerting
 

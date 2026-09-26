@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -18,25 +19,37 @@ import (
 )
 
 // gatewayRecorder is a fake gogiosapi.Monitor over scripted gateway states:
-// a mute or un-mute sets every gateway it can reach, and each call is counted
-// so a test can tell serve()'s 409 backstop from the handler running.
+// a mute or un-mute sets every gateway it can reach and, like the engine's
+// eachGateway, fails naming every one it could not. Each call is counted so a
+// test can tell serve()'s 409 backstop from the handler running.
 type gatewayRecorder struct {
 	mu    sync.Mutex
 	gws   []power.GatewayMute
 	calls int
 }
 
-func (g *gatewayRecorder) MuteGogios(context.Context, io.Writer) error { return g.set(true) }
-func (g *gatewayRecorder) UnmuteNow(context.Context, io.Writer) error  { return g.set(false) }
+func (g *gatewayRecorder) MuteGogios(context.Context, io.Writer) error {
+	return g.set(true, "gogios-mute")
+}
 
-func (g *gatewayRecorder) set(muted bool) error {
+func (g *gatewayRecorder) UnmuteNow(context.Context, io.Writer) error {
+	return g.set(false, "gogios-unmute")
+}
+
+func (g *gatewayRecorder) set(muted bool, verb string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.calls++
+	var failed []string
 	for i := range g.gws {
-		if g.gws[i].Err == nil {
-			g.gws[i].Muted = muted
+		if g.gws[i].Err != nil {
+			failed = append(failed, g.gws[i].Name)
+			continue
 		}
+		g.gws[i].Muted = muted
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("could not %s Gogios on: %v", verb, failed)
 	}
 	return nil
 }
@@ -79,10 +92,14 @@ func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 
 // TestPostMonitoringMuteFinishesAPartialMute drives POST /monitoring/mute
 // through the real pipeline (task ka). A partial mute -- one gateway muted,
-// the other alerting or unreadable -- is performed, and a fleet known muted
+// the other alerting or unreadable -- is attempted, and a fleet known muted
 // on every gateway is refused with 409 before the handler runs. Before the
 // fix the partial rows were refused too: the mute keyed on "nothing muted",
 // so a half-done mute could not be finished through the API.
+//
+// The unreadable row still answers 502: the mute runs (wantCalls 1, not a
+// 409 refusal) but cannot reach that gateway, and the engine reports it the
+// way eachGateway does -- the point is that it is tried.
 func TestPostMonitoringMuteFinishesAPartialMute(t *testing.T) {
 	unreadable := errFake{}
 	for _, tc := range []struct {
@@ -92,7 +109,7 @@ func TestPostMonitoringMuteFinishesAPartialMute(t *testing.T) {
 		wantCalls int
 	}{
 		{"partial, alerting", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}}, http.StatusOK, 1},
-		{"partial, unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: unreadable}}, http.StatusOK, 1},
+		{"partial, unreadable", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Err: unreadable}}, http.StatusBadGateway, 1},
 		{"all known muted", []power.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger", Muted: true}}, http.StatusConflict, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,5 +143,23 @@ func TestPostMonitoringMuteReportsTheResultingState(t *testing.T) {
 	}
 	if hasAction(e, "monitoring-mute") || !hasAction(e, "monitoring-unmute") {
 		t.Errorf("actions after mute = %v, want only monitoring-unmute", actionNames(e))
+	}
+}
+
+// Negative: a mute that cannot reach a gateway answers 502 naming it, with no
+// gateway state in the body -- the client must re-read /monitoring for that.
+// The reachable gateway is muted all the same.
+func TestPostMonitoringMuteNamesAnUnreachableGateway(t *testing.T) {
+	gw := &gatewayRecorder{gws: []power.GatewayMute{{Name: "blowfish"}, {Name: "fishfinger", Err: errFake{}}}}
+	e := postEntity(t, muteServer(t, gw), "/monitoring/mute")
+
+	if msg, _ := e.Properties["message"].(string); msg != "could not gogios-mute Gogios on: [fishfinger]" {
+		t.Errorf("message = %q, want fishfinger named", e.Properties["message"])
+	}
+	if _, ok := e.Properties["muted"]; ok {
+		t.Errorf("properties = %v, want no mute state on a failed mute", e.Properties)
+	}
+	if st := gw.MonitoringStatus(context.Background()); !st[0].Muted {
+		t.Errorf("blowfish = %+v, want it muted despite fishfinger failing", st[0])
 	}
 }

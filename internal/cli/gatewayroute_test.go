@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -66,8 +67,10 @@ func TestGatewaySwitchForUsesTheAPIOnlyWithoutAKey(t *testing.T) {
 // ones listed in stuck (ignores the change) or unreadable (reports an error
 // instead of a state, and is never changed). Like the real server, it
 // advertises un-mute while a readable gateway is muted and mute unless every
-// gateway reads muted -- both after a partial mute -- and refuses with 409 a
-// POST of an action it is not currently advertising.
+// gateway reads muted -- both after a partial mute -- refuses with 409 a POST
+// of an action it is not currently advertising, and answers a POST that could
+// not reach an unreadable gateway with 502 naming it and no gateway state
+// (the engine's eachGateway error, via gogiosapi's setMute).
 type fakeMonitorAPI struct {
 	srv        *httptest.Server
 	mu         sync.Mutex
@@ -106,22 +109,43 @@ func (f *fakeMonitorAPI) handle(w http.ResponseWriter, r *http.Request) {
 		writeRemoteEntity(w, client.Entity{Links: []client.Link{{Rel: []string{"monitoring"}, Href: "/monitoring"}}})
 	case "/monitoring/mute", "/monitoring/unmute":
 		f.posts++
-		if !f.advertises(r.URL.Path) {
-			w.WriteHeader(http.StatusConflict)
-			writeRemoteEntity(w, client.Entity{Properties: map[string]any{"message": "not available right now"}})
-			return
-		}
-		for gw := range f.muted {
-			if !f.stuck[gw] && !f.unreadable[gw] {
-				f.muted[gw] = r.URL.Path == "/monitoring/mute"
-			}
-		}
-		writeRemoteEntity(w, f.monitoring())
+		f.perform(w, r.URL.Path)
 	case "/monitoring":
 		writeRemoteEntity(w, f.monitoring())
 	default:
 		http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 	}
+}
+
+// perform answers a POST of the mute action at path.
+func (f *fakeMonitorAPI) perform(w http.ResponseWriter, path string) {
+	if !f.advertises(path) {
+		w.WriteHeader(http.StatusConflict)
+		writeRemoteEntity(w, client.Entity{Properties: map[string]any{"message": "not available right now"}})
+		return
+	}
+	mute := path == "/monitoring/mute"
+	var failed []string
+	for _, gw := range []string{"blowfish", "fishfinger"} {
+		switch {
+		case f.unreadable[gw]:
+			failed = append(failed, gw)
+		case !f.stuck[gw]:
+			f.muted[gw] = mute
+		}
+	}
+	if len(failed) > 0 {
+		verb := "gogios-unmute"
+		if mute {
+			verb = "gogios-mute"
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		writeRemoteEntity(w, client.Entity{Properties: map[string]any{
+			"message": fmt.Sprintf("could not %s Gogios on: %v", verb, failed),
+		}})
+		return
+	}
+	writeRemoteEntity(w, f.monitoring())
 }
 
 func (f *fakeMonitorAPI) monitoring() client.Entity {
@@ -234,23 +258,19 @@ func TestAPIGatewaySwitchNamesAGatewayLeftAlerting(t *testing.T) {
 }
 
 // The usual aftermath of a partial mute is {muted, unreachable}: the mute is
-// still offered, is posted, and the gateway it still cannot reach is named --
-// unknown is not muted.
+// still offered and is posted, and the server's 502 for the gateway it still
+// cannot reach comes back as an error naming it -- unknown is not muted.
 func TestAPIGatewaySwitchMuteNamesAnUnreachableGateway(t *testing.T) {
 	api := newFakeMonitorAPI(t)
 	api.unreadable["fishfinger"] = true
 	sw := gatewaySwitchFor(apiConfig(t, api.srv.URL, "secret"), false)
 
-	var log bytes.Buffer
-	err := sw.SetMute(context.Background(), &log, true)
-	if err == nil || err.Error() != "could not gogios-mute Gogios on: [fishfinger]" {
-		t.Fatalf("err = %v, want fishfinger named", err)
+	err := sw.SetMute(context.Background(), &bytes.Buffer{}, true)
+	if err == nil || !strings.Contains(err.Error(), "via the API") || !strings.Contains(err.Error(), "fishfinger") {
+		t.Fatalf("err = %v, want the API route and fishfinger named", err)
 	}
 	if api.posts != 1 {
 		t.Errorf("mute posts = %d, want 1: the mute must be offered while a gateway is unknown", api.posts)
-	}
-	if !strings.Contains(log.String(), "Gogios muted on blowfish (via the API)") {
-		t.Errorf("log = %q, want blowfish reported muted", log.String())
 	}
 }
 
