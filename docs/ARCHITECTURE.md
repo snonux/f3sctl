@@ -228,6 +228,14 @@ distributed lock and cannot be (the only shared storage is NFS from the cluster
 being switched off), but it turns the race window from seconds into one HTTP
 round trip.
 
+Within a node, `job.json` has one owner at a time. `Start` writes it under the
+flock and passes the new job's ID to the detached child (`F3SCTL_JOB_ID`); the
+child's progress and completion writes take the same flock (with a bounded
+wait) and are dropped if `job.json` now records a different ID. That matters
+once a hung child outlives the staleness ceiling: its job reads as failed, a
+new job may start, and the old child must not overwrite it when it finally
+returns.
+
 ---
 
 ## 5. Security boundary

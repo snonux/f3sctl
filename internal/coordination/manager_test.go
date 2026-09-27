@@ -3,6 +3,7 @@ package coordination
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -415,9 +416,7 @@ func TestManagerStartSucceedsAfterAStaleJobIsReclaimed(t *testing.T) {
 // serving reads agree on the operation's state.
 func TestManagerProgressUpdatesStepAndHostState(t *testing.T) {
 	m := newTestManager(t)
-	if err := m.write(Job{ID: "p1", State: JobRunning}); err != nil {
-		t.Fatalf("seeding a job: %v", err)
-	}
+	seedJob(t, m, Job{ID: "p1", State: JobRunning})
 
 	rec := m.Recorder("p1")
 	rec.Progress("waking hosts", "", "", "")
@@ -448,6 +447,7 @@ func TestManagerProgressIsBestEffortWhenNoJobExists(t *testing.T) {
 	if got := m.Read(); got != nil {
 		t.Errorf("Read() = %+v, want still nil: Progress must not invent a job", got)
 	}
+	assertNoLockFile(t, m)
 }
 
 // TestManagerFinishRecordsSuccessAndFailure pins both outcomes Finish must
@@ -465,10 +465,8 @@ func TestManagerFinishRecordsSuccessAndFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := newTestManager(t)
-			if err := m.write(Job{ID: "f1", State: JobRunning,
-				Started: time.Now().UTC().Format(time.RFC3339)}); err != nil {
-				t.Fatalf("seeding a job: %v", err)
-			}
+			seedJob(t, m, Job{ID: "f1", State: JobRunning,
+				Started: time.Now().UTC().Format(time.RFC3339)})
 
 			if err := m.Recorder("f1").Finish(tc.rc, tc.msg); err != nil {
 				t.Fatalf("Finish: %v", err)
@@ -499,9 +497,10 @@ func TestManagerFinishRecordsSuccessAndFailure(t *testing.T) {
 // that was never written -- that would hide a real bug in Start.
 func TestManagerFinishErrorsWhenNoJobExists(t *testing.T) {
 	m := newTestManager(t)
-	if err := m.Recorder("none").Finish(0, ""); err == nil {
-		t.Error("Finish succeeded with no job ever recorded, want an error")
+	if err := m.Recorder("none").Finish(0, ""); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Finish with no job ever recorded = %v, want fs.ErrNotExist", err)
 	}
+	assertNoLockFile(t, m)
 }
 
 // TestNewestJobPrefersEitherNilSide pins the two base cases: with only one
@@ -570,9 +569,7 @@ func TestNewestJobPrefersTheLaterStartedJobWhenNeitherIsRunning(t *testing.T) {
 // right.
 func TestManagerProgressIsSafeForConcurrentHostUpdates(t *testing.T) {
 	m := newTestManager(t)
-	if err := m.write(Job{ID: "g51", State: JobRunning}); err != nil {
-		t.Fatalf("seeding a job: %v", err)
-	}
+	seedJob(t, m, Job{ID: "g51", State: JobRunning})
 
 	const n = 32
 	var wg sync.WaitGroup
@@ -612,9 +609,7 @@ func TestManagerProgressIsSafeForConcurrentHostUpdates(t *testing.T) {
 // atomically with respect to them.
 func TestManagerProgressAndFinishDoNotRaceTheTerminalState(t *testing.T) {
 	m := newTestManager(t)
-	if err := m.write(Job{ID: "g51f", State: JobRunning}); err != nil {
-		t.Fatalf("seeding a job: %v", err)
-	}
+	seedJob(t, m, Job{ID: "g51f", State: JobRunning})
 
 	const n = 16
 	var wg sync.WaitGroup
@@ -736,18 +731,10 @@ func TestRecorderOfASupersededJobCannotOverwriteTheNewerJob(t *testing.T) {
 // over the newer one; the ID check alone would not stop that.
 func TestRecorderWaitsForTheJobLock(t *testing.T) {
 	m := newTestManager(t)
-	if err := m.write(Job{ID: "j", State: JobRunning,
-		Started: time.Now().UTC().Format(time.RFC3339)}); err != nil {
-		t.Fatalf("seeding a job: %v", err)
-	}
+	seedJob(t, m, Job{ID: "j", State: JobRunning,
+		Started: time.Now().UTC().Format(time.RFC3339)})
 
-	// Stand in for Start holding the lock, through another Manager so the
-	// in-process mutex plays no part.
-	unlock, err := NewManager(m.dir, defaultUnmuteTimeout, defaultOffWorstCase).
-		lock(syscall.LOCK_EX | syscall.LOCK_NB)
-	if err != nil {
-		t.Fatalf("taking the lock: %v", err)
-	}
+	unlock := holdLock(t, m)
 
 	done := make(chan error, 1)
 	go func() { done <- m.Recorder("j").Finish(0, "") }()
@@ -782,9 +769,11 @@ func TestRecorderWaitsForTheJobLock(t *testing.T) {
 func TestRecordersInSeparateManagersDoNotLoseUpdates(t *testing.T) {
 	a := newTestManager(t)
 	b := NewManager(a.dir, defaultUnmuteTimeout, defaultOffWorstCase)
-	if err := a.write(Job{ID: "x", State: JobRunning}); err != nil {
-		t.Fatalf("seeding a job: %v", err)
-	}
+	// This pins serialization, not Progress's lock bound: give the two
+	// Managers' cross-process contention (each write fsyncs) ample time so a
+	// slow disk cannot drop an update and flake the count.
+	a.progressLockWait, b.progressLockWait = 10*time.Second, 10*time.Second
+	seedJob(t, a, Job{ID: "x", State: JobRunning})
 
 	const n = 16
 	var wg sync.WaitGroup
@@ -844,5 +833,217 @@ func assertNoTempFiles(t *testing.T, dir string) {
 	}
 	if len(matches) != 0 {
 		t.Errorf("temp files left behind: %v", matches)
+	}
+}
+
+// seedJob records j as Start leaves the state dir: job.json plus the job.lock
+// file a recorder opens (without creating it).
+func seedJob(t *testing.T, m *Manager, j Job) {
+	t.Helper()
+	if err := m.write(j); err != nil {
+		t.Fatalf("seeding job %q: %v", j.ID, err)
+	}
+	f, err := os.OpenFile(m.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("creating job.lock: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("closing job.lock: %v", err)
+	}
+}
+
+// holdLock takes job.lock as another process would -- through a second
+// Manager, so m's in-process mutex plays no part -- and returns the release.
+// The release is also registered as a cleanup, and is safe to call twice.
+func holdLock(t *testing.T, m *Manager) func() {
+	t.Helper()
+	unlock, err := NewManager(m.dir, defaultUnmuteTimeout, defaultOffWorstCase).lock(0, 0)
+	if err != nil {
+		t.Fatalf("taking the lock: %v", err)
+	}
+	var once sync.Once
+	release := func() { once.Do(unlock) }
+	t.Cleanup(release)
+	return release
+}
+
+func assertNoLockFile(t *testing.T, m *Manager) {
+	t.Helper()
+	if _, err := os.Stat(m.lockPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("job.lock exists (stat err %v): a recorder must never create state", err)
+	}
+}
+
+// readRaw returns job.json's bytes, for asserting a file was left untouched.
+func readRaw(t *testing.T, m *Manager) string {
+	t.Helper()
+	raw, err := os.ReadFile(m.statePath())
+	if err != nil {
+		t.Fatalf("reading job.json: %v", err)
+	}
+	return string(raw)
+}
+
+// TestProgressReturnsPromptlyWhileTheLockIsHeld pins that Progress stays close
+// to non-blocking: power.Engine.restoreAC records a step right before it
+// switches mains AC back on, so a held job.lock (a wedged Start, an operator's
+// flock) must cost at most progressLockWait and a dropped update.
+func TestProgressReturnsPromptlyWhileTheLockIsHeld(t *testing.T) {
+	m := newTestManager(t)
+	seedJob(t, m, Job{ID: "p", State: JobRunning})
+	before := readRaw(t, m)
+	holdLock(t, m)
+
+	start := time.Now()
+	m.Recorder("p").Progress("restoring f-host mains AC", "", "", "")
+	took := time.Since(start)
+
+	if took > m.progressLockWait+time.Second {
+		t.Errorf("Progress took %s with the lock held, want about %s at most", took, m.progressLockWait)
+	}
+	if got := readRaw(t, m); got != before {
+		t.Errorf("job.json changed without the lock:\n%s", got)
+	}
+}
+
+// TestFinishGivesUpAfterTheLockWait pins Finish's bound: a lock held for good
+// makes it return errLockHeld after finishLockWait instead of hanging the
+// exiting child, and job.json is left alone.
+func TestFinishGivesUpAfterTheLockWait(t *testing.T) {
+	m := newTestManager(t)
+	m.finishLockWait = 50 * time.Millisecond
+	seedJob(t, m, Job{ID: "f", State: JobRunning})
+	before := readRaw(t, m)
+	holdLock(t, m)
+
+	start := time.Now()
+	err := m.Recorder("f").Finish(0, "")
+	took := time.Since(start)
+
+	if !errors.Is(err, errLockHeld) {
+		t.Fatalf("Finish with the lock held = %v, want errLockHeld", err)
+	}
+	if took < m.finishLockWait {
+		t.Errorf("Finish gave up after %s, want it to wait %s first", took, m.finishLockWait)
+	}
+	if took > m.finishLockWait+time.Second {
+		t.Errorf("Finish took %s, want about %s", took, m.finishLockWait)
+	}
+	if got := readRaw(t, m); got != before {
+		t.Errorf("job.json changed without the lock:\n%s", got)
+	}
+}
+
+// TestStartReportsRunningWhileARecorderHoldsTheLock pins the other side of the
+// shared lock: while a recorder is mid-update, Start says a job is running
+// rather than queuing behind it or writing past it.
+func TestStartReportsRunningWhileARecorderHoldsTheLock(t *testing.T) {
+	m := newTestManager(t)
+	seedJob(t, m, Job{ID: "done", State: JobDone, Started: time.Now().UTC().Format(time.RFC3339)})
+	// The recorder's own lock path: the existing lock file, no O_CREATE.
+	unlock, err := m.lock(0, 0)
+	if err != nil {
+		t.Fatalf("taking the lock as a recorder: %v", err)
+	}
+	defer unlock()
+
+	spawned := false
+	m.spawnFunc = func(string, []string) error { spawned = true; return nil }
+	if _, err := m.Start("off", nil); !errors.Is(err, ErrJobRunning) {
+		t.Fatalf("Start = %v, want ErrJobRunning while a recorder holds job.lock", err)
+	}
+	if spawned {
+		t.Error("spawn ran while a recorder held job.lock")
+	}
+	if got := m.Read(); got == nil || got.ID != "done" {
+		t.Errorf("Read() = %+v, want the old job untouched", got)
+	}
+}
+
+// TestProgressOfASlowJobDoesNotPersistStaleness is the regression test for a
+// recorder writing Read's client-facing view back: a job past the staleness
+// ceiling reads as failed, but its still-alive child's own Progress must keep
+// it running on disk.
+func TestProgressOfASlowJobDoesNotPersistStaleness(t *testing.T) {
+	m := newTestManager(t)
+	old := time.Now().Add(-(m.StaleCeiling() + time.Minute)).UTC().Format(time.RFC3339)
+	seedJob(t, m, Job{ID: "slow", State: JobRunning, Started: old})
+
+	m.Recorder("slow").Progress("still going", "", "", "")
+
+	j, err := m.load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if j.State != JobRunning || j.Error != "" || j.Step != "still going" {
+		t.Errorf("job.json = %+v, want still running with the step and no error", j)
+	}
+}
+
+// TestRecorderWithoutAJobIDTouchesNothing pins Recorder("") -- a job-run
+// started without JobIDEnv -- as inert: it neither matches a legacy job.json
+// that has no id nor creates any state.
+func TestRecorderWithoutAJobIDTouchesNothing(t *testing.T) {
+	t.Run("legacy job.json without an id", func(t *testing.T) {
+		m := newTestManager(t)
+		seedJob(t, m, Job{State: JobRunning})
+		before := readRaw(t, m)
+
+		rec := m.Recorder("")
+		rec.Progress("step", "f0", "working", "")
+		if err := rec.Finish(0, ""); !errors.Is(err, ErrNoJobID) {
+			t.Fatalf("Finish = %v, want ErrNoJobID", err)
+		}
+		if got := readRaw(t, m); got != before {
+			t.Errorf("job.json changed:\n%s", got)
+		}
+	})
+	t.Run("no state dir", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "missing")
+		m := NewManager(dir, defaultUnmuteTimeout, defaultOffWorstCase)
+		if err := m.Recorder("").Finish(0, ""); !errors.Is(err, ErrNoJobID) {
+			t.Fatalf("Finish = %v, want ErrNoJobID", err)
+		}
+		if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("state dir exists (stat err %v), want it never created", err)
+		}
+	})
+}
+
+// TestRecorderInAMissingDirCreatesNothing pins that a recorder never creates
+// the state dir or job.lock, even with a job ID: a root-run job-run would
+// otherwise leave root-owned state the CGI's Start cannot open.
+func TestRecorderInAMissingDirCreatesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	m := NewManager(dir, defaultUnmuteTimeout, defaultOffWorstCase)
+
+	rec := m.Recorder("x")
+	rec.Progress("step", "", "", "")
+	if err := rec.Finish(1, "boom"); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Finish = %v, want fs.ErrNotExist", err)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("state dir exists (stat err %v), want it never created", err)
+	}
+}
+
+// TestFinishReportsACorruptJobState pins that an unparseable job.json is its
+// own error, not mistaken for a missing one, and is left as found.
+func TestFinishReportsACorruptJobState(t *testing.T) {
+	m := newTestManager(t)
+	seedJob(t, m, Job{ID: "c"})
+	if err := os.WriteFile(m.statePath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupting job.json: %v", err)
+	}
+
+	err := m.Recorder("c").Finish(0, "")
+	if !errors.Is(err, ErrCorruptJobState) {
+		t.Fatalf("Finish = %v, want ErrCorruptJobState", err)
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Finish = %v, must not read as fs.ErrNotExist", err)
+	}
+	if got := readRaw(t, m); got != "{not json" {
+		t.Errorf("job.json = %q, want it left as found", got)
 	}
 }

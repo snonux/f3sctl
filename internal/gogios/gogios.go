@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/snonux/f3sctl/internal/atomicfile"
 	"github.com/snonux/f3sctl/internal/config"
 )
 
@@ -123,7 +124,7 @@ func Fetch(ctx context.Context, cfg config.Config) (*Report, error) {
 // there is nothing to clear.
 func ClearCache(cfg config.Config) error {
 	p := cachePath(cfg)
-	removeStaleTemps(p, staleTempAge)
+	atomicfile.RemoveStaleTemps(p, staleTempAge)
 	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -351,100 +352,13 @@ func readCache(path string, ttl time.Duration) (*Report, bool) {
 	return r, true
 }
 
-// writeCache writes the report body atomically: it writes a uniquely named
-// temp file in the cache's directory, fsyncs it, and renames it over the
-// cache. Each writer gets its own temp file, so concurrent writers --
-// goroutines in one process or, as in production, separate CGI processes --
-// never share bytes; the last rename wins and a reader only ever sees a
-// complete file. The fsync keeps a power loss from leaving a renamed but torn
-// file; the rename itself may still be lost, which only means an older (or
-// no) cache and a re-fetch. Temp files orphaned by killed writers are swept
-// on each write.
-func writeCache(path string, raw []byte) (err error) {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("creating the Gogios cache dir: %w", err)
-	}
-	removeStaleTemps(path, staleTempAge)
-
-	// os.CreateTemp creates the file with mode 0600.
-	f, err := os.CreateTemp(dir, filepath.Base(path)+tempInfix+"*"+tempSuffix)
-	if err != nil {
-		return fmt.Errorf("creating the Gogios cache temp file: %w", err)
-	}
-	tmp := f.Name()
-	// Remove the temp file on any failure; after a successful rename it no
-	// longer exists under this name.
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-
-	if err := writeAndSync(f, raw); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("renaming the Gogios cache into place: %w", err)
-	}
-	return nil
-}
-
-// syncWriteCloser is the slice of *os.File that writeAndSync needs; it is an
-// interface so a test can make each step fail.
-type syncWriteCloser interface {
-	io.WriteCloser
-	Sync() error
-}
-
-// writeAndSync writes raw to f, fsyncs it, and closes it. f is closed on
-// every path.
-func writeAndSync(f syncWriteCloser, raw []byte) error {
-	if _, err := f.Write(raw); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("writing the Gogios cache temp file: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("syncing the Gogios cache temp file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing the Gogios cache temp file: %w", err)
-	}
-	return nil
-}
-
-// tempInfix and tempSuffix frame the random part of a cache temp file's name:
-// <cache base>.<random>.tmp.
-const (
-	tempInfix  = "."
-	tempSuffix = ".tmp"
-)
-
-// removeStaleTemps deletes cache temp siblings of path older than maxAge.
-// It is best-effort: a CGI process killed between CreateTemp and Rename
-// leaves its uniquely named temp file behind, and without this sweep those
-// would accumulate forever. Fresh temp files are left alone, since they may
-// belong to a writer that is still running. Errors are ignored; the next
-// write retries.
-func removeStaleTemps(path string, maxAge time.Duration) {
-	dir := filepath.Dir(path)
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return
-	}
-	prefix := filepath.Base(path) + tempInfix
-	for _, e := range entries {
-		name := e.Name()
-		if !e.Type().IsRegular() || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, tempSuffix) {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil || time.Since(info.ModTime()) <= maxAge {
-			continue
-		}
-		_ = os.Remove(filepath.Join(dir, name))
-	}
+// writeCache writes the report body atomically (see atomicfile.Write): a
+// uniquely named, fsynced temp file renamed over the cache, so concurrent
+// writers -- goroutines in one process or, as in production, separate CGI
+// processes -- never share bytes and a reader only ever sees a complete file.
+// Temp files orphaned by killed writers are swept on each write.
+func writeCache(path string, raw []byte) error {
+	return atomicfile.Write(path, raw, "Gogios cache", staleTempAge)
 }
 
 func parse(raw []byte) (*Report, error) {

@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/snonux/f3sctl/internal/atomicfile"
 )
 
 // JobState is the lifecycle of an asynchronous power operation.
@@ -220,7 +221,33 @@ type Manager struct {
 	// The write-then-rename in write() is what keeps a concurrent reader from
 	// seeing a half-written record across that boundary.
 	mu sync.Mutex
+
+	// progressLockWait and finishLockWait bound how long a recorder's
+	// Progress and Finish wait for the job.lock flock before giving up (see
+	// update). Fields rather than constants only so tests can shorten them;
+	// NewManager sets the defaults.
+	progressLockWait time.Duration
+	finishLockWait   time.Duration
 }
+
+// Default lock waits for a recorder (see Manager.progressLockWait).
+//
+// Progress must stay close to non-blocking: power.Engine.restoreAC records a
+// step right before switching mains AC back on, and whatever holds job.lock
+// (a wedged CGI Start, an operator's flock(1)) must not be able to hold that
+// up. A dropped progress update costs a client one stale step. Finish is the
+// one record a polling client cannot do without, so it waits longer, but is
+// still bounded so a held lock cannot keep the child from exiting.
+const (
+	defaultProgressLockWait = 200 * time.Millisecond
+	defaultFinishLockWait   = 5 * time.Second
+	lockPollInterval        = 10 * time.Millisecond
+)
+
+// stateTempAge is how old a leftover job.json temp file must be before a
+// write sweeps it (see atomicfile.RemoveStaleTemps). A job write takes
+// milliseconds, so anything this old belongs to a writer that was killed.
+const stateTempAge = 5 * time.Minute
 
 // NewManager returns a Manager whose state lives under dir.
 //
@@ -234,23 +261,26 @@ type Manager struct {
 // only to derive staleCeiling; see staleCeilingFor and staleBuffer's doc
 // comments for why the ceiling must track both.
 func NewManager(dir string, unmuteTimeout, offWorstCase time.Duration) *Manager {
-	return &Manager{dir: dir, staleCeiling: staleCeilingFor(unmuteTimeout, offWorstCase)}
+	return &Manager{
+		dir:              dir,
+		staleCeiling:     staleCeilingFor(unmuteTimeout, offWorstCase),
+		progressLockWait: defaultProgressLockWait,
+		finishLockWait:   defaultFinishLockWait,
+	}
 }
 
 func (m *Manager) statePath() string { return filepath.Join(m.dir, "job.json") }
 func (m *Manager) lockPath() string  { return filepath.Join(m.dir, "job.lock") }
 func (m *Manager) logPath() string   { return filepath.Join(m.dir, "job.log") }
 
-// Read returns the current or last job, or nil if none has ever run.
+// Read returns the current or last job, or nil if none has ever run (or
+// job.json is unreadable).
 func (m *Manager) Read() *Job {
-	raw, err := os.ReadFile(m.statePath())
+	jp, err := m.load()
 	if err != nil {
 		return nil
 	}
-	var j Job
-	if err := json.Unmarshal(raw, &j); err != nil {
-		return nil
-	}
+	j := *jp
 
 	// A job recorded as running whose process is gone (the node rebooted
 	// mid-shutdown, say) would otherwise block every action forever. Treat a
@@ -260,6 +290,23 @@ func (m *Manager) Read() *Job {
 		j.Error = "the process that owned this job is gone (node restarted?)"
 	}
 	return &j
+}
+
+// load returns job.json exactly as recorded, without Read's staleness
+// reclassification: that is a view for clients, and must never be written
+// back by a recorder of a slow-but-alive job. It returns an error wrapping
+// fs.ErrNotExist when there is no job.json and one wrapping
+// ErrCorruptJobState when it does not parse.
+func (m *Manager) load() (*Job, error) {
+	raw, err := os.ReadFile(m.statePath())
+	if err != nil {
+		return nil, err
+	}
+	var j Job
+	if err := json.Unmarshal(raw, &j); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrCorruptJobState, err)
+	}
+	return &j, nil
 }
 
 // stale reports whether a job claiming to run has outlived any plausible
@@ -311,69 +358,39 @@ func jobIsStale(age, ceiling time.Duration) bool {
 // hardcoded guess. See lz0.
 func (m *Manager) StaleCeiling() time.Duration { return m.staleCeiling }
 
-// write atomically replaces job.json with j.
-//
-// It writes a uniquely named temp file (os.CreateTemp) and renames it into
-// place, so a reader never sees a half-written record and two writers can
-// never share -- and corrupt -- one fixed temp path. Callers other than tests
-// hold the job.lock flock (Start, update), so writers are also serialized.
-func (m *Manager) write(j Job) (err error) {
-	if err := os.MkdirAll(m.dir, 0o700); err != nil {
-		return err
-	}
+// write atomically replaces job.json with j (see atomicfile.Write: a unique,
+// fsynced temp file renamed into place), so a reader never sees a
+// half-written record and two writers never share one temp path. Callers
+// other than tests hold the job.lock flock (Start, update), so writers are
+// also serialized.
+func (m *Manager) write(j Job) error {
 	raw, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
 	}
-
-	// os.CreateTemp creates the file with mode 0600.
-	f, err := os.CreateTemp(m.dir, filepath.Base(m.statePath())+".*.tmp")
-	if err != nil {
-		return fmt.Errorf("creating the job state temp file: %w", err)
-	}
-	tmp := f.Name()
-	// Remove the temp file on any failure; after a successful rename it no
-	// longer exists under this name.
-	defer func() {
-		if err != nil {
-			_ = os.Remove(tmp)
-		}
-	}()
-
-	if _, err := f.Write(append(raw, '\n')); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("writing the job state temp file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing the job state temp file: %w", err)
-	}
-	if err := os.Rename(tmp, m.statePath()); err != nil {
-		return fmt.Errorf("renaming the job state into place: %w", err)
-	}
-	return nil
+	return atomicfile.Write(m.statePath(), append(raw, '\n'), "job state", stateTempAge)
 }
 
-// errLockHeld wraps the flock failure lock returns, so Start can tell
-// "somebody else holds the lock" from "the lock file could not be opened".
+// errLockHeld wraps a failure to get the job.lock flock within the allowed
+// wait, so Start can tell "somebody else holds the lock" from "the lock file
+// could not be opened".
 var errLockHeld = errors.New("the job lock is held")
 
-// lock opens job.lock and flocks it with how (LOCK_EX, optionally with
-// LOCK_NB), returning the function that releases it. A failed flock is
-// reported wrapping errLockHeld.
-func (m *Manager) lock(how int) (unlock func(), err error) {
-	if err := os.MkdirAll(m.dir, 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(m.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+// lock opens job.lock with the extra open flag (os.O_CREATE for Start, none
+// for a recorder, which must never create state -- see update) and flocks it
+// exclusively, retrying for up to wait. A zero wait is a single non-blocking
+// attempt. It returns the function that releases the lock.
+func (m *Manager) lock(flag int, wait time.Duration) (unlock func(), err error) {
+	f, err := os.OpenFile(m.lockPath(), os.O_RDWR|flag, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("opening the job lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+	if err := flockWithin(int(f.Fd()), wait); err != nil {
 		// The lock file's close error is not actionable; it is explicitly
 		// discarded so errcheck keeps flagging write-path os.File closes
 		// (see .golangci.yml).
 		_ = f.Close()
-		return nil, fmt.Errorf("%w: %w", errLockHeld, err)
+		return nil, err
 	}
 	return func() {
 		// Unlocking and closing errors are not actionable (closing the fd
@@ -383,6 +400,28 @@ func (m *Manager) lock(how int) (unlock func(), err error) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// flockWithin takes an exclusive flock on fd, polling a non-blocking attempt
+// every lockPollInterval until wait has passed. A plain blocking flock could
+// not be bounded. Contention past the wait is reported wrapping errLockHeld;
+// any other flock error is returned as is, straight away.
+func flockWithin(fd int, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return fmt.Errorf("locking the job lock: %w", err)
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return fmt.Errorf("%w (waited %s)", errLockHeld, wait)
+		}
+		time.Sleep(min(lockPollInterval, left))
+	}
 }
 
 // ErrJobRunning is returned when another power operation already holds the
@@ -400,6 +439,17 @@ var ErrJobRunning = errors.New("another power operation is already running")
 // Manager.update.
 var ErrJobSuperseded = errors.New("job.json records a newer job")
 
+// ErrNoJobID is returned by the Finish of a recorder with an empty job ID
+// (Manager.Recorder("")): a job-run child started without JobIDEnv -- by
+// hand, or by a CGI binary older than JobIDEnv -- does not know which job it
+// is running, so it records nothing and touches no state on disk.
+var ErrNoJobID = errors.New("no job ID to record against (" + JobIDEnv + " unset)")
+
+// ErrCorruptJobState is returned by a recorder's Finish when job.json exists
+// but does not parse as a job record. It is distinct from fs.ErrNotExist (no
+// job.json at all) so a corrupt record is not mistaken for a missing one.
+var ErrCorruptJobState = errors.New("job.json is not a valid job record")
+
 // Environment variables through which Manager.spawn hands the detached
 // job-run child its state directory and the ID of the job it is running.
 // jobrun.Run reads them back; they are named here, next to spawn, so the two
@@ -414,12 +464,15 @@ const (
 // The lock is held only long enough to claim the slot; the child runs
 // independently of this CGI process, which exits as soon as it has replied.
 func (m *Manager) Start(action string, args []string) (Job, error) {
-	// Non-blocking: actions are never queued. A running child's Progress or
-	// Finish also holds this lock, for the few milliseconds of its
-	// read-check-write (see update); a Start landing in that window is told a
-	// job is running, which is true in every case but a stale-but-alive
-	// child's, and there a retry succeeds.
-	unlock, err := m.lock(syscall.LOCK_EX | syscall.LOCK_NB)
+	// A single non-blocking attempt: actions are never queued. A running
+	// child's Progress or Finish also holds this lock, for the few
+	// milliseconds of its read-check-write (see update); a Start landing in
+	// that window is told a job is running, which is true in every case but a
+	// stale-but-alive child's, and there a retry succeeds.
+	if err := os.MkdirAll(m.dir, 0o700); err != nil {
+		return Job{}, err
+	}
+	unlock, err := m.lock(os.O_CREATE, 0)
 	if errors.Is(err, errLockHeld) {
 		return Job{}, ErrJobRunning
 	}
@@ -548,11 +601,14 @@ var _ JobRecorder = jobRecorder{}
 // without that those goroutines would Read the same record, each add only
 // their own host, and the second write would overwrite the first -- losing
 // the other hosts' updates. See the mu field's doc comment.
+//
+// It is best effort and close to non-blocking: it waits at most
+// progressLockWait for job.lock and otherwise drops the update, because
+// power.Engine.restoreAC records a step right before switching mains AC back
+// on. A dropped update, including one for a superseded job, must never derail
+// the operation the client actually asked for.
 func (r jobRecorder) Progress(step string, host string, phase, detail string) {
-	// Best effort: losing a progress update -- including one dropped because
-	// the job was superseded -- must never derail the operation the client
-	// actually asked for.
-	_ = r.m.update(r.id, func(j *Job) {
+	_ = r.m.update(r.id, r.m.progressLockWait, func(j *Job) {
 		if step != "" {
 			j.Step = step
 		}
@@ -571,10 +627,13 @@ func (r jobRecorder) Progress(step string, host string, phase, detail string) {
 // Progress from one of the parallel-shutdown goroutines cannot race Finish's
 // read-then-write and overwrite the terminal state with a stale host map.
 //
-// It returns fs.ErrNotExist when no job.json exists and ErrJobSuperseded when
-// job.json records a job other than this recorder's.
+// It waits at most finishLockWait for job.lock. Its errors (see update)
+// wrap ErrNoJobID for a recorder without a job ID, fs.ErrNotExist when there
+// is no job state, ErrCorruptJobState when job.json does not parse,
+// ErrJobSuperseded when job.json records another job, or errLockHeld when the
+// lock stayed held past the wait.
 func (r jobRecorder) Finish(rc int, errMsg string) error {
-	return r.m.update(r.id, func(j *Job) {
+	return r.m.update(r.id, r.m.finishLockWait, func(j *Job) {
 		j.State = JobDone
 		if rc != 0 {
 			j.State = JobFailed
@@ -596,26 +655,37 @@ func (r jobRecorder) Finish(rc int, errMsg string) error {
 // under the flock, so with the check here also under it, the old child either
 // writes before the new job exists or sees the new ID and backs off -- it can
 // never check the old ID, lose the CPU to Start, and then rename its stale
-// record over the new one.
+// record over the new one. The flock is waited for at most wait.
 //
-// The flock is taken blocking: Start holds it only for as long as it takes to
-// record a job and spawn its child.
-func (m *Manager) update(id string, mutate func(*Job)) error {
+// update never creates state: an empty id returns ErrNoJobID before touching
+// disk, and job.lock is opened without O_CREATE, so a missing state dir or
+// lock is fs.ErrNotExist. (Start creates both before it records a job.)
+// Otherwise a root-run `f3sctl job-run` could leave a root-owned state dir or
+// lock behind that the unprivileged CGI's Start then cannot open.
+//
+// It reads job.json with load, not Read: Read's staleness reclassification is
+// a client-facing view, and persisting it here would have a slow-but-alive
+// job's own progress update mark it failed.
+func (m *Manager) update(id string, wait time.Duration, mutate func(*Job)) error {
+	if id == "" {
+		return ErrNoJobID
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	unlock, err := m.lock(syscall.LOCK_EX)
+	unlock, err := m.lock(0, wait)
 	if err != nil {
 		return err
 	}
 	defer unlock()
 
-	j := m.Read()
-	if j == nil {
-		return fs.ErrNotExist
+	j, err := m.load()
+	if err != nil {
+		return err
 	}
 	if j.ID != id {
-		return fmt.Errorf("recording job %q: %w (%q)", id, ErrJobSuperseded, j.ID)
+		return fmt.Errorf("recording job %q: %w (job.json records job %q)", id, ErrJobSuperseded, j.ID)
 	}
 	mutate(j)
 	return m.write(*j)

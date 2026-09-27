@@ -44,6 +44,11 @@ func jobTestConfig(t *testing.T) (config.Config, string) {
 	if err := os.WriteFile(filepath.Join(dir, "job.json"), raw, 0o600); err != nil {
 		t.Fatalf("writing job.json: %v", err)
 	}
+	// Start creates job.lock before recording a job; the child's recorder
+	// opens it without creating it.
+	if err := os.WriteFile(filepath.Join(dir, "job.lock"), nil, 0o600); err != nil {
+		t.Fatalf("creating job.lock: %v", err)
+	}
 	t.Setenv(coordination.JobDirEnv, dir)
 	t.Setenv(coordination.JobIDEnv, job.ID)
 	return cfg, dir
@@ -108,5 +113,24 @@ func TestRunDoesNotOverwriteANewerJob(t *testing.T) {
 	j := readJob(t, cfg, dir)
 	if j.ID != "test" || j.State != coordination.JobRunning || j.RC != nil {
 		t.Fatalf("job = %+v, want the newer job still running and untouched", j)
+	}
+}
+
+// TestRunWithoutAJobIDRecordsNothing pins a job-run started without
+// F3SCTL_JOB_ID (by hand, or by a CGI binary predating it): the action still
+// runs, but the child does not know its job, so job.json is left alone.
+func TestRunWithoutAJobIDRecordsNothing(t *testing.T) {
+	cfg, dir := jobTestConfig(t)
+	t.Setenv(coordination.JobIDEnv, "") // registers the restore
+	if err := os.Unsetenv(coordination.JobIDEnv); err != nil {
+		t.Fatalf("unsetting %s: %v", coordination.JobIDEnv, err)
+	}
+
+	if err := Run(context.Background(), cfg, []string{"ac", "status"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	j := readJob(t, cfg, dir)
+	if j.ID != "test" || j.State != coordination.JobRunning || j.RC != nil {
+		t.Fatalf("job = %+v, want it still running and untouched", j)
 	}
 }

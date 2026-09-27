@@ -215,6 +215,14 @@ gogios and dtail and owns the repo layout and build hosts. Note that
 updating f3sctl needs the cluster up — you cannot update the tool while the
 thing it powers on is off.
 
+Update pi0/pi1 while **no power job is running** on them (the API's `GET /job`
+says so). A job child records its outcome only against the job ID the API
+hands it in `F3SCTL_JOB_ID`, so a stale-but-alive child can never overwrite a
+newer job. A child that an older CGI binary spawns mid-upgrade, or a `job-run`
+started by hand, has no ID: it still performs the action but records nothing,
+and the API keeps reporting the job as `running` until the staleness ceiling
+(`staleAfterSeconds`) marks it failed.
+
 ## Configuration
 
 Compiled-in defaults, overlaid by `/usr/local/etc/f3sctl.json` if present, so

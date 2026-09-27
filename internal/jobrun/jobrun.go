@@ -74,7 +74,9 @@ func Run(ctx context.Context, cfg config.Config, args []string) error {
 	// The recorder is bound to the job this child was spawned for, so a child
 	// that hangs past the staleness ceiling and is superseded by a newer job
 	// cannot overwrite that job's record. An unset JobIDEnv (job-run invoked
-	// by hand) matches no job, so nothing is recorded.
+	// by hand, or spawned by a CGI binary predating it) records nothing and
+	// touches no state (coordination.ErrNoJobID); deliberately so, since
+	// adopting whatever job.json holds would reopen that overwrite.
 	rec := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)).
 		Recorder(os.Getenv(coordination.JobIDEnv))
 
