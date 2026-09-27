@@ -38,11 +38,13 @@ Usage:
   f3sctl power f0|f1|f2|f3 off Power off one host only (fans and Gogios untouched)
   f3sctl fans status           Rack-fan Shelly plug state
   f3sctl fans on               Switch the rack fans on
-  f3sctl fans off [--force]    Switch the rack fans off
+  f3sctl fans off [--force]    Switch the rack fans off (refuses while f0/f1/f2
+                               may still be up, or a power job is running)
   f3sctl ac status             F-host mains AC plug state (shelly2)
   f3sctl ac on                 Restore mains AC to f0-f3 (and their JetKVMs)
   f3sctl ac off [--force]      Cut mains AC to f0-f3 (independent of power off;
-                               refuses while any f-host may still be up)
+                               refuses while any f-host may still be up, or a
+                               power job is running)
   f3sctl monitoring status     Is Gogios alerting muted?
   f3sctl monitoring mute       Suppress Gogios alerting
   f3sctl monitoring unmute     Resume Gogios alerting (clears a stranded mute)
@@ -64,7 +66,8 @@ Global flags:
                  the key is pinned to those two hosts. Use for debugging or
                  when running on a Pi.
   --force, -f    Confirm an action the server guards, e.g. switching the rack
-                 fans or f-host AC off while hosts are still running.
+                 fans or f-host AC off while hosts are still running or a
+                 power job is in flight.
   --verbose, -v  Trace every API call to stderr: method, URL, status, which of
                  pi0/pi1 answered, and how long it took. Implies --remote,
                  since there is nothing to trace when acting locally.

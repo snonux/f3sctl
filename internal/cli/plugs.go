@@ -5,17 +5,21 @@ package cli
 //
 // The two nouns are the same command over a different plug: one grammar
 // (status|on|off), one output shape, and one off guard that refuses while a
-// host may still be running. What differs -- which engine methods reach the
-// plug, which hosts count as running, and the wording -- is carried by a plug
-// value (fansPlug, acPlug) rather than by a twin copy of every function.
+// host may still be running or a power job is in flight. What differs --
+// which engine methods reach the plug, which hosts count as running, and the
+// wording -- is carried by a plug value (fansPlug, acPlug) rather than by a
+// twin copy of every function.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/snonux/f3sctl/internal/config"
+	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/httpapi"
 	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/presenter"
 )
@@ -153,12 +157,20 @@ func runPlug(ctx context.Context, cfg config.Config, p plug, args []string, forc
 	if liveHosts == nil {
 		liveHosts = p.liveHosts(eng)
 	}
-	return plugVerb(ctx, eng, p, verb, force, liveHosts, stdout)
+	// Only a guarded off consults the job state: on is never gated, and
+	// --force skips every guard, so neither should pay for (or warn about)
+	// reading the API key.
+	var jobs jobGuard
+	if verb == "off" && !force {
+		jobs = newJobGuard(cfg, stderr)
+	}
+	return plugVerb(ctx, eng, p, verb, force, liveHosts, jobs, stdout)
 }
 
-// plugVerb performs one already-parsed plug verb against eng.
+// plugVerb performs one already-parsed plug verb against eng. jobs is only
+// consulted by a guarded off, and may be nil otherwise.
 func plugVerb(ctx context.Context, eng plugEngine, p plug, verb string, force bool,
-	liveHosts liveHostsFunc, stdout io.Writer) error {
+	liveHosts liveHostsFunc, jobs jobGuard, stdout io.Writer) error {
 
 	switch verb {
 	case "status":
@@ -171,11 +183,14 @@ func plugVerb(ctx context.Context, eng plugEngine, p plug, verb string, force bo
 
 	case "on":
 		// Never gated: more cooling, or mains restored, is never the risky
-		// direction, so liveness is not consulted.
+		// direction, so neither liveness nor the job state is consulted. That
+		// also keeps `ac on` / `fans on` the way out when a job's process died
+		// and its job.json still reads "running" -- the recovery path
+		// docs/CLIENT.md ("Stuck job: recovering the plugs") points at.
 		return plugSwitch(ctx, eng, p, true, stdout)
 
 	default: // "off", the only spelling parsePlugArgs has left standing
-		return plugOff(ctx, eng, p, force, liveHosts, stdout)
+		return plugOff(ctx, eng, p, force, liveHosts, jobs, stdout)
 	}
 }
 
@@ -197,31 +212,59 @@ func parsePlugArgs(args []string) (verb string, ok bool) {
 }
 
 // plugOff refuses to switch a plug off while a host it serves may still be
-// answering, unless told explicitly to.
+// answering, or while a power job is running, unless told explicitly to.
 //
 // force is the parsed --force/-f global flag and liveHosts the liveness probe,
 // both threaded down from run rather than derived here: see runPlug for why
 // force cannot be re-read from the arguments, and the liveHostsFunc type for
-// why the probe is a seam rather than a direct engine call.
+// why the probe is a seam rather than a direct engine call. --force skips both
+// guards, the job one included.
 //
 // The guard is slow on an idle rack, by design: the probe behind it wants
 // several consecutive missed pings per host before it will call one off, so
 // that a single dropped echo reply cannot cut cooling or mains to a running
 // rack. Half a minute is a fair price for that, and --force skips it for
 // anyone who is sure.
+//
+// The job guard mirrors the API's fans-off / ac-off: the rack-wide jobs switch
+// the fan plug themselves and `power all cycle` cuts and restores AC, so a
+// switch mid-job races them -- worst of all an `ac off` in a cycle's standby
+// wait, when the hosts are silent and the liveness guard has nothing to say.
+// It is asked twice, as the API asks: once up front, so a busy rack is refused
+// before the half-minute probe, and again after the probe with the switch
+// itself inside it (jobGuard.whileIdle holds this node's job lock across the
+// write, so a job cannot start under it). The second answer comes before the
+// probe's verdict: a job waking the hosts makes the probe hear them, and "use
+// --force" would then be exactly the wrong advice.
 func plugOff(ctx context.Context, eng plugEngine, p plug, force bool,
-	liveHosts liveHostsFunc, stdout io.Writer) error {
+	liveHosts liveHostsFunc, jobs jobGuard, stdout io.Writer) error {
 
-	if !force {
-		up := liveHosts(ctx)
-		if err := ctx.Err(); err != nil {
-			return guardInterrupted(p.subject, err)
-		}
+	if force {
+		return plugSwitch(ctx, eng, p, false, stdout)
+	}
+
+	if err := jobs.whileIdle(ctx, func() error { return nil }); err != nil {
+		return jobRefusal(p, err)
+	}
+	up := liveHosts(ctx)
+	if err := ctx.Err(); err != nil {
+		return guardInterrupted(p.subject, err)
+	}
+
+	// ran tells the guard's own refusal from fn's errors, which are the
+	// liveness refusal and the plug write and must come back unchanged.
+	ran := false
+	err := jobs.whileIdle(ctx, func() error {
+		ran = true
 		if len(up) > 0 {
 			return fmt.Errorf("%v may still be running; %s", up, p.refusal)
 		}
+		return plugSwitch(ctx, eng, p, false, stdout)
+	})
+	if err != nil && !ran {
+		return jobRefusal(p, err)
 	}
-	return plugSwitch(ctx, eng, p, false, stdout)
+	return err
 }
 
 // plugSwitch switches p and reports the state the plug read back.
@@ -241,4 +284,79 @@ func plugSwitch(ctx context.Context, eng plugEngine, p plug, on bool, stdout io.
 func guardInterrupted(subject string, err error) error {
 	return fmt.Errorf("interrupted while checking whether the f-hosts are off; %s left "+
 		"untouched: %w", subject, err)
+}
+
+// jobRefusal is plugOff's error when the job guard would not let the switch
+// run: a job in flight, or a job state it could not read. Neither switched
+// anything.
+func jobRefusal(p plug, err error) error {
+	if errors.Is(err, coordination.ErrJobRunning) {
+		return fmt.Errorf("%w; %s left untouched. Wait for it to finish, "+
+			"or use --force if you mean it", err, p.subject)
+	}
+	return fmt.Errorf("cannot tell whether a power job is running: %w; %s left untouched. "+
+		"Run it as a user that can read the state dir (doas on pi0/pi1), "+
+		"or use --force if you mean it", err, p.subject)
+}
+
+// jobGuard is plugOff's view of the power jobs: whileIdle runs fn only while
+// no job is running, and keeps one from starting on this node until fn has
+// returned. An error from the guard itself wraps
+// coordination.ErrJobRunning when a job is in flight; fn's own error comes
+// back unchanged.
+//
+// A seam for the same reason liveHostsFunc is one: the production guard reads
+// job state from disk and asks the other API nodes over HTTP.
+type jobGuard interface {
+	whileIdle(ctx context.Context, fn func() error) error
+}
+
+// coordGuard is the production jobGuard, built from the same coordination
+// pieces the API's own plug routes use: the other API nodes' PeerSet first,
+// then this node's Manager, the order powerapi's jobStartedMeanwhile asks
+// them in, so the local check and lock sit right against the write.
+//
+// Like the API it is a lock on this node only: the peers cannot be locked,
+// just asked, and one that cannot be reached counts as idle (PeerSet.Busy's
+// fail-open, so a dead Pi cannot block the plugs). On a laptop there is no
+// local job state at all and the peers are the whole answer.
+type coordGuard struct {
+	jobs   *coordination.Manager
+	peers  *coordination.PeerSet // nil when there is no API key to ask with
+	apiKey string
+}
+
+func (g coordGuard) whileIdle(ctx context.Context, fn func() error) error {
+	if g.peers != nil {
+		// "" is this host: PeerSet then skips its own addresses.
+		if busy, node := g.peers.Busy(ctx, "", g.apiKey); busy {
+			return fmt.Errorf("%w on %s", coordination.ErrJobRunning, node)
+		}
+	}
+	return g.jobs.WhileIdle(fn)
+}
+
+// newJobGuard builds the production jobGuard from cfg: this node's job state
+// in cfg.StateDir, constructed as the API and the job child construct it, and
+// cfg.PeerNodes asked at httpapi.PeerJobPath with this CLI's API key.
+//
+// Without a readable API key the peers cannot be asked (they would answer
+// 401); that is said on stderr and only this node is checked, the same
+// fail-open the API applies to a peer it cannot reach.
+func newJobGuard(cfg config.Config, stderr io.Writer) jobGuard {
+	g := coordGuard{
+		jobs: coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)),
+	}
+	if len(cfg.PeerNodes) == 0 {
+		return g
+	}
+	key, err := cfg.ResolveAPIKey()
+	if err != nil {
+		fmt.Fprintf(stderr, "f3sctl: cannot ask the API nodes whether a power job is running "+
+			"(%v); checking this host only\n", err)
+		return g
+	}
+	g.peers = coordination.NewPeerSet(cfg.PeerNodes, httpapi.PeerJobPath(cfg))
+	g.apiKey = key
+	return g
 }

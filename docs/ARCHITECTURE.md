@@ -249,6 +249,14 @@ once a hung child outlives the staleness ceiling: its job reads as failed, a
 new job may start, and the old child must not overwrite it when it finally
 returns.
 
+The local `f3sctl fans off` and `ac off` stay out of a job's way with the
+same pieces: they ask the API nodes (`PeerSet`), then run the plug write
+inside `Manager.WhileIdle`, which refuses while `job.json` records a running
+job and holds the flock across the write, so a `Start` in that moment is
+refused rather than cycling the rack under a plug being switched. `fans on`
+and `ac on` are not gated: they are the recovery path for a job whose process
+died.
+
 ---
 
 ## 5. Security boundary

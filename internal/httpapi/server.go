@@ -258,6 +258,16 @@ func resolvePeerJobPath(cfg config.Config, base string) string {
 	return contract.Href(base, powerapi.JobPath)
 }
 
+// PeerJobPath is the URL path a process that is not serving a CGI request
+// asks the API nodes for their current job: the local `fans off` / `ac off`
+// guard in internal/cli, which must see a job running on either Pi exactly as
+// the API's own plug routes do. It is resolvePeerJobPath with no SCRIPT_NAME
+// to derive from, so cfg.PeerJobPath wins and the documented mount is the
+// fallback -- one derivation for both callers.
+func PeerJobPath(cfg config.Config) string {
+	return resolvePeerJobPath(cfg, "")
+}
+
 // defaultCGIMount is this project's own documented CGI mount convention (see
 // README.md's example config, and config.Default() before uy0). It is the
 // last-resort fallback resolvePeerJobPath uses when this node's own router

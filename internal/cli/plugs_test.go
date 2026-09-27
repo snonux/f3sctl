@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/powertest"
@@ -22,6 +25,9 @@ type fakePlugEngine struct {
 	on    bool   // what a status read, or a successful set, reports
 	ip    string // what a status read reports
 	err   error  // returned by every method when set
+	// onSet, when set, runs at the start of FansSet and ACSet: the moment the
+	// plug is being written.
+	onSet func()
 }
 
 func (f *fakePlugEngine) FansStatus(context.Context) (power.FansState, error) {
@@ -30,6 +36,9 @@ func (f *fakePlugEngine) FansStatus(context.Context) (power.FansState, error) {
 }
 
 func (f *fakePlugEngine) FansSet(_ context.Context, on bool) (power.FansState, error) {
+	if f.onSet != nil {
+		f.onSet()
+	}
 	f.calls = append(f.calls, fmt.Sprintf("FansSet(%t)", on))
 	if f.err != nil {
 		return power.FansState{}, f.err
@@ -44,6 +53,9 @@ func (f *fakePlugEngine) ACStatus(context.Context) (power.ACState, error) {
 }
 
 func (f *fakePlugEngine) ACSet(_ context.Context, on bool) (power.ACState, error) {
+	if f.onSet != nil {
+		f.onSet()
+	}
 	f.calls = append(f.calls, fmt.Sprintf("ACSet(%t)", on))
 	if f.err != nil {
 		return power.ACState{}, f.err
@@ -51,6 +63,39 @@ func (f *fakePlugEngine) ACSet(_ context.Context, on bool) (power.ACState, error
 	f.on = on
 	return power.ACState{On: on, IP: f.ip}, nil
 }
+
+// fakeJobs is a jobGuard that answers from a script: calls before busyFrom
+// find the node idle and run fn, later ones refuse with err. It counts calls
+// and records whether fn is running inside it, so a test can pin that the
+// plug write happens under the guard.
+type fakeJobs struct {
+	busyFrom int
+	err      error
+	calls    int
+	inside   bool
+}
+
+func (f *fakeJobs) whileIdle(_ context.Context, fn func() error) error {
+	f.calls++
+	if f.calls > f.busyFrom {
+		return f.err
+	}
+	f.inside = true
+	defer func() { f.inside = false }()
+	return fn()
+}
+
+// errTestJobRunning is what the fake guard refuses with: the production
+// guard's error shape, a wrapped coordination.ErrJobRunning.
+var errTestJobRunning = fmt.Errorf("%w: \"all-cycle\" (job 42 on pi1)", coordination.ErrJobRunning)
+
+// idleJobs is a job guard that never finds a job running.
+func idleJobs() *fakeJobs { return &fakeJobs{busyFrom: math.MaxInt} }
+
+// busyJobs is a job guard that finds the node idle for its first n calls and
+// a job running from then on: busyJobs(0) is a job already running,
+// busyJobs(1) one that started during the liveness probe.
+func busyJobs(n int) *fakeJobs { return &fakeJobs{busyFrom: n, err: errTestJobRunning} }
 
 // plugCase names one plug together with the wording and engine methods the
 // CLI printed and called before fans and ac shared one implementation. The
@@ -116,7 +161,7 @@ func TestPlugOffRefusesWhileAHostMayBeRunning(t *testing.T) {
 			live := hostsUp("f0", "f3")
 			var out bytes.Buffer
 
-			err := plugOff(context.Background(), eng, tc.plug, false, live.hosts, &out)
+			err := plugOff(context.Background(), eng, tc.plug, false, live.hosts, idleJobs(), &out)
 			want := "[f0 f3] may still be running; " + tc.refusal
 			if err == nil || err.Error() != want {
 				t.Fatalf("err = %v, want %q", err, want)
@@ -142,7 +187,7 @@ func TestPlugOffInterruptedGuardSwitchesNothing(t *testing.T) {
 			defer cancel()
 			probe := func(context.Context) []string { cancel(); return []string{"f0"} }
 
-			err := plugOff(ctx, eng, tc.plug, false, probe, &bytes.Buffer{})
+			err := plugOff(ctx, eng, tc.plug, false, probe, idleJobs(), &bytes.Buffer{})
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("err = %v, want a wrapped context.Canceled", err)
 			}
@@ -169,8 +214,13 @@ func TestPlugOffForceSkipsTheGuard(t *testing.T) {
 					live = hostsUp()
 				}
 				var out bytes.Buffer
+				jobs := idleJobs()
+				if force {
+					// --force skips the job guard too: a busy one must not matter.
+					jobs = busyJobs(0)
+				}
 
-				if err := plugOff(context.Background(), eng, tc.plug, force, live.hosts, &out); err != nil {
+				if err := plugOff(context.Background(), eng, tc.plug, force, live.hosts, jobs, &out); err != nil {
 					t.Fatalf("plugOff: %v", err)
 				}
 				if want := []string{fmt.Sprintf(tc.setCallFmt, false)}; !slices.Equal(eng.calls, want) {
@@ -182,8 +232,105 @@ func TestPlugOffForceSkipsTheGuard(t *testing.T) {
 				if wantCalls := map[bool]int{true: 0, false: 1}[force]; live.calls != wantCalls {
 					t.Errorf("liveness consulted %d times, want %d", live.calls, wantCalls)
 				}
+				if wantCalls := map[bool]int{true: 0, false: 2}[force]; jobs.calls != wantCalls {
+					t.Errorf("job guard consulted %d times, want %d", jobs.calls, wantCalls)
+				}
 			})
 		}
+	}
+}
+
+// TestPlugOffRefusesWhileAJobRuns pins the job guard for both plugs: a job
+// already running is refused up front -- before the half-minute liveness
+// probe, which is not consulted -- the refusal says so and offers --force,
+// and the plug is untouched.
+func TestPlugOffRefusesWhileAJobRuns(t *testing.T) {
+	for _, tc := range plugCases() {
+		t.Run(tc.plug.noun, func(t *testing.T) {
+			eng := &fakePlugEngine{on: true}
+			live := hostsUp()
+			var out bytes.Buffer
+
+			err := plugOff(context.Background(), eng, tc.plug, false, live.hosts, busyJobs(0), &out)
+			if !errors.Is(err, coordination.ErrJobRunning) {
+				t.Fatalf("err = %v, want a wrapped coordination.ErrJobRunning", err)
+			}
+			for _, want := range []string{"all-cycle", tc.interrupted, "--force"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %q, want it to mention %q", err, want)
+				}
+			}
+			if len(eng.calls) != 0 || out.Len() != 0 {
+				t.Errorf("calls = %v, output = %q; want none: the plug must be untouched", eng.calls, out.String())
+			}
+			if live.calls != 0 {
+				t.Errorf("liveness consulted %d times, want none: a running job refuses first", live.calls)
+			}
+		})
+	}
+}
+
+// TestPlugOffRefusesAJobStartedDuringTheProbe: the guard is asked again after
+// the probe, and its answer beats the probe's verdict. A job waking the rack
+// meanwhile makes the probe hear hosts, and "may still be running ... use
+// --force" would send the operator the wrong way.
+func TestPlugOffRefusesAJobStartedDuringTheProbe(t *testing.T) {
+	for _, tc := range plugCases() {
+		t.Run(tc.plug.noun, func(t *testing.T) {
+			eng := &fakePlugEngine{on: true}
+			jobs := busyJobs(1)
+
+			err := plugOff(context.Background(), eng, tc.plug, false, hostsUp("f0").hosts, jobs, &bytes.Buffer{})
+			if !errors.Is(err, coordination.ErrJobRunning) || strings.Contains(err.Error(), "may still be running") {
+				t.Fatalf("err = %v, want the job refusal, not the liveness one", err)
+			}
+			if len(eng.calls) != 0 || jobs.calls != 2 {
+				t.Errorf("calls = %v, job guard consulted %d times; want no switch after two checks", eng.calls, jobs.calls)
+			}
+		})
+	}
+}
+
+// TestPlugOffSwitchesInsideTheJobGuard pins that the write itself runs under
+// the guard -- holding the node's job lock in production -- rather than after
+// a check that a job could start behind.
+func TestPlugOffSwitchesInsideTheJobGuard(t *testing.T) {
+	for _, tc := range plugCases() {
+		t.Run(tc.plug.noun, func(t *testing.T) {
+			jobs := idleJobs()
+			underGuard := false
+			eng := &fakePlugEngine{on: true, onSet: func() { underGuard = jobs.inside }}
+
+			if err := plugOff(context.Background(), eng, tc.plug, false, hostsUp().hosts, jobs, &bytes.Buffer{}); err != nil {
+				t.Fatalf("plugOff: %v", err)
+			}
+			if !underGuard {
+				t.Error("the plug was written outside the job guard")
+			}
+		})
+	}
+}
+
+// TestPlugOffRefusesWhenTheJobStateIsUnreadable: not knowing whether a job
+// runs is not the same as idle. The error says so, is not dressed up as a
+// running job, and switches nothing.
+func TestPlugOffRefusesWhenTheJobStateIsUnreadable(t *testing.T) {
+	for _, tc := range plugCases() {
+		t.Run(tc.plug.noun, func(t *testing.T) {
+			eng := &fakePlugEngine{on: true}
+			jobs := &fakeJobs{err: fmt.Errorf("opening the job lock: %w", fs.ErrPermission)}
+
+			err := plugOff(context.Background(), eng, tc.plug, false, hostsUp().hosts, jobs, &bytes.Buffer{})
+			if !errors.Is(err, fs.ErrPermission) || errors.Is(err, coordination.ErrJobRunning) {
+				t.Fatalf("err = %v, want the permission error, not ErrJobRunning", err)
+			}
+			if !strings.Contains(err.Error(), "cannot tell whether a power job is running") {
+				t.Errorf("err = %q, want it to say the job state could not be read", err)
+			}
+			if len(eng.calls) != 0 {
+				t.Errorf("calls = %v, want none", eng.calls)
+			}
+		})
 	}
 }
 
@@ -196,7 +343,7 @@ func TestPlugOffReportsASwitchFailure(t *testing.T) {
 			eng := &fakePlugEngine{on: true, err: boom}
 			var out bytes.Buffer
 
-			err := plugOff(context.Background(), eng, tc.plug, false, hostsUp().hosts, &out)
+			err := plugOff(context.Background(), eng, tc.plug, false, hostsUp().hosts, idleJobs(), &out)
 			if !errors.Is(err, boom) {
 				t.Fatalf("err = %v, want %v", err, boom)
 			}
@@ -215,7 +362,7 @@ func TestPlugVerbReachesOnlyItsOwnPlug(t *testing.T) {
 		t.Run(tc.plug.noun+"/status", func(t *testing.T) {
 			eng := &fakePlugEngine{on: true, ip: "192.0.2.9"}
 			var out bytes.Buffer
-			if err := plugVerb(context.Background(), eng, tc.plug, "status", false, nil, &out); err != nil {
+			if err := plugVerb(context.Background(), eng, tc.plug, "status", false, nil, nil, &out); err != nil {
 				t.Fatalf("status: %v", err)
 			}
 			if !slices.Equal(eng.calls, []string{tc.statusCall}) {
@@ -228,8 +375,11 @@ func TestPlugVerbReachesOnlyItsOwnPlug(t *testing.T) {
 		t.Run(tc.plug.noun+"/on", func(t *testing.T) {
 			eng := &fakePlugEngine{}
 			live := hostsUp("f0")
+			// A running job does not gate on either: it is the recovery path
+			// for a job whose process died.
+			jobs := busyJobs(0)
 			var out bytes.Buffer
-			if err := plugVerb(context.Background(), eng, tc.plug, "on", false, live.hosts, &out); err != nil {
+			if err := plugVerb(context.Background(), eng, tc.plug, "on", false, live.hosts, jobs, &out); err != nil {
 				t.Fatalf("on: %v", err)
 			}
 			if want := []string{fmt.Sprintf(tc.setCallFmt, true)}; !slices.Equal(eng.calls, want) {
@@ -238,8 +388,9 @@ func TestPlugVerbReachesOnlyItsOwnPlug(t *testing.T) {
 			if want := tc.label + ": on\n"; out.String() != want {
 				t.Errorf("output = %q, want %q", out.String(), want)
 			}
-			if live.calls != 0 {
-				t.Errorf("liveness consulted %d times, want none: on is never gated", live.calls)
+			if live.calls != 0 || jobs.calls != 0 {
+				t.Errorf("liveness consulted %d times, job guard %d times; want none: on is never gated",
+					live.calls, jobs.calls)
 			}
 		})
 	}

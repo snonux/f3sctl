@@ -29,7 +29,8 @@ import (
 const fHostIP = "192.0.2.1" // TEST-NET-1, reserved and never routed
 
 // testConfig wires the CLI up to the fake plug and to a single f-host, with a
-// Shelly password on disk so ResolveShellyPassword succeeds.
+// Shelly password on disk so ResolveShellyPassword succeeds, an idle job state
+// dir of its own and no API peers.
 func testConfig(t *testing.T, s *powertest.FakeShelly) config.Config {
 	t.Helper()
 
@@ -40,6 +41,11 @@ func testConfig(t *testing.T, s *powertest.FakeShelly) config.Config {
 
 	cfg := config.Default()
 	cfg.ShellyPasswordFile = []string{pwFile}
+	// The plug off guard's job check reads StateDir and asks PeerNodes: a
+	// fresh, idle state dir and no peers keep it off the real /var/db/f3sctl
+	// and pi0/pi1. Tests of that guard seed or add their own.
+	cfg.StateDir = t.TempDir()
+	cfg.PeerNodes = nil
 	cfg.Inventory = inventory.Inventory{
 		ShellyIP:   s.Addr(),
 		ShellyACIP: s.Addr(),

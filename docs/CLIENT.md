@@ -223,7 +223,9 @@ until then the API withholds both plug switches along with every power
 action. An AC plug left off, or fans that need switching, cannot wait that
 long, so the way out meanwhile is local: on any LAN host with f3sctl and its
 config, run `f3sctl ac on` or `f3sctl fans on`. The plug commands run locally
-by default, switch the plug directly and do not consult the job. They need no
+by default, and the on direction switches the plug directly without
+consulting the job. (`ac off` and `fans off` do consult it, on this node and
+the API nodes, and refuse while one runs; `--force` overrides that.) They need no
 API key or SSH key, but they do need a readable Shelly password file (the
 plug's digest password, from `shelly_password_file`, e.g.
 `/var/db/f3sctl/shelly_plug` — readable only through `doas` on the Pis, so

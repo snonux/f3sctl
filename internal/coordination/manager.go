@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -228,6 +229,9 @@ type Manager struct {
 	// NewManager sets the defaults.
 	progressLockWait time.Duration
 	finishLockWait   time.Duration
+	// idleLockWait bounds how long WhileIdle waits for job.lock. A field for
+	// the same reason as the two above.
+	idleLockWait time.Duration
 }
 
 // Default lock waits for a recorder (see Manager.progressLockWait).
@@ -238,9 +242,15 @@ type Manager struct {
 // up. A dropped progress update costs a client one stale step. Finish is the
 // one record a polling client cannot do without, so it waits longer, but is
 // still bounded so a held lock cannot keep the child from exiting.
+//
+// WhileIdle waits a little: the lock's legitimate holders (Start, a
+// recorder's update) let go within milliseconds, so a caller that merely
+// arrived at the same moment should not be refused for it. Anything holding
+// it longer is treated as a job in flight.
 const (
 	defaultProgressLockWait = 200 * time.Millisecond
 	defaultFinishLockWait   = 5 * time.Second
+	defaultIdleLockWait     = 2 * time.Second
 	lockPollInterval        = 10 * time.Millisecond
 )
 
@@ -266,6 +276,7 @@ func NewManager(dir string, unmuteTimeout, offWorstCase time.Duration) *Manager 
 		staleCeiling:     staleCeilingFor(unmuteTimeout, offWorstCase),
 		progressLockWait: defaultProgressLockWait,
 		finishLockWait:   defaultFinishLockWait,
+		idleLockWait:     defaultIdleLockWait,
 	}
 }
 
@@ -511,6 +522,50 @@ func (m *Manager) Start(action string, args []string) (Job, error) {
 		return job, err
 	}
 	return job, nil
+}
+
+// WhileIdle runs fn while this node has no power job running, holding
+// job.lock for fn's whole duration so no job can start under it.
+//
+// It is how an action that is not itself a job -- the local `f3sctl fans off`
+// and `ac off` (internal/cli) -- stays out of a job's way: the rack-wide jobs
+// switch those plugs themselves, and `power all cycle` cuts and restores AC,
+// so a manual switch mid-job races them. "Running" is judged exactly as
+// Start judges it (Read, so a job past the staleness ceiling or one already
+// finished does not count), and a job running here is refused with an error
+// wrapping ErrJobRunning. Holding the lock is what closes the other half:
+// Start takes it with a single non-blocking attempt, so a job started while
+// fn runs is refused with ErrJobRunning rather than switching the rack under
+// it. fn should therefore be short -- one plug round trip, not a probe.
+//
+// The lock is waited for at most idleLockWait; a holder that keeps it longer
+// is reported as a job in flight (ErrJobRunning), the same answer Start gives.
+//
+// WhileIdle never creates state, for the reason update gives: it may run as
+// root (`doas f3sctl ac off`), and a root-owned job.lock would lock the
+// unprivileged CGI out of Start for good. Without a job.lock -- no state dir,
+// as on a laptop, or a node that has never run a job -- nothing is locked:
+// Start creates the lock before recording its first job, so there is no job
+// to wait for, and the one race left is with that very first Start. Any other
+// failure to take the lock (a state dir this user may not open, say) is
+// returned as is and fn does not run: not knowing is not the same as idle.
+func (m *Manager) WhileIdle(fn func() error) error {
+	unlock, err := m.lock(0, m.idleLockWait)
+	switch {
+	case errors.Is(err, errLockHeld):
+		return fmt.Errorf("%w: %w", ErrJobRunning, err)
+	case errors.Is(err, fs.ErrNotExist):
+		unlock = func() {}
+	case err != nil:
+		return err
+	}
+	defer unlock()
+
+	if cur := m.Read(); cur != nil && cur.State == JobRunning {
+		return fmt.Errorf("%w: %q (job %s on %s, started %s)",
+			ErrJobRunning, cur.Action, cur.ID, cur.Node, cur.Started)
+	}
+	return fn()
 }
 
 // doSpawn starts the job's detached child, through spawnFunc when a test has
