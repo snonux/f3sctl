@@ -62,7 +62,7 @@ func TestJobWaitTimeoutTracksConfiguredUnmuteTimeout(t *testing.T) {
 // only ping/ssh off the entity, never pingKnown, so a host the probe never
 // reached was indistinguishable here from one it measured and found silent.
 // parseHost is what feeds presenter.Describe now, so this pins that the
-// pingKnown property actually reaches the power.HostStatus it builds.
+// pingKnown property actually reaches the status.HostStatus it builds.
 func TestParseHostReadsPingKnown(t *testing.T) {
 	measured, ok := parseHost(Entity{Properties: map[string]any{
 		"name": "f3", "ip": "192.168.1.13", "ping": false, "pingKnown": true, "ssh": false,

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/status"
 )
 
 // TestDescribeSeparatesOffFromUnmeasured pins that the status table does not
@@ -19,12 +19,12 @@ import (
 // independently-maintained describe() functions; now there is one
 // implementation and one test (see ry0/hz0).
 func TestDescribeSeparatesOffFromUnmeasured(t *testing.T) {
-	off := Describe(power.HostStatus{PingKnown: true})
+	off := Describe(status.HostStatus{PingKnown: true})
 	if !strings.HasPrefix(off, "off") {
 		t.Errorf("a probed, silent host is described as %q, want it to start with \"off\"", off)
 	}
 
-	unknown := Describe(power.HostStatus{})
+	unknown := Describe(status.HostStatus{})
 	if !strings.Contains(unknown, "unknown") {
 		t.Errorf("an unprobeable host is described as %q, want it called unknown", unknown)
 	}
@@ -38,12 +38,12 @@ func TestDescribeSeparatesOffFromUnmeasured(t *testing.T) {
 // ShowRole: false) rather than Describe() alone pins the fix at the point
 // that actually reaches an operator's terminal.
 func TestStatusRendersUnknownForUnmeasuredHost(t *testing.T) {
-	statuses := []power.HostStatus{
+	statuses := []status.HostStatus{
 		{Name: "f3", IP: "192.168.1.13", Ping: false, PingKnown: false, SSH: false},
 	}
 
 	var buf bytes.Buffer
-	if err := Status(&buf, statuses, Options{ShowRole: false}, power.FansState{On: true, IP: "192.168.1.99"}, nil, power.ACState{On: true, IP: "192.168.1.29"}, nil); err != nil {
+	if err := Status(&buf, statuses, Options{ShowRole: false}, status.FansState{On: true, IP: "192.168.1.99"}, nil, status.ACState{On: true, IP: "192.168.1.29"}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	out := buf.String()
@@ -62,12 +62,12 @@ func TestStatusRendersUnknownForUnmeasuredHost(t *testing.T) {
 // remote client passes ShowRole: false, because the API's documented stable
 // host properties (docs/CLIENT.md section 11) do not include role.
 func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
-	statuses := []power.HostStatus{
+	statuses := []status.HostStatus{
 		{Name: "f0", Role: "power", IP: "192.168.1.10", Ping: true, PingKnown: true, SSH: true},
 	}
 
 	var withRole bytes.Buffer
-	if err := Status(&withRole, statuses, Options{ShowRole: true}, power.FansState{}, nil, power.ACState{}, nil); err != nil {
+	if err := Status(&withRole, statuses, Options{ShowRole: true}, status.FansState{}, nil, status.ACState{}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if !strings.Contains(withRole.String(), "ROLE") {
@@ -78,7 +78,7 @@ func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
 	}
 
 	var withoutRole bytes.Buffer
-	if err := Status(&withoutRole, statuses, Options{ShowRole: false}, power.FansState{}, nil, power.ACState{}, nil); err != nil {
+	if err := Status(&withoutRole, statuses, Options{ShowRole: false}, status.FansState{}, nil, status.ACState{}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if strings.Contains(withoutRole.String(), "ROLE") {
@@ -91,7 +91,7 @@ func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
 // evidence that it is switched off.
 func TestStatusReportsAnUnreachableFanPlugAsUnknown(t *testing.T) {
 	var buf bytes.Buffer
-	err := Status(&buf, nil, Options{}, power.FansState{}, errors.New("dial tcp: timeout"), power.ACState{}, nil)
+	err := Status(&buf, nil, Options{}, status.FansState{}, errors.New("dial tcp: timeout"), status.ACState{}, nil)
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}

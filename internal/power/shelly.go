@@ -2,19 +2,17 @@ package power
 
 import (
 	"context"
+
+	"github.com/snonux/f3sctl/internal/status"
 )
 
-// FansState is the rack-fan plug's reported state.
-type FansState struct {
-	On bool   `json:"on"`
-	IP string `json:"ip"`
-}
+// FansState is the rack-fan plug's reported state. Like HostStatus, it lives
+// in internal/status and is aliased here.
+type FansState = status.FansState
 
-// ACState is the f-host mains AC plug's reported state (shelly2).
-type ACState struct {
-	On bool   `json:"on"`
-	IP string `json:"ip"`
-}
+// ACState is the f-host mains AC plug's reported state (shelly2), aliased
+// from internal/status like FansState.
+type ACState = status.ACState
 
 // FansStatus reads the rack-fan Shelly plug's current state.
 //

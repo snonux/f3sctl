@@ -96,6 +96,9 @@ flowchart TD
 
     CLI --> PRES["internal/presenter<br/>shared status table"]
     CLIENT --> PRES
+    PRES --> STATUS["internal/status<br/>HostStatus · FansState · ACState"]
+    CLIENT --> STATUS
+    POWER --> STATUS
 
     style POWER fill:#fce8e6,stroke:#ea4335,stroke-width:2px
     style BACK fill:#fef7e0,stroke:#fbbc04
@@ -111,6 +114,13 @@ literally runs `f3sctl power all off` as a detached child.
 
 **`internal/presenter` is shared by the local and remote paths** so the status
 table cannot drift between `--local` and `--remote`.
+
+**`internal/status` is the vocabulary, not the engine.** The host, fan and AC
+status values live in a leaf package that the engine produces and the
+presenter and remote client consume, so neither of those depends on
+`internal/power` (`TestConsumersDoNotImportTheEngine` pins it). The engine
+keeps its own names for them as aliases (`power.HostStatus` and so on) and
+keeps every decision made from them, such as the fan guards.
 
 **The REST surface is split the same way the API's concerns are.**
 `internal/httpapi` is only the composition root: CGI parsing, auth, Siren

@@ -164,7 +164,7 @@ func snapshotActivity(group []inventory.Host, statuses []HostStatus) RackActivit
 	}
 	var a RackActivity
 	for _, st := range statusesIn(group, statuses) {
-		a.add(st.Name, st.liveness())
+		a.add(st.Name, livenessOf(st))
 	}
 	return a
 }

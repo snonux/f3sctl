@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/snonux/f3sctl/internal/config"
-	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/presenter"
+	"github.com/snonux/f3sctl/internal/status"
 )
 
 // jobWaitBuffer is added on top of the server's worst-case UnmuteTimeout to
@@ -621,16 +621,16 @@ func (c *Client) showStatus(ctx context.Context) error {
 }
 
 // parseStatus turns a /status entity into the presenter's inputs: one
-// power.HostStatus per host entity (in response order), plus the fan and AC
+// status.HostStatus per host entity (in response order), plus the fan and AC
 // plug states.
 //
 // This is where hz0 was fixed: the old code built its own table row here and
 // read only ping/ssh, never pingKnown, so an unmeasured host rendered as
-// "off". Routing through power.HostStatus -- which has always carried
+// "off". Routing through status.HostStatus -- which has always carried
 // PingKnown -- and presenter.Describe -- which has always read it -- means
 // the remote client gets that check by construction rather than by
 // remembering to add it a second time.
-func parseStatus(status Entity) (statuses []power.HostStatus, fans power.FansState, fansErr error, ac power.ACState, acErr error) {
+func parseStatus(status Entity) (statuses []status.HostStatus, fans status.FansState, fansErr error, ac status.ACState, acErr error) {
 	for _, e := range status.Entities {
 		if hasClass(e, "fans") {
 			fans, fansErr = parseFans(e)
@@ -647,17 +647,17 @@ func parseStatus(status Entity) (statuses []power.HostStatus, fans power.FansSta
 	return statuses, fans, fansErr, ac, acErr
 }
 
-// parseHost turns one host entity's properties into a power.HostStatus. ok is
+// parseHost turns one host entity's properties into a status.HostStatus. ok is
 // false for an entity with no name, which is not a host this response meant
 // to describe.
 //
 // pingKnown defaults to true when the property is absent, matching
 // docs/client-reference.js's describe(): an older server that predates the
 // field is assumed to have completed the probe, not to have skipped it.
-func parseHost(e Entity) (power.HostStatus, bool) {
+func parseHost(e Entity) (status.HostStatus, bool) {
 	name, _ := e.Properties["name"].(string)
 	if name == "" {
-		return power.HostStatus{}, false
+		return status.HostStatus{}, false
 	}
 
 	pingKnown := true
@@ -670,7 +670,7 @@ func parseHost(e Entity) (power.HostStatus, bool) {
 	ssh, _ := e.Properties["ssh"].(bool)
 	ms, _ := e.Properties["ms"].(float64)
 
-	return power.HostStatus{
+	return status.HostStatus{
 		Name:      name,
 		IP:        ip,
 		Ping:      ping,
@@ -680,30 +680,30 @@ func parseHost(e Entity) (power.HostStatus, bool) {
 	}, true
 }
 
-// parseFans turns a "fans" entity into a power.FansState, or an error when
+// parseFans turns a "fans" entity into a status.FansState, or an error when
 // the server reported the plug as unreachable rather than a state -- see
 // powerapi's fansEntity and presenter.Status.
-func parseFans(e Entity) (power.FansState, error) {
+func parseFans(e Entity) (status.FansState, error) {
 	if msg, _ := e.Properties["error"].(string); msg != "" {
 		// Unreachable is not the same as off, and saying "off" here would
 		// send someone to the garage for nothing. presenter.Status renders
 		// this error as "unknown (<msg>)", never as a state.
-		return power.FansState{}, errors.New(msg)
+		return status.FansState{}, errors.New(msg)
 	}
 	on, _ := e.Properties["on"].(bool)
 	ip, _ := e.Properties["ip"].(string)
-	return power.FansState{On: on, IP: ip}, nil
+	return status.FansState{On: on, IP: ip}, nil
 }
 
-// parseAC turns an "ac" entity into a power.ACState, same unknown-not-off
+// parseAC turns an "ac" entity into a status.ACState, same unknown-not-off
 // rule as parseFans.
-func parseAC(e Entity) (power.ACState, error) {
+func parseAC(e Entity) (status.ACState, error) {
 	if msg, _ := e.Properties["error"].(string); msg != "" {
-		return power.ACState{}, errors.New(msg)
+		return status.ACState{}, errors.New(msg)
 	}
 	on, _ := e.Properties["on"].(bool)
 	ip, _ := e.Properties["ip"].(string)
-	return power.ACState{On: on, IP: ip}, nil
+	return status.ACState{On: on, IP: ip}, nil
 }
 
 func hasClass(e Entity, want string) bool {

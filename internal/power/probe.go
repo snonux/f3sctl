@@ -7,41 +7,19 @@ import (
 
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power/infra"
+	"github.com/snonux/f3sctl/internal/status"
 )
 
-// HostStatus is one host's observed state.
-//
-// Two independent signals are reported rather than a single "up", because the
-// difference between them is operationally meaningful:
-//
-//	Ping && SSH    the host is up and serving
-//	Ping && !SSH   the host is booting (or sshd is wedged)
-//	!Ping && !SSH  the host is off -- or hung in single-user after a failed
-//	               shutdown, in which case it is powered on, has no network,
-//	               and Wake-on-LAN will not wake it. Worth knowing before
-//	               pressing "on" again and concluding the button is broken.
-type HostStatus struct {
-	Name string `json:"name"`
-	Role string `json:"role"`
-	IP   string `json:"ip"`
-	Ping bool   `json:"ping"`
-	// PingKnown says whether the ICMP probe reached a conclusion at all. False
-	// means it never ran -- no ping(8), a binary that could not be started, a
-	// context cut short -- which is NOT the same as a host that said nothing.
-	//
-	// It is a separate field rather than a third state of Ping because Ping is
-	// what gets displayed, and a display wants two columns. Anything that
-	// *decides* something must read both, through liveness(): the zero value of
-	// this struct is therefore "silent, and we do not know why", which is the
-	// safe reading for a HostStatus that some other package built by hand.
-	PingKnown bool    `json:"pingKnown"`
-	SSH       bool    `json:"ssh"`
-	MS        float64 `json:"ms"`
-}
+// HostStatus is one host's observed state. The type lives in the leaf
+// package internal/status so that the presenter and the remote client can
+// use it without importing the engine; the alias keeps it the engine's own
+// name, so nothing that already speaks power.HostStatus has to change.
+type HostStatus = status.HostStatus
 
-// liveness folds the two ping fields back into the tri-state the fan guards
-// decide on. See RackActivityFrom, which is the only caller that matters.
-func (h HostStatus) liveness() hostLiveness {
+// livenessOf folds a status's two ping fields back into the tri-state the fan
+// guards decide on. See RackActivityFrom, which is the only caller that
+// matters.
+func livenessOf(h HostStatus) hostLiveness {
 	switch {
 	case h.Ping:
 		return livenessUp
@@ -85,7 +63,7 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 	// could not run looked exactly like a silent host -- so the CGI whose PATH
 	// lacked /sbin (see infra.pingCandidates) advertised fans-off, unforced,
 	// against a fully running rack. Anything deciding on this must go through
-	// HostStatus.liveness rather than Ping alone.
+	// livenessOf rather than Ping alone.
 	go func() {
 		defer wg.Done()
 		start := time.Now()

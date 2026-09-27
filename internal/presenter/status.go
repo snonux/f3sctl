@@ -3,7 +3,7 @@
 //
 // Both the local CLI (`f3sctl power status`) and the --remote HTTP client
 // (`f3sctl --remote power status` / `f3sctl --remote fans status`) display the
-// same underlying data -- a []power.HostStatus plus a power.FansState -- and
+// same underlying data -- a []status.HostStatus plus a status.FansState -- and
 // until this package existed each maintained its own copy of the table
 // renderer. The two had already diverged: the local table grew a ROLE column
 // the remote one never got, and the remote client's own "unmeasured vs off"
@@ -16,7 +16,7 @@ import (
 	"io"
 	"text/tabwriter"
 
-	"github.com/snonux/f3sctl/internal/power"
+	"github.com/snonux/f3sctl/internal/status"
 )
 
 // Options controls the parts of the table that are not implied by the probe
@@ -41,8 +41,8 @@ type Options struct {
 // all (network or auth failure): that is reported as "unknown", never as
 // "off", because an unreachable plug is not evidence of anything -- see
 // printFans / printAC.
-func Status(out io.Writer, statuses []power.HostStatus, opts Options,
-	fans power.FansState, fansErr error, ac power.ACState, acErr error) error {
+func Status(out io.Writer, statuses []status.HostStatus, opts Options,
+	fans status.FansState, fansErr error, ac status.ACState, acErr error) error {
 	if err := printHosts(out, statuses, opts); err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func Status(out io.Writer, statuses []power.HostStatus, opts Options,
 }
 
 // printHosts renders the aligned host table.
-func printHosts(out io.Writer, statuses []power.HostStatus, opts Options) error {
+func printHosts(out io.Writer, statuses []status.HostStatus, opts Options) error {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	if opts.ShowRole {
 		fmt.Fprintln(w, "HOST\tROLE\tADDRESS\tPING\tSSH\tRTT\tSTATE")
@@ -81,7 +81,7 @@ func printHosts(out io.Writer, statuses []power.HostStatus, opts Options) error 
 //
 // The fan state is part of "is the rack healthy", so it belongs in the same
 // glance as the host table rather than a separate command.
-func printFans(out io.Writer, fans power.FansState, err error) {
+func printFans(out io.Writer, fans status.FansState, err error) {
 	if err != nil {
 		fmt.Fprintf(out, "\nrack fans: unknown (%v)\n", err)
 		return
@@ -96,7 +96,7 @@ func printFans(out io.Writer, fans power.FansState, err error) {
 // An empty IP with no error means the status document never carried an ac
 // entity (older server, partial /status): that is unknown, never "off" — a
 // false "AC off" reading for a mains plug is actively dangerous.
-func printAC(out io.Writer, ac power.ACState, err error) {
+func printAC(out io.Writer, ac status.ACState, err error) {
 	if err != nil {
 		fmt.Fprintf(out, "f-host AC: unknown (%v)\n", err)
 		return
@@ -124,7 +124,7 @@ func printAC(out io.Writer, ac power.ACState, err error) {
 // state CLIENT.md's pingKnown paragraph exists to prevent, since the server
 // treats an unmeasured host as possibly still running (keeping the rack fans
 // on) while the table told the operator otherwise.
-func Describe(st power.HostStatus) string {
+func Describe(st status.HostStatus) string {
 	switch {
 	case st.Ping && st.SSH:
 		return "up"
