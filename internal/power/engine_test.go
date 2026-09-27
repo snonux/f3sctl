@@ -64,8 +64,8 @@ func TestPartitionLivePreservesOrder(t *testing.T) {
 			t.Fatalf("order changed at %d: got %s, want %s", i, live[i].Name, hosts[i].Name)
 		}
 	}
-	if last := live[len(live)-1].Name; last != inventory.StorageMaster {
-		t.Errorf("last host is %s, want the storage master %s", last, inventory.StorageMaster)
+	if last := live[len(live)-1].Name; last != defaultStorageMaster {
+		t.Errorf("last host is %s, want the storage master %s", last, defaultStorageMaster)
 	}
 }
 

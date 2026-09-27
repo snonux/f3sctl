@@ -33,8 +33,8 @@ const carpQuiesceVerb = "carp-quiesce"
 // must be shut down carefully. The slower path is still correct, and choosing
 // it silently would be wrong -- hence the log line.
 //
-// Only the two hosts the inventory names as the pair are asked; f2 and f3
-// have no CARP configuration and no such daemons to stop. The agent-side verb still
+// Only the hosts the inventory marks as the pair (Host.Storage) are asked; f2
+// and f3 have no CARP configuration and no such daemons to stop. The agent-side verb still
 // checks for the CARP script before doing anything, so a member whose CARP
 // setup has been removed answers "nothing to quiesce" instead of failing the
 // run -- the inventory says who the pair is, the host says whether it is

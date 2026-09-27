@@ -194,6 +194,10 @@ Two orderings carry the whole safety argument, and they are independent:
   guests have stopped, which makes "the batch has finished" exactly the
   condition f0 waits for.
 
+Which hosts are the pair is inventory data, not host names: the f-host with
+`"storage": "master"` goes last, and it and the `"storage": "backup"` host are
+the ones quiesced (f0 and f1 by default; see `inventory.Host.Storage`).
+
 If the quiesce fails on either member, the run falls back to the old
 one-at-a-time order rather than risking the wedge.
 

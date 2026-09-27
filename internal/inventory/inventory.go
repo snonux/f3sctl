@@ -30,6 +30,20 @@ const (
 	RoleGateway Role = "gateway"
 )
 
+// StorageRole is a host's part in the CARP storage pair that holds the
+// storage VIP (f3s-storage-ha, 192.168.1.138) and serves NFS from it. Most
+// hosts have none. See ShutdownOrder and CARPMembers for what it decides.
+type StorageRole string
+
+const (
+	// StorageMaster normally holds the storage VIP. A shutdown powers it off
+	// last, after every host whose guests mount their PVs from it.
+	StorageMaster StorageRole = "master"
+	// StorageBackup is the other half of the pair: it takes the VIP, and with
+	// it the NFS export, when the master stops advertising.
+	StorageBackup StorageRole = "backup"
+)
+
 // Host is one machine f3sctl knows about.
 type Host struct {
 	Name string `json:"name"`
@@ -52,7 +66,18 @@ type Host struct {
 	// Meaningful only for RoleF hosts, and required on every one of them in a
 	// configured host list (see UnmarshalJSON).
 	Standalone bool `json:"standalone"`
+	// Storage is this host's role in the CARP storage pair, or empty for a
+	// host outside it. Only RoleF hosts may carry one; a valid host list has
+	// exactly one StorageMaster and at most one StorageBackup (see
+	// validateStorageRoles).
+	Storage StorageRole `json:"storage,omitempty"`
 }
+
+// IsStorageMaster reports whether h normally holds the CARP storage VIP.
+func (h Host) IsStorageMaster() bool { return h.Storage == StorageMaster }
+
+// InCARPPair reports whether h is either half of the CARP storage pair.
+func (h Host) InCARPPair() bool { return h.Storage != "" }
 
 // Wakeable reports whether this host can be started with a magic packet.
 func (h Host) Wakeable() bool { return h.MAC != "" }
@@ -129,6 +154,13 @@ func (inv *Inventory) UnmarshalJSON(data []byte) error {
 // false would fail open: a config written before the flag existed would
 // silently put f3 into the power group, and a bare `power off` would take it
 // down with the cluster.
+//
+// The storage roles are the one exception to "no defaults": a list in which no
+// host says "storage" at all inherits them from Default() by name (see
+// inheritStorageRoles), which is exactly how a config written before the key
+// existed was interpreted. That fallback cannot fail open, because validation
+// still demands a master: a renamed rack without the key is rejected rather
+// than shut down in the wrong order.
 func hostsFromWire(wire []wireHost) ([]Host, error) {
 	hosts := make([]Host, 0, len(wire))
 	for i, w := range wire {
@@ -142,6 +174,7 @@ func hostsFromWire(wire []wireHost) ([]Host, error) {
 		}
 		hosts = append(hosts, h)
 	}
+	inheritStorageRoles(hosts)
 	if err := validateHosts(hosts); err != nil {
 		return nil, err
 	}
@@ -171,7 +204,51 @@ func validateHosts(hosts []Host) error {
 		return fmt.Errorf(`%w: hosts has no role "f" host with "standalone": false, `+
 			"so the power group would be empty", ErrInvalid)
 	}
+	return validateStorageRoles(hosts)
+}
+
+// validateStorageRoles demands exactly one storage master and at most one
+// backup. Master and backup are necessarily different hosts, since a host
+// has one role; that each is an f-host is validateHost's check.
+//
+// A missing master is an error rather than "no ordering": the master-last
+// shutdown and the CARP quiesce both key on it, and a rack without one would
+// power the VIP holder off in the middle of the batch -- the 2026-08-08 wedge
+// on ShutdownOrder -- without any indication that the rule had been lost.
+func validateStorageRoles(hosts []Host) error {
+	holder := map[StorageRole]int{} // role -> index of the host holding it
+	for i, h := range hosts {
+		if h.Storage == "" {
+			continue
+		}
+		if j, taken := holder[h.Storage]; taken {
+			return fmt.Errorf(`%w: hosts[%d] (%s): "storage": %q is already held by hosts[%d] (%s); `+
+				"the CARP pair has one master and at most one backup",
+				ErrInvalid, i, h.Name, h.Storage, j, hosts[j].Name)
+		}
+		holder[h.Storage] = i
+	}
+	if _, ok := holder[StorageMaster]; !ok {
+		return fmt.Errorf(`%w: no host has "storage": %q; name the f-host that holds the CARP storage VIP, `+
+			"so a shutdown can power it off last", ErrInvalid, StorageMaster)
+	}
 	return nil
+}
+
+// inheritStorageRoles gives a configured host list that assigns no storage
+// role at all the roles Default() assigns, by host name, to f-hosts of the
+// same name. A list that assigns any role is left alone: it has said who the
+// pair is, and completing it from the defaults would be guessing.
+func inheritStorageRoles(hosts []Host) {
+	if slices.ContainsFunc(hosts, Host.InCARPPair) {
+		return
+	}
+	defaults := Default()
+	for i, h := range hosts {
+		if d, ok := defaults.ByName(h.Name); ok && h.Role == RoleF {
+			hosts[i].Storage = d.Storage
+		}
+	}
 }
 
 // hostNamePattern is what a host name must look like: a simple lower-case
@@ -192,10 +269,17 @@ var reservedHostNames = []string{"all", "on", "off", "status", "cycle", "power",
 // collide with the command and route vocabulary: no name, a name that is not
 // a simple token or is a reserved word, or a role f3sctl does not know (a
 // typo such as "F" matches neither RoleF nor anything else). The standalone
-// flag is refused on a non-f host, where it means nothing.
+// flag and a storage role are refused on a non-f host, where they mean
+// nothing, and a storage role must be one f3sctl knows.
 func validateHost(h Host) error {
 	if err := ValidateHostName(h.Name); err != nil {
 		return err
+	}
+	switch h.Storage {
+	case "", StorageMaster, StorageBackup:
+	default:
+		return fmt.Errorf(`unknown "storage" %q (want %q or %q, or leave it out)`,
+			h.Storage, StorageMaster, StorageBackup)
 	}
 	switch h.Role {
 	case RoleF:
@@ -206,6 +290,9 @@ func validateHost(h Host) error {
 	}
 	if h.Standalone {
 		return fmt.Errorf(`"standalone" is only meaningful for role "f", not %q`, h.Role)
+	}
+	if h.Storage != "" {
+		return fmt.Errorf(`"storage" is only meaningful for role "f", not %q`, h.Role)
 	}
 	return nil
 }
@@ -237,8 +324,10 @@ func Default() Inventory {
 		ShellyACIP:     "192.168.1.29",
 		GogiosMuteFile: "/tmp/f3s_taken_down",
 		Hosts: []Host{
-			{Name: "f0", Role: RoleF, IP: "192.168.1.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl"},
-			{Name: "f1", Role: RoleF, IP: "192.168.1.131", MAC: "e8:ff:1e:d7:1e:44", SSHPort: 22, SSHUser: "f3sctl"},
+			{Name: "f0", Role: RoleF, IP: "192.168.1.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl",
+				Storage: StorageMaster},
+			{Name: "f1", Role: RoleF, IP: "192.168.1.131", MAC: "e8:ff:1e:d7:1e:44", SSHPort: 22, SSHUser: "f3sctl",
+				Storage: StorageBackup},
 			{Name: "f2", Role: RoleF, IP: "192.168.1.132", MAC: "e8:ff:1e:d7:1c:a0", SSHPort: 22, SSHUser: "f3sctl"},
 			{Name: "f3", Role: RoleF, IP: "192.168.1.133", MAC: "e8:ff:1e:d7:f3:d7", SSHPort: 22, SSHUser: "f3sctl", Standalone: true},
 
@@ -308,16 +397,8 @@ func (inv Inventory) PowerGroup() []Host {
 // previously took two commands.
 func (inv Inventory) EveryFHost() []Host { return inv.ByRole(RoleF) }
 
-// StorageMaster is the host that normally holds the CARP storage VIP
-// (f3s-storage-ha, 192.168.1.138) and serves NFS. f1 is its BACKUP.
-const StorageMaster = "f0"
-
-// StorageBackup is the other half of the CARP pair: the host that takes the
-// VIP, and with it the NFS export, when the master stops advertising.
-const StorageBackup = "f1"
-
-// CARPMembers returns the hosts in the CARP pair that are present in hosts,
-// in the order given.
+// CARPMembers returns the hosts in the CARP pair (Host.Storage set) that are
+// present in hosts, in the order given.
 //
 // A shutdown needs to know this set for one reason: a CARP transition on a
 // host that is on its way down runs carpcontrol.sh there, which starts (or
@@ -329,22 +410,23 @@ const StorageBackup = "f1"
 func CARPMembers(hosts []Host) []Host {
 	var out []Host
 	for _, h := range hosts {
-		if h.Name == StorageMaster || h.Name == StorageBackup {
+		if h.InCARPPair() {
 			out = append(out, h)
 		}
 	}
 	return out
 }
 
-// ShutdownOrder returns the power group ordered so the CARP storage master is
-// powered off LAST.
+// ShutdownOrder returns the power group ordered so the CARP storage master
+// (the host with Storage == StorageMaster, f0 by default) is powered off LAST.
 //
 // Order matters, and getting it wrong wedges a host. Powering the master off
-// first fails the storage VIP over to f1, whose carpcontrol.sh promptly starts
-// rpcbind/mountd/nfsd/nfsuserd and restarts stunnel — and then, seconds later,
-// f1 is itself told to shut down. It goes down as a freshly-started NFS server
-// with clients still able to reach it, and hangs in the final phase: powered
-// on, off the network, and unwakeable by Wake-on-LAN.
+// first fails the storage VIP over to the backup, whose carpcontrol.sh
+// promptly starts rpcbind/mountd/nfsd/nfsuserd and restarts stunnel — and
+// then, seconds later, the backup is itself told to shut down. It goes down
+// as a freshly-started NFS server with clients still able to reach it, and
+// hangs in the final phase: powered on, off the network, and unwakeable by
+// Wake-on-LAN.
 //
 // Observed on 2026-08-08: f0 powered off at 21:23:22, f1 logged
 // "carp: 1@re0: MASTER -> INIT" at 21:23:30 (so it had taken the VIP), was
@@ -367,14 +449,23 @@ func (inv Inventory) ShutdownOrderAll() []Host {
 // storageMasterLast moves the CARP storage master to the end of the list,
 // preserving the order of everything else.
 func storageMasterLast(hosts []Host) []Host {
-	out := make([]Host, 0, len(hosts))
-	var master []Host
+	rest, master := SplitStorageMaster(hosts)
+	return append(rest, master...)
+}
+
+// SplitStorageMaster partitions hosts into the storage master and the rest,
+// preserving order. master holds the one host with Storage == StorageMaster,
+// or none when hosts does not include it (a `power f3 off`).
+//
+// It is exported for the shutdown engine, which runs the two halves as
+// separate waves: the rest (in parallel when it can), then the master alone.
+func SplitStorageMaster(hosts []Host) (rest, master []Host) {
 	for _, h := range hosts {
-		if h.Name == StorageMaster {
+		if h.IsStorageMaster() {
 			master = append(master, h)
 			continue
 		}
-		out = append(out, h)
+		rest = append(rest, h)
 	}
-	return append(out, master...)
+	return rest, master
 }

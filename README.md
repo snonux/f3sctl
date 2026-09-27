@@ -83,7 +83,8 @@ irreversible happens:
    snapshot, clean export and disk spin-down instead of having USB power cut
    from under it. A no-op on the hosts that do not have it.
 3. **Mute Gogios** — so a deliberate shutdown does not page.
-4. **Stop the CARP failover daemons** — `devd` and `cron` on `f0` and `f1`,
+4. **Stop the CARP failover daemons** — `devd` and `cron` on the storage
+   pair (`f0` and `f1` by default; see `"storage"` under Configuration),
    so nothing reacts to a host receiving the storage VIP while it is shutting
    down, and f0's minutely auto-failback stops promoting. (Stopping the
    daemons, rather than `carp auto-failback disable`, because that command's
@@ -258,6 +259,16 @@ f-hosts may set `"standalone": true`; elsewhere the key may be `false` or
 absent.
 `"hosts": null` (or `"inventory": null`) keeps the compiled-in hosts;
 `"hosts": []` is rejected.
+
+The CARP storage pair is data too: an f-host may say `"storage": "master"`
+(the host that normally holds the storage VIP, powered off last) or
+`"storage": "backup"` (the other half of the pair). Those two hosts are the
+ones whose failover daemons a shutdown stops first. A configured list needs
+exactly one master and at most one backup, and only f-hosts may carry the
+key. A list that names no storage role at all inherits the compiled-in pair
+by name (f0 master, f1 backup), so a config written before the key existed
+keeps working -- but a renamed rack without the key is rejected rather than
+shut down with its storage master in the middle of the batch.
 
 `peer_nodes` are the API's own other CGI nodes (pi0 and pi1) that
 `internal/coordination.PeerSet` asks "are you mid-job?" before starting one,

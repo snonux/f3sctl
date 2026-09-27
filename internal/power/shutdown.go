@@ -278,7 +278,7 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer, tl *timeline,
 	hosts []inventory.Host) (accepted []inventory.Host, failed []string) {
 
 	parallel := e.quiesceCARP(ctx, log, tl, hosts)
-	batch, master := splitStorageMaster(hosts)
+	batch, master := inventory.SplitStorageMaster(hosts)
 
 	if parallel && len(batch) > 1 {
 		accepted, failed = e.shutdownTogether(ctx, log, tl, batch)
@@ -290,20 +290,6 @@ func (e *Engine) shutdownEach(ctx context.Context, log io.Writer, tl *timeline,
 	// not in this run" from needing a branch of its own.
 	masterUp, masterDown := e.shutdownInTurn(ctx, log, tl, master)
 	return append(accepted, masterUp...), append(failed, masterDown...)
-}
-
-// splitStorageMaster separates the CARP storage master from the rest,
-// preserving order. master holds one host, or none when this run does not
-// include it.
-func splitStorageMaster(hosts []inventory.Host) (batch, master []inventory.Host) {
-	for _, h := range hosts {
-		if h.Name == inventory.StorageMaster {
-			master = append(master, h)
-			continue
-		}
-		batch = append(batch, h)
-	}
-	return batch, master
 }
 
 // shutdownInTurn shuts hosts down one at a time, in order.

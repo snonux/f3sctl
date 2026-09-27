@@ -19,8 +19,8 @@ func TestShutdownOrderPutsStorageMasterLast(t *testing.T) {
 	if len(order) == 0 {
 		t.Fatal("shutdown order is empty")
 	}
-	if got := order[len(order)-1].Name; got != StorageMaster {
-		t.Errorf("last host to be shut down is %q, want the storage master %q", got, StorageMaster)
+	if last := order[len(order)-1]; !last.IsStorageMaster() || last.Name != "f0" {
+		t.Errorf("last host to be shut down is %q, want the storage master f0", last.Name)
 	}
 
 	// Same set as PowerGroup, just reordered: nothing may be dropped or added.
@@ -113,8 +113,8 @@ func TestShutdownOrderAllCoversEveryFHost(t *testing.T) {
 // care whether f3 is in the list.
 func TestShutdownOrderAllStillEndsWithTheStorageMaster(t *testing.T) {
 	order := Default().ShutdownOrderAll()
-	if last := order[len(order)-1].Name; last != StorageMaster {
-		t.Errorf("ShutdownOrderAll ends with %s, want the storage master %s", last, StorageMaster)
+	if last := order[len(order)-1]; !last.IsStorageMaster() {
+		t.Errorf("ShutdownOrderAll ends with %s, want the storage master", last.Name)
 	}
 }
 
@@ -173,7 +173,7 @@ func TestUnmarshalReplacesTheHostListWholesale(t *testing.T) {
 	inv := Default()
 	// Four hosts, so index 3 lands on the default f3 (Standalone, with a MAC).
 	raw := `{"hosts":[
-		{"name":"a0","role":"f","mac":"00:00:00:00:00:01","standalone":false},
+		{"name":"a0","role":"f","mac":"00:00:00:00:00:01","standalone":false,"storage":"master"},
 		{"name":"a1","role":"f","mac":"00:00:00:00:00:02","standalone":false},
 		{"name":"a2","role":"f","mac":"00:00:00:00:00:03","standalone":true},
 		{"name":"a3","role":"cluster"}]}`
@@ -187,6 +187,9 @@ func TestUnmarshalReplacesTheHostListWholesale(t *testing.T) {
 	}
 	if a3.Standalone || a3.MAC != "" {
 		t.Errorf("a3 = %+v, inherited the default f3's Standalone/MAC", a3)
+	}
+	if a1, _ := inv.ByName("a1"); a1.Storage != "" {
+		t.Errorf("a1.Storage = %q, inherited the default f1's storage role", a1.Storage)
 	}
 	if got := names(inv.PowerGroup()); !slices.Equal(got, []string{"a0", "a1"}) {
 		t.Errorf("PowerGroup = %v, want [a0 a1]", got)
@@ -276,6 +279,33 @@ func TestUnmarshalRejectsInvalidHostLists(t *testing.T) {
 		{"every f-host standalone",
 			`{"hosts":[{"name":"f3","role":"f","standalone":true},{"name":"r0","role":"cluster"}]}`,
 			"power group would be empty"},
+		{"renamed hosts without a storage role",
+			`{"hosts":[{"name":"g0","role":"f","standalone":false},{"name":"g1","role":"f","standalone":false}]}`,
+			`no host has "storage": "master"`},
+		{"only a backup declared",
+			`{"hosts":[` + f + `,{"name":"f1","role":"f","standalone":false,"storage":"backup"}]}`,
+			`no host has "storage": "master"`},
+		{"two masters",
+			`{"hosts":[{"name":"f0","role":"f","standalone":false,"storage":"master"},
+				{"name":"f1","role":"f","standalone":false,"storage":"master"}]}`,
+			`hosts[1] (f1): "storage": "master" is already held by hosts[0] (f0)`},
+		{"two backups",
+			`{"hosts":[{"name":"f0","role":"f","standalone":false,"storage":"master"},
+				{"name":"f1","role":"f","standalone":false,"storage":"backup"},
+				{"name":"f2","role":"f","standalone":false,"storage":"backup"}]}`,
+			`hosts[2] (f2): "storage": "backup" is already held by hosts[1] (f1)`},
+		{"storage role on a cluster host",
+			`{"hosts":[` + f + `,{"name":"r0","role":"cluster","storage":"master"}]}`,
+			`hosts[1] (r0): "storage" is only meaningful for role "f"`},
+		{"storage role on a gateway",
+			`{"hosts":[` + f + `,{"name":"gw","role":"gateway","storage":"backup"}]}`,
+			`hosts[1] (gw): "storage" is only meaningful for role "f"`},
+		{"storage role with wrong case",
+			`{"hosts":[{"name":"f0","role":"f","standalone":false,"storage":"Master"}]}`,
+			`hosts[0] (f0): unknown "storage" "Master"`},
+		{"unknown storage role",
+			`{"hosts":[{"name":"f0","role":"f","standalone":false,"storage":"primary"}]}`,
+			`hosts[0] (f0): unknown "storage" "primary"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := Default()
@@ -343,6 +373,128 @@ func TestPowerGroupFollowsAConfiguredInventory(t *testing.T) {
 	}
 	if got := names(inv.EveryFHost()); !slices.Equal(got, []string{"f0", "f4"}) {
 		t.Errorf("EveryFHost = %v, want [f0 f4]", got)
+	}
+}
+
+// TestDefaultStorageRoles pins the compiled-in CARP pair: f0 is the storage
+// master, f1 its backup, and no other host has a storage role.
+func TestDefaultStorageRoles(t *testing.T) {
+	want := map[string]StorageRole{"f0": StorageMaster, "f1": StorageBackup}
+	for _, h := range Default().Hosts {
+		if h.Storage != want[h.Name] {
+			t.Errorf("%s: Storage = %q, want %q", h.Name, h.Storage, want[h.Name])
+		}
+	}
+	if got := names(CARPMembers(Default().Hosts)); !slices.Equal(got, []string{"f0", "f1"}) {
+		t.Errorf("CARPMembers = %v, want [f0 f1]", got)
+	}
+}
+
+// TestStorageOrderingIsDrivenByTheStorageRole proves the master-last rule and
+// the CARP pair are data, not host names: in an inventory where g1 is the
+// master and g2 its backup, a host called f0 is just another host.
+func TestStorageOrderingIsDrivenByTheStorageRole(t *testing.T) {
+	inv := Inventory{Hosts: []Host{
+		{Name: "f0", Role: RoleF},
+		{Name: "g1", Role: RoleF, Storage: StorageMaster},
+		{Name: "g2", Role: RoleF, Storage: StorageBackup},
+		{Name: "g9", Role: RoleF, Standalone: true},
+	}}
+
+	if got := names(inv.ShutdownOrder()); !slices.Equal(got, []string{"f0", "g2", "g1"}) {
+		t.Errorf("ShutdownOrder = %v, want [f0 g2 g1]: the configured master g1 last", got)
+	}
+	if got := names(inv.ShutdownOrderAll()); !slices.Equal(got, []string{"f0", "g2", "g9", "g1"}) {
+		t.Errorf("ShutdownOrderAll = %v, want [f0 g2 g9 g1]", got)
+	}
+	if got := names(CARPMembers(inv.Hosts)); !slices.Equal(got, []string{"g1", "g2"}) {
+		t.Errorf("CARPMembers = %v, want [g1 g2]", got)
+	}
+}
+
+// TestSplitStorageMasterKeepsOrder pins that the split is a partition, not a
+// filter: nothing may be dropped, and the rest keeps the order it arrived in.
+func TestSplitStorageMasterKeepsOrder(t *testing.T) {
+	hosts := []Host{{Name: "f1"}, {Name: "f2"}, {Name: "f0", Storage: StorageMaster}, {Name: "f3"}}
+
+	rest, master := SplitStorageMaster(hosts)
+
+	if got := names(rest); !slices.Equal(got, []string{"f1", "f2", "f3"}) {
+		t.Errorf("rest = %v, want [f1 f2 f3]", got)
+	}
+	if got := names(master); !slices.Equal(got, []string{"f0"}) {
+		t.Errorf("master = %v, want exactly the storage master f0", got)
+	}
+}
+
+// TestSplitStorageMasterWithoutTheMaster pins the `power f3 off` shape: a run
+// that does not include the master has no second wave at all.
+func TestSplitStorageMasterWithoutTheMaster(t *testing.T) {
+	rest, master := SplitStorageMaster([]Host{{Name: "f3"}, {Name: "f1", Storage: StorageBackup}})
+
+	if got := names(rest); !slices.Equal(got, []string{"f3", "f1"}) {
+		t.Errorf("rest = %v, want [f3 f1]", got)
+	}
+	if len(master) != 0 {
+		t.Errorf("master = %v, want none", names(master))
+	}
+}
+
+// TestUnmarshalARenamedRackKeepsTheOrdering is the regression test for the
+// storage pair being host names in code: a configured rack whose hosts are
+// not called f0/f1 still shuts its storage master down last and quiesces its
+// own pair, because it says which hosts they are.
+func TestUnmarshalARenamedRackKeepsTheOrdering(t *testing.T) {
+	inv := Default()
+	raw := `{"hosts":[
+		{"name":"a0","role":"f","standalone":false,"storage":"backup"},
+		{"name":"a1","role":"f","standalone":false},
+		{"name":"a2","role":"f","standalone":false,"storage":"master"},
+		{"name":"a3","role":"f","standalone":true}]}`
+	if err := json.Unmarshal([]byte(raw), &inv); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	if got := names(inv.ShutdownOrder()); !slices.Equal(got, []string{"a0", "a1", "a2"}) {
+		t.Errorf("ShutdownOrder = %v, want [a0 a1 a2]: the configured master a2 last", got)
+	}
+	if got := names(CARPMembers(inv.EveryFHost())); !slices.Equal(got, []string{"a0", "a2"}) {
+		t.Errorf("CARPMembers = %v, want [a0 a2]", got)
+	}
+}
+
+// TestUnmarshalInheritsTheDefaultStorageRoles pins backward compatibility: a
+// configured list written before "storage" existed, and so naming no role at
+// all, keeps f0 as the master and f1 as the backup -- the behaviour it had
+// when the pair was hard-coded. A list that names any role inherits nothing.
+func TestUnmarshalInheritsTheDefaultStorageRoles(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw string
+		want      map[string]StorageRole
+	}{
+		{"no role anywhere", `{"hosts":[
+			{"name":"f0","role":"f","standalone":false},{"name":"f1","role":"f","standalone":false},
+			{"name":"f2","role":"f","standalone":false},{"name":"r0","role":"cluster"}]}`,
+			map[string]StorageRole{"f0": StorageMaster, "f1": StorageBackup}},
+		{"f1 missing", `{"hosts":[
+			{"name":"f0","role":"f","standalone":false},{"name":"f2","role":"f","standalone":false}]}`,
+			map[string]StorageRole{"f0": StorageMaster}},
+		{"an explicit role", `{"hosts":[
+			{"name":"f0","role":"f","standalone":false},
+			{"name":"f1","role":"f","standalone":false,"storage":"master"}]}`,
+			map[string]StorageRole{"f1": StorageMaster}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := Default()
+			if err := json.Unmarshal([]byte(tc.raw), &inv); err != nil {
+				t.Fatalf("Unmarshal: %v", err)
+			}
+			for _, h := range inv.Hosts {
+				if h.Storage != tc.want[h.Name] {
+					t.Errorf("%s: Storage = %q, want %q", h.Name, h.Storage, tc.want[h.Name])
+				}
+			}
+		})
 	}
 }
 

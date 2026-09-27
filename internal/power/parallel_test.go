@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,11 @@ import (
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/powertest"
 )
+
+// defaultStorageMaster is the compiled-in inventory's CARP storage master
+// (inventory.TestDefaultStorageRoles pins it): the host every shutdown here
+// must power off last.
+const defaultStorageMaster = "f0"
 
 // offTestRig is the common setup for a whole-rack shutdown against fakes: a
 // fake plug, an engine over the f-hosts, and liveness that flips a host
@@ -113,7 +119,7 @@ func TestOffShutsTheBatchDownInParallel(t *testing.T) {
 	entered := make(chan string, batchSize)
 	release := make(chan struct{})
 	rig.power.onPowerOffStart = func(h inventory.Host) {
-		if h.Name == inventory.StorageMaster {
+		if h.IsStorageMaster() {
 			return
 		}
 		entered <- h.Name
@@ -152,7 +158,7 @@ func TestOffPowersTheStorageMasterOffLast(t *testing.T) {
 	rig.power.onPowerOffStart = func(h inventory.Host) {
 		mu.Lock()
 		defer mu.Unlock()
-		if h.Name == inventory.StorageMaster && inFlight > 0 {
+		if h.IsStorageMaster() && inFlight > 0 {
 			masterOverlapped = true
 		}
 		inFlight++
@@ -170,9 +176,9 @@ func TestOffPowersTheStorageMasterOffLast(t *testing.T) {
 	if masterOverlapped {
 		t.Error("the storage master was powered off while another host was still shutting down")
 	}
-	if got := rig.power.calls(); got[len(got)-1] != inventory.StorageMaster {
+	if got := rig.power.calls(); got[len(got)-1] != defaultStorageMaster {
 		t.Errorf("last poweroff was %s, want the storage master %s",
-			got[len(got)-1], inventory.StorageMaster)
+			got[len(got)-1], defaultStorageMaster)
 	}
 }
 
@@ -196,13 +202,13 @@ func TestClusterOffShutsF1AndF2TogetherThenF0(t *testing.T) {
 
 	rig.power.onPowerOffStart = func(h inventory.Host) {
 		mu.Lock()
-		if h.Name == inventory.StorageMaster && inFlight > 0 {
+		if h.IsStorageMaster() && inFlight > 0 {
 			masterOverlapped = true
 		}
 		inFlight++
 		mu.Unlock()
 
-		if h.Name == inventory.StorageMaster {
+		if h.IsStorageMaster() {
 			return
 		}
 		entered <- h.Name
@@ -239,9 +245,9 @@ func TestClusterOffShutsF1AndF2TogetherThenF0(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("powered off %v, want exactly f1, f2 and f0 -- f3 is not in the power group", got)
 	}
-	if got[len(got)-1] != inventory.StorageMaster {
+	if got[len(got)-1] != defaultStorageMaster {
 		t.Errorf("last poweroff was %s, want the storage master %s",
-			got[len(got)-1], inventory.StorageMaster)
+			got[len(got)-1], defaultStorageMaster)
 	}
 }
 
@@ -277,9 +283,9 @@ func TestOffFallsBackToSequentialWhenCARPCannotBeQuiesced(t *testing.T) {
 	if maxInFlight != 1 {
 		t.Errorf("%d hosts shut down at once, want 1: the failover daemons were not stopped", maxInFlight)
 	}
-	if got := rig.power.calls(); got[len(got)-1] != inventory.StorageMaster {
+	if got := rig.power.calls(); got[len(got)-1] != defaultStorageMaster {
 		t.Errorf("last poweroff was %s, want the storage master %s",
-			got[len(got)-1], inventory.StorageMaster)
+			got[len(got)-1], defaultStorageMaster)
 	}
 	if !strings.Contains(rig.log.String(), "one at a time") {
 		t.Error("the log does not say the run fell back to shutting hosts down one at a time")
@@ -311,31 +317,84 @@ func TestOffReportsTimingPerHost(t *testing.T) {
 	}
 }
 
-// TestSplitStorageMasterKeepsOrder pins that the split is a partition, not a
-// filter: nothing may be dropped, and the batch keeps the order it arrived
-// in.
-func TestSplitStorageMasterKeepsOrder(t *testing.T) {
-	hosts := []inventory.Host{{Name: "f1"}, {Name: "f2"}, {Name: "f3"}, {Name: "f0"}}
-
-	batch, master := splitStorageMaster(hosts)
-
-	if got := strings.Join(hostNames(batch), ","); got != "f1,f2,f3" {
-		t.Errorf("batch = %s, want f1,f2,f3", got)
+// assignStoragePair moves the CARP storage roles in eng's inventory to master
+// and backup (backup may be empty), clearing them everywhere else.
+func assignStoragePair(t *testing.T, eng *Engine, master, backup string) {
+	t.Helper()
+	hosts := eng.cfg.Inventory.Hosts
+	for i := range hosts {
+		hosts[i].Storage = ""
 	}
-	if len(master) != 1 || master[0].Name != inventory.StorageMaster {
-		t.Errorf("master = %v, want exactly the storage master", hostNames(master))
+	for name, role := range map[string]inventory.StorageRole{
+		master: inventory.StorageMaster, backup: inventory.StorageBackup,
+	} {
+		if name == "" {
+			continue
+		}
+		i := slices.IndexFunc(hosts, func(h inventory.Host) bool { return h.Name == name })
+		if i < 0 {
+			t.Fatalf("no host %q in the inventory", name)
+		}
+		hosts[i].Storage = role
 	}
 }
 
-// TestSplitStorageMasterWithoutTheMaster pins the `power f3 off` shape: a run
-// that does not include f0 has no second wave at all.
-func TestSplitStorageMasterWithoutTheMaster(t *testing.T) {
-	batch, master := splitStorageMaster([]inventory.Host{{Name: "f3"}})
+// TestOffFollowsAConfiguredStoragePair is the regression test for the pair
+// being names in code: with the inventory saying f2 is the storage master and
+// f3 its backup, those two -- not f0 and f1 -- are the ones quiesced, and f2
+// is the host powered off last, on its own.
+func TestOffFollowsAConfiguredStoragePair(t *testing.T) {
+	rig := newOffTestRig(t, "f0", "f1", "f2", "f3")
+	assignStoragePair(t, rig.eng, "f2", "f3")
 
-	if len(batch) != 1 || batch[0].Name != "f3" {
-		t.Errorf("batch = %v, want [f3]", hostNames(batch))
+	var mu sync.Mutex
+	inFlight := 0
+	var masterOverlapped bool
+	rig.power.onPowerOffStart = func(h inventory.Host) {
+		mu.Lock()
+		defer mu.Unlock()
+		if h.Name == "f2" && inFlight > 0 {
+			masterOverlapped = true
+		}
+		inFlight++
 	}
-	if len(master) != 0 {
-		t.Errorf("master = %v, want none", hostNames(master))
+	rig.power.onPowerOffEnd = func(inventory.Host) {
+		mu.Lock()
+		defer mu.Unlock()
+		inFlight--
+	}
+
+	if err := rig.eng.OffAll(context.Background(), &rig.log); err != nil {
+		t.Fatalf("power all off: %v", err)
+	}
+
+	want := []string{carpQuiesceVerb + ":f2", carpQuiesceVerb + ":f3"}
+	if got := rig.power.verbCalls(); !slices.Equal(got, want) {
+		t.Errorf("agent verbs = %v, want exactly %v", got, want)
+	}
+	got := rig.power.calls()
+	if len(got) != 4 || got[len(got)-1] != "f2" {
+		t.Errorf("poweroffs = %v, want all four with the configured master f2 last", got)
+	}
+	if masterOverlapped {
+		t.Error("the configured storage master f2 was powered off while another host was still shutting down")
+	}
+}
+
+// TestClusterOffWithAMasterOnlyPair pins a pair with no backup configured:
+// only the master is quiesced, and it still goes last.
+func TestClusterOffWithAMasterOnlyPair(t *testing.T) {
+	rig := newOffTestRig(t, "f0", "f1", "f2", "f3")
+	assignStoragePair(t, rig.eng, "f1", "")
+
+	if err := rig.eng.Off(context.Background(), &rig.log); err != nil {
+		t.Fatalf("power off: %v", err)
+	}
+
+	if got, want := rig.power.verbCalls(), []string{carpQuiesceVerb + ":f1"}; !slices.Equal(got, want) {
+		t.Errorf("agent verbs = %v, want exactly %v", got, want)
+	}
+	if got := rig.power.calls(); len(got) != 3 || got[len(got)-1] != "f1" {
+		t.Errorf("poweroffs = %v, want f0 and f2, then the configured master f1", got)
 	}
 }
