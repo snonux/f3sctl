@@ -166,23 +166,26 @@ func staleCeilingFor(unmuteTimeout, offWorstCase time.Duration) time.Duration {
 	return unmuteTimeout + offWorstCase + staleBuffer
 }
 
-// Manager owns the on-disk lifecycle of one node's power job: claiming the
-// lock, spawning the detached child that actually runs it, recording its
-// progress, and reading the result back for a client to render.
+// JobRecorder is the narrow seam Manager exposes to the detached job child
+// (internal/jobrun, the composition root): Progress to advance the job's
+// state and Finish to close it. Defined here, on the leaf that owns job.json,
+// so internal/jobrun depends on the behaviour it needs rather than on
+// *Manager -- and so coordination stays import-free of cli.
 //
-// It knows nothing about HTTP: internal/httpapi renders what Manager reports,
-// and the detached job child (internal/jobrun, the composition root) is what
-// calls Progress and Finish on its way out.
-//
-// JobRecorder is the narrow seam Manager exposes to that runner: Progress to
-// advance the job's state and Finish to close it. Defined here, on the leaf
-// that owns job.json, so internal/jobrun depends on the behaviour it needs
-// rather than on *Manager -- and so coordination stays import-free of cli.
+// A JobRecorder is always bound to one job ID (see Manager.Recorder) and only
+// ever writes job.json while that job is still the one recorded there.
 type JobRecorder interface {
 	Progress(step, host, phase, detail string)
 	Finish(rc int, errMsg string) error
 }
 
+// Manager owns the on-disk lifecycle of one node's power job: claiming the
+// lock, spawning the detached child that actually runs it, recording its
+// progress, and reading the result back for a client to render.
+//
+// It knows nothing about HTTP: internal/httpapi renders what Manager reports,
+// and the detached job child (internal/jobrun, the composition root) records
+// progress and completion through the JobRecorder Manager.Recorder returns.
 type Manager struct {
 	// dir holds job.json, job.lock and job.log.
 	dir string
@@ -196,24 +199,26 @@ type Manager struct {
 	staleCeiling time.Duration
 
 	// spawnFunc starts the detached child that actually performs a job's
-	// args. Nil means the real re-exec of this binary (see spawn); only
-	// tests substitute anything else, the same seam as PeerSet.fetch, so
-	// Start's locking and bookkeeping can be verified without spawning a real
-	// process.
-	spawnFunc func(args []string) error
+	// args for the job with the given id. Nil means the real re-exec of this
+	// binary (see spawn); only tests substitute anything else, the same seam
+	// as PeerSet.fetch, so Start's locking and bookkeeping can be verified
+	// without spawning a real process.
+	spawnFunc func(id string, args []string) error
 
-	// mu serializes the read-modify-write Progress and Finish do on job.json.
-	// The parallel shutdown path (power.shutdownTogether) runs one goroutine
-	// per host, and each calls Progress (via the job Reporter) concurrently;
-	// without a lock, two goroutines Read the same record, each add their own
-	// host, and the second write overwrites the first -- a polling client
-	// sees an incomplete hosts map, and two writers racing the single .tmp
-	// path can even corrupt job.json. The lock is per-Manager (one node, one
-	// job) and Progress is not hot, so a mutex is the right shape. It does not
-	// cross processes: the detached child and the CGI serving reads are
-	// separate processes with separate mutexes, and the write-then-rename in
-	// write() is what keeps a concurrent reader from seeing a half-written
-	// record across that boundary.
+	// mu serializes the read-modify-write Progress and Finish do on job.json
+	// within this process. The parallel shutdown path
+	// (power.shutdownTogether) runs one goroutine per host, and each calls
+	// Progress (via the job Reporter) concurrently; without a lock, two
+	// goroutines Read the same record, each add their own host, and the
+	// second write overwrites the first -- a polling client sees an
+	// incomplete hosts map. The lock is per-Manager (one node, one job) and
+	// Progress is not hot, so a mutex is the right shape.
+	//
+	// It does not cross processes: that is the job.lock flock's job, which
+	// update takes around its read-check-write so a new Start (in the CGI
+	// process) and a stale-but-alive child cannot interleave -- see update.
+	// The write-then-rename in write() is what keeps a concurrent reader from
+	// seeing a half-written record across that boundary.
 	mu sync.Mutex
 }
 
@@ -228,12 +233,6 @@ type Manager struct {
 // giving Manager its own opinion about inventory or VMShutdownTimeout. Used
 // only to derive staleCeiling; see staleCeilingFor and staleBuffer's doc
 // comments for why the ceiling must track both.
-// Compile-time assertion that Manager is the JobRecorder the detached
-// child (internal/jobrun) records progress and completion through. A
-// signature drift on Progress or Finish surfaces here, at the seam, rather
-// than only at the jobrun call site.
-var _ JobRecorder = (*Manager)(nil)
-
 func NewManager(dir string, unmuteTimeout, offWorstCase time.Duration) *Manager {
 	return &Manager{dir: dir, staleCeiling: staleCeilingFor(unmuteTimeout, offWorstCase)}
 }
@@ -312,7 +311,13 @@ func jobIsStale(age, ceiling time.Duration) bool {
 // hardcoded guess. See lz0.
 func (m *Manager) StaleCeiling() time.Duration { return m.staleCeiling }
 
-func (m *Manager) write(j Job) error {
+// write atomically replaces job.json with j.
+//
+// It writes a uniquely named temp file (os.CreateTemp) and renames it into
+// place, so a reader never sees a half-written record and two writers can
+// never share -- and corrupt -- one fixed temp path. Callers other than tests
+// hold the job.lock flock (Start, update), so writers are also serialized.
+func (m *Manager) write(j Job) (err error) {
 	if err := os.MkdirAll(m.dir, 0o700); err != nil {
 		return err
 	}
@@ -321,12 +326,63 @@ func (m *Manager) write(j Job) error {
 		return err
 	}
 
-	// Write-then-rename so a reader never sees a half-written record.
-	tmp := m.statePath() + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
-		return err
+	// os.CreateTemp creates the file with mode 0600.
+	f, err := os.CreateTemp(m.dir, filepath.Base(m.statePath())+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("creating the job state temp file: %w", err)
 	}
-	return os.Rename(tmp, m.statePath())
+	tmp := f.Name()
+	// Remove the temp file on any failure; after a successful rename it no
+	// longer exists under this name.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+
+	if _, err := f.Write(append(raw, '\n')); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("writing the job state temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing the job state temp file: %w", err)
+	}
+	if err := os.Rename(tmp, m.statePath()); err != nil {
+		return fmt.Errorf("renaming the job state into place: %w", err)
+	}
+	return nil
+}
+
+// errLockHeld wraps the flock failure lock returns, so Start can tell
+// "somebody else holds the lock" from "the lock file could not be opened".
+var errLockHeld = errors.New("the job lock is held")
+
+// lock opens job.lock and flocks it with how (LOCK_EX, optionally with
+// LOCK_NB), returning the function that releases it. A failed flock is
+// reported wrapping errLockHeld.
+func (m *Manager) lock(how int) (unlock func(), err error) {
+	if err := os.MkdirAll(m.dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(m.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("opening the job lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+		// The lock file's close error is not actionable; it is explicitly
+		// discarded so errcheck keeps flagging write-path os.File closes
+		// (see .golangci.yml).
+		_ = f.Close()
+		return nil, fmt.Errorf("%w: %w", errLockHeld, err)
+	}
+	return func() {
+		// Unlocking and closing errors are not actionable (closing the fd
+		// releases the lock anyway), so they are explicitly discarded rather
+		// than ignored -- keeping errcheck able to flag a future ignored
+		// Flock *acquire*.
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, nil
 }
 
 // ErrJobRunning is returned when another power operation already holds the
@@ -334,31 +390,43 @@ func (m *Manager) write(j Job) error {
 // worse than the second caller being told to wait.
 var ErrJobRunning = errors.New("another power operation is already running")
 
+// ErrJobSuperseded is returned by a JobRecorder's Finish when job.json no
+// longer records the recorder's job: a newer job has replaced it.
+//
+// This happens when a job-run child hangs past the staleness ceiling while
+// still alive. Read then reports its job as failed, a new Start is free to
+// claim the slot and write a new job.json, and the old child's eventual
+// Progress or Finish must not overwrite the newer job's record. See
+// Manager.update.
+var ErrJobSuperseded = errors.New("job.json records a newer job")
+
+// Environment variables through which Manager.spawn hands the detached
+// job-run child its state directory and the ID of the job it is running.
+// jobrun.Run reads them back; they are named here, next to spawn, so the two
+// ends of that contract cannot drift apart.
+const (
+	JobDirEnv = "F3SCTL_JOB_DIR"
+	JobIDEnv  = "F3SCTL_JOB_ID"
+)
+
 // Start launches action as a detached child and records it as running.
 //
 // The lock is held only long enough to claim the slot; the child runs
 // independently of this CGI process, which exits as soon as it has replied.
 func (m *Manager) Start(action string, args []string) (Job, error) {
-	if err := os.MkdirAll(m.dir, 0o700); err != nil {
-		return Job{}, err
-	}
-
-	lock, err := os.OpenFile(m.lockPath(), os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return Job{}, fmt.Errorf("opening the job lock: %w", err)
-	}
-	// The lock file is released by the Flock unlock below and the fd close;
-	// its close error is not actionable and is explicitly discarded so
-	// errcheck keeps flagging write-path os.File closes (see .golangci.yml).
-	defer func() { _ = lock.Close() }()
-
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	// Non-blocking: actions are never queued. A running child's Progress or
+	// Finish also holds this lock, for the few milliseconds of its
+	// read-check-write (see update); a Start landing in that window is told a
+	// job is running, which is true in every case but a stale-but-alive
+	// child's, and there a retry succeeds.
+	unlock, err := m.lock(syscall.LOCK_EX | syscall.LOCK_NB)
+	if errors.Is(err, errLockHeld) {
 		return Job{}, ErrJobRunning
 	}
-	// Unlock on exit; the error is not actionable (the fd closes and releases the
-	// lock anyway), so it is explicitly discarded rather than ignored --
-	// keeping errcheck able to flag a future ignored Flock *acquire*.
-	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
+	if err != nil {
+		return Job{}, err
+	}
+	defer unlock()
 
 	// Re-check under the lock: the previous holder may have finished between
 	// our state read and acquiring it.
@@ -382,7 +450,7 @@ func (m *Manager) Start(action string, args []string) (Job, error) {
 		return Job{}, err
 	}
 
-	if err := m.doSpawn(args); err != nil {
+	if err := m.doSpawn(id, args); err != nil {
 		job.State = JobFailed
 		job.Error = err.Error()
 		job.Finished = time.Now().UTC().Format(time.RFC3339)
@@ -394,11 +462,11 @@ func (m *Manager) Start(action string, args []string) (Job, error) {
 
 // doSpawn starts the job's detached child, through spawnFunc when a test has
 // substituted one.
-func (m *Manager) doSpawn(args []string) error {
+func (m *Manager) doSpawn(id string, args []string) error {
 	if m.spawnFunc != nil {
-		return m.spawnFunc(args)
+		return m.spawnFunc(id, args)
 	}
-	return m.spawn(args)
+	return m.spawn(id, args)
 }
 
 // spawn starts this same binary in CLI mode, detached from the CGI process.
@@ -406,8 +474,9 @@ func (m *Manager) doSpawn(args []string) error {
 // Setsid puts the child in its own session so bozohttpd tearing down the CGI's
 // process group cannot take the shutdown with it, and Release lets this
 // process exit without reaping. The child records its own completion via
-// `f3sctl job-run`, which calls jobrun.Run.
-func (m *Manager) spawn(args []string) error {
+// `f3sctl job-run`, which calls jobrun.Run; id travels in JobIDEnv so the
+// child only ever writes to its own job (see Manager.Recorder).
+func (m *Manager) spawn(id string, args []string) error {
 	self, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locating this binary: %w", err)
@@ -436,13 +505,36 @@ func (m *Manager) spawn(args []string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// The child must not inherit GATEWAY_INTERFACE, or it would start in CGI
 	// mode and try to answer an HTTP request that does not exist.
-	cmd.Env = append(os.Environ(), "GATEWAY_INTERFACE=", "F3SCTL_JOB_DIR="+m.dir)
+	cmd.Env = append(os.Environ(), "GATEWAY_INTERFACE=", JobDirEnv+"="+m.dir, JobIDEnv+"="+id)
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting the job: %w", err)
 	}
 	return cmd.Process.Release()
 }
+
+// Recorder returns the JobRecorder through which the detached child running
+// job id records its progress and outcome.
+//
+// Binding the recorder to an ID is what stops a stale-but-alive child from
+// clobbering a newer job: its writes are checked against the ID on disk, under
+// the job.lock flock, and dropped once a newer job has replaced its own. See
+// update.
+func (m *Manager) Recorder(id string) JobRecorder {
+	return jobRecorder{m: m, id: id}
+}
+
+// jobRecorder is the JobRecorder Manager.Recorder returns.
+type jobRecorder struct {
+	m  *Manager
+	id string
+}
+
+// Compile-time assertion that jobRecorder is the JobRecorder the detached
+// child (internal/jobrun) records progress and completion through. A
+// signature drift on Progress or Finish surfaces here, at the seam, rather
+// than only at the jobrun call site.
+var _ JobRecorder = jobRecorder{}
 
 // Progress records a step and/or a host update on the running job.
 //
@@ -451,55 +543,80 @@ func (m *Manager) spawn(args []string) error {
 // memory -- would not survive the detached child being the only writer while a
 // separate CGI process serves the reads.
 //
-// The read-modify-write is serialized under mu: the parallel shutdown path
+// The read-modify-write is serialized (see update): the parallel shutdown path
 // (power.shutdownTogether) calls Progress from one goroutine per host, and
-// without the lock those goroutines would Read the same record, each add only
-// their own host, and the second write would overwrite the first -- losing the
-// other hosts' updates and, racing the single .tmp path, occasionally
-// corrupting job.json. See the mu field's doc comment.
-func (m *Manager) Progress(step string, host string, phase, detail string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	j := m.Read()
-	if j == nil {
-		return
-	}
-
-	if step != "" {
-		j.Step = step
-	}
-	if host != "" {
-		if j.Hosts == nil {
-			j.Hosts = map[string]HostProgress{}
+// without that those goroutines would Read the same record, each add only
+// their own host, and the second write would overwrite the first -- losing
+// the other hosts' updates. See the mu field's doc comment.
+func (r jobRecorder) Progress(step string, host string, phase, detail string) {
+	// Best effort: losing a progress update -- including one dropped because
+	// the job was superseded -- must never derail the operation the client
+	// actually asked for.
+	_ = r.m.update(r.id, func(j *Job) {
+		if step != "" {
+			j.Step = step
 		}
-		j.Hosts[host] = HostProgress{Phase: phase, Detail: detail}
-	}
-	j.Updated = time.Now().UTC().Format(time.RFC3339)
-
-	// Best effort: losing a progress update must never derail the operation
-	// the client actually asked for.
-	_ = m.write(*j)
+		if host != "" {
+			if j.Hosts == nil {
+				j.Hosts = map[string]HostProgress{}
+			}
+			j.Hosts[host] = HostProgress{Phase: phase, Detail: detail}
+		}
+		j.Updated = time.Now().UTC().Format(time.RFC3339)
+	})
 }
 
 // Finish records a completed job. Called by the detached child (via jobrun.Run)
-// on its way out. It takes the same mu as Progress so a late Progress from one
-// of the parallel-shutdown goroutines cannot race Finish's read-then-write and
-// overwrite the terminal state with a stale host map.
-func (m *Manager) Finish(rc int, errMsg string) error {
+// on its way out. It goes through the same update as Progress so a late
+// Progress from one of the parallel-shutdown goroutines cannot race Finish's
+// read-then-write and overwrite the terminal state with a stale host map.
+//
+// It returns fs.ErrNotExist when no job.json exists and ErrJobSuperseded when
+// job.json records a job other than this recorder's.
+func (r jobRecorder) Finish(rc int, errMsg string) error {
+	return r.m.update(r.id, func(j *Job) {
+		j.State = JobDone
+		if rc != 0 {
+			j.State = JobFailed
+		}
+		j.RC = &rc
+		j.Error = errMsg
+		j.Finished = time.Now().UTC().Format(time.RFC3339)
+	})
+}
+
+// update applies mutate to job.json, but only while job.json still records
+// job id.
+//
+// The whole read-check-write runs under mu (goroutines of this process) and
+// the job.lock flock (other processes). The flock is what closes the
+// stale-but-alive race: Read reports a hung child's job as failed once it
+// outlives the staleness ceiling, so a new Start may claim job.lock and write
+// a newer job.json while the old child is still running. Start writes only
+// under the flock, so with the check here also under it, the old child either
+// writes before the new job exists or sees the new ID and backs off -- it can
+// never check the old ID, lose the CPU to Start, and then rename its stale
+// record over the new one.
+//
+// The flock is taken blocking: Start holds it only for as long as it takes to
+// record a job and spawn its child.
+func (m *Manager) update(id string, mutate func(*Job)) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	unlock, err := m.lock(syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	j := m.Read()
 	if j == nil {
 		return fs.ErrNotExist
 	}
-	j.State = JobDone
-	if rc != 0 {
-		j.State = JobFailed
+	if j.ID != id {
+		return fmt.Errorf("recording job %q: %w (%q)", id, ErrJobSuperseded, j.ID)
 	}
-	j.RC = &rc
-	j.Error = errMsg
-	j.Finished = time.Now().UTC().Format(time.RFC3339)
+	mutate(j)
 	return m.write(*j)
 }

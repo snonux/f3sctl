@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
@@ -55,9 +56,10 @@ func TestManagerReadReturnsNilBeforeAnyJob(t *testing.T) {
 func TestManagerStartClaimsTheLockAndRunsSpawn(t *testing.T) {
 	m := newTestManager(t)
 
+	var gotID string
 	var gotArgs []string
-	m.spawnFunc = func(args []string) error {
-		gotArgs = args
+	m.spawnFunc = func(id string, args []string) error {
+		gotID, gotArgs = id, args
 		return nil
 	}
 
@@ -73,6 +75,11 @@ func TestManagerStartClaimsTheLockAndRunsSpawn(t *testing.T) {
 	}
 	if len(gotArgs) != 3 || gotArgs[0] != "job-run" {
 		t.Errorf("spawnFunc got args %v, want the job-run invocation", gotArgs)
+	}
+	// The child must be told which job it runs, or its Recorder could never
+	// match job.json and it would record nothing.
+	if gotID == "" || gotID != job.ID {
+		t.Errorf("spawnFunc got job id %q, want the started job's %q", gotID, job.ID)
 	}
 
 	// Read must agree with what Start returned: a client polling
@@ -97,7 +104,7 @@ func TestManagerStartFailsWhenAJobIsAlreadyRecordedRunning(t *testing.T) {
 	}
 
 	spawned := false
-	m.spawnFunc = func([]string) error { spawned = true; return nil }
+	m.spawnFunc = func(string, []string) error { spawned = true; return nil }
 
 	_, err := m.Start("off", nil)
 	if !errors.Is(err, ErrJobRunning) {
@@ -132,7 +139,7 @@ func TestManagerStartFailsWhileTheLockIsHeld(t *testing.T) {
 	defer func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) }()
 
 	spawned := false
-	m.spawnFunc = func([]string) error { spawned = true; return nil }
+	m.spawnFunc = func(string, []string) error { spawned = true; return nil }
 
 	_, err = m.Start("off", nil)
 	if !errors.Is(err, ErrJobRunning) {
@@ -150,7 +157,7 @@ func TestManagerStartFailsWhileTheLockIsHeld(t *testing.T) {
 func TestManagerStartRecordsFailureWhenSpawnFails(t *testing.T) {
 	m := newTestManager(t)
 	spawnErr := errors.New("boom")
-	m.spawnFunc = func([]string) error { return spawnErr }
+	m.spawnFunc = func(string, []string) error { return spawnErr }
 
 	job, err := m.Start("off", nil)
 	if !errors.Is(err, spawnErr) {
@@ -388,7 +395,7 @@ func TestManagerStartSucceedsAfterAStaleJobIsReclaimed(t *testing.T) {
 	}
 
 	spawned := false
-	m.spawnFunc = func([]string) error { spawned = true; return nil }
+	m.spawnFunc = func(string, []string) error { spawned = true; return nil }
 
 	job, err := m.Start("on", nil)
 	if err != nil {
@@ -412,8 +419,9 @@ func TestManagerProgressUpdatesStepAndHostState(t *testing.T) {
 		t.Fatalf("seeding a job: %v", err)
 	}
 
-	m.Progress("waking hosts", "", "", "")
-	m.Progress("", "f0", "working", "sending magic packet")
+	rec := m.Recorder("p1")
+	rec.Progress("waking hosts", "", "", "")
+	rec.Progress("", "f0", "working", "sending magic packet")
 
 	got := m.Read()
 	if got == nil {
@@ -436,7 +444,7 @@ func TestManagerProgressUpdatesStepAndHostState(t *testing.T) {
 // racing its own first write must not be able to crash on a progress update.
 func TestManagerProgressIsBestEffortWhenNoJobExists(t *testing.T) {
 	m := newTestManager(t)
-	m.Progress("step", "host", "working", "detail") // must not panic
+	m.Recorder("none").Progress("step", "host", "working", "detail") // must not panic
 	if got := m.Read(); got != nil {
 		t.Errorf("Read() = %+v, want still nil: Progress must not invent a job", got)
 	}
@@ -462,7 +470,7 @@ func TestManagerFinishRecordsSuccessAndFailure(t *testing.T) {
 				t.Fatalf("seeding a job: %v", err)
 			}
 
-			if err := m.Finish(tc.rc, tc.msg); err != nil {
+			if err := m.Recorder("f1").Finish(tc.rc, tc.msg); err != nil {
 				t.Fatalf("Finish: %v", err)
 			}
 
@@ -491,7 +499,7 @@ func TestManagerFinishRecordsSuccessAndFailure(t *testing.T) {
 // that was never written -- that would hide a real bug in Start.
 func TestManagerFinishErrorsWhenNoJobExists(t *testing.T) {
 	m := newTestManager(t)
-	if err := m.Finish(0, ""); err == nil {
+	if err := m.Recorder("none").Finish(0, ""); err == nil {
 		t.Error("Finish succeeded with no job ever recorded, want an error")
 	}
 }
@@ -572,7 +580,7 @@ func TestManagerProgressIsSafeForConcurrentHostUpdates(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			m.Progress("", fmt.Sprintf("h%d", i), "working", "shutting down")
+			m.Recorder("g51").Progress("", fmt.Sprintf("h%d", i), "working", "shutting down")
 		}(i)
 	}
 	wg.Wait()
@@ -614,7 +622,7 @@ func TestManagerProgressAndFinishDoNotRaceTheTerminalState(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			m.Progress("", fmt.Sprintf("h%d", i), "working", "")
+			m.Recorder("g51f").Progress("", fmt.Sprintf("h%d", i), "working", "")
 		}(i)
 	}
 	// A Finish concurrent with the last Progress updates: it must not lose a
@@ -622,7 +630,7 @@ func TestManagerProgressAndFinishDoNotRaceTheTerminalState(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := m.Finish(0, ""); err != nil {
+		if err := m.Recorder("g51f").Finish(0, ""); err != nil {
 			t.Errorf("Finish: %v", err)
 		}
 	}()
@@ -637,5 +645,204 @@ func TestManagerProgressAndFinishDoNotRaceTheTerminalState(t *testing.T) {
 	}
 	if len(got.Hosts) != n {
 		t.Errorf("Hosts has %d entries, want all %d: a late Progress raced Finish and lost a host", len(got.Hosts), n)
+	}
+}
+
+// startJob starts a job on m with a substituted spawn and returns its ID, the
+// one the detached child would be handed through JobIDEnv.
+func startJob(t *testing.T, m *Manager, action string) string {
+	t.Helper()
+	var spawnedID string
+	m.spawnFunc = func(id string, _ []string) error { spawnedID = id; return nil }
+	job, err := m.Start(action, nil)
+	if err != nil {
+		t.Fatalf("Start(%q): %v", action, err)
+	}
+	if spawnedID != job.ID {
+		t.Fatalf("spawned with job id %q, want %q", spawnedID, job.ID)
+	}
+	return job.ID
+}
+
+// TestRecorderWritesItsOwnJob is the normal path through Start: the child's
+// recorder, bound to the ID Start handed it, records both progress and the
+// outcome.
+func TestRecorderWritesItsOwnJob(t *testing.T) {
+	m := newTestManager(t)
+	id := startJob(t, m, "off")
+	rec := m.Recorder(id)
+
+	rec.Progress("stopping guests", "f0", "working", "")
+	if err := rec.Finish(0, ""); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+
+	got := m.Read()
+	if got == nil || got.ID != id {
+		t.Fatalf("Read() = %+v, want job %q", got, id)
+	}
+	if got.State != JobDone || got.Step != "stopping guests" || got.Hosts["f0"].Phase != "working" {
+		t.Errorf("job = %+v, want done with the recorded step and host", got)
+	}
+}
+
+// TestRecorderOfASupersededJobCannotOverwriteTheNewerJob is the regression
+// test for na: a job-run child that hangs past the staleness ceiling while
+// still alive has its job reported as failed by Read, which frees Start to
+// record a newer job. When the old child finally reports progress or
+// finishes, it must not overwrite the newer job's record.
+func TestRecorderOfASupersededJobCannotOverwriteTheNewerJob(t *testing.T) {
+	m := newTestManager(t)
+	old := time.Now().Add(-(m.StaleCeiling() + time.Minute)).UTC().Format(time.RFC3339)
+	if err := m.write(Job{ID: "hung", Action: "off", State: JobRunning, Started: old}); err != nil {
+		t.Fatalf("seeding the hung job: %v", err)
+	}
+	hung := m.Recorder("hung")
+
+	newID := startJob(t, m, "on")
+
+	hung.Progress("still stopping guests", "f1", "failed", "late")
+	err := hung.Finish(1, "finally timed out")
+	if !errors.Is(err, ErrJobSuperseded) {
+		t.Fatalf("stale Finish error = %v, want ErrJobSuperseded", err)
+	}
+
+	got := m.Read()
+	if got == nil || got.ID != newID {
+		t.Fatalf("Read() = %+v, want the newer job %q", got, newID)
+	}
+	if got.State != JobRunning || got.Action != "on" {
+		t.Errorf("newer job = %+v, want it still running action on", got)
+	}
+	if got.RC != nil || got.Error != "" || got.Finished != "" {
+		t.Errorf("newer job = %+v, want no outcome: the stale Finish leaked into it", got)
+	}
+	if got.Step != "" || len(got.Hosts) != 0 {
+		t.Errorf("newer job = %+v, want no progress: the stale Progress leaked into it", got)
+	}
+
+	// And the newer job's own child still records normally.
+	if err := m.Recorder(newID).Finish(0, ""); err != nil {
+		t.Fatalf("newer job's Finish: %v", err)
+	}
+	if got := m.Read(); got == nil || got.State != JobDone {
+		t.Errorf("Read() after the newer job's Finish = %+v, want done", got)
+	}
+}
+
+// TestRecorderWaitsForTheJobLock pins that a recorder's read-check-write runs
+// under the job.lock flock Start claims. Without it a stale child could check
+// its own ID, then have Start record a newer job, then rename its stale record
+// over the newer one; the ID check alone would not stop that.
+func TestRecorderWaitsForTheJobLock(t *testing.T) {
+	m := newTestManager(t)
+	if err := m.write(Job{ID: "j", State: JobRunning,
+		Started: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+		t.Fatalf("seeding a job: %v", err)
+	}
+
+	// Stand in for Start holding the lock, through another Manager so the
+	// in-process mutex plays no part.
+	unlock, err := NewManager(m.dir, defaultUnmuteTimeout, defaultOffWorstCase).
+		lock(syscall.LOCK_EX | syscall.LOCK_NB)
+	if err != nil {
+		t.Fatalf("taking the lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- m.Recorder("j").Finish(0, "") }()
+
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("Finish returned (%v) while the job lock was held, want it to wait", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := m.Read(); got == nil || got.State != JobRunning {
+		t.Fatalf("Read() = %+v, want the job untouched while the lock is held", got)
+	}
+
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Finish after the lock was released: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Finish still blocked after the lock was released")
+	}
+	if got := m.Read(); got == nil || got.State != JobDone {
+		t.Errorf("Read() = %+v, want done once the lock was released", got)
+	}
+}
+
+// TestRecordersInSeparateManagersDoNotLoseUpdates pins that the job.lock
+// flock, not only the per-Manager mutex, serializes recorders: two Managers
+// on the same directory stand in for two processes writing one job.json.
+func TestRecordersInSeparateManagersDoNotLoseUpdates(t *testing.T) {
+	a := newTestManager(t)
+	b := NewManager(a.dir, defaultUnmuteTimeout, defaultOffWorstCase)
+	if err := a.write(Job{ID: "x", State: JobRunning}); err != nil {
+		t.Fatalf("seeding a job: %v", err)
+	}
+
+	const n = 16
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		m := a
+		if i%2 == 1 {
+			m = b
+		}
+		wg.Add(1)
+		go func(m *Manager, i int) {
+			defer wg.Done()
+			m.Recorder("x").Progress("", fmt.Sprintf("h%d", i), "working", "")
+		}(m, i)
+	}
+	wg.Wait()
+
+	got := a.Read()
+	if got == nil {
+		t.Fatal("Read() = nil; job.json was likely corrupted by racing writes")
+	}
+	if len(got.Hosts) != n {
+		t.Errorf("Hosts has %d entries, want all %d: cross-process writers lost updates", len(got.Hosts), n)
+	}
+}
+
+// TestWriteLeavesNoTempFiles pins the CreateTemp+rename write: the unique temp
+// file is renamed away on success and removed on failure, so nothing but
+// job.json (and job.lock) accumulates in the state directory.
+func TestWriteLeavesNoTempFiles(t *testing.T) {
+	m := newTestManager(t)
+	for i := 0; i < 3; i++ {
+		if err := m.write(Job{ID: fmt.Sprintf("w%d", i), State: JobRunning}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+	}
+	assertNoTempFiles(t, m.dir)
+	if got := m.Read(); got == nil || got.ID != "w2" {
+		t.Errorf("Read() = %+v, want the last write", got)
+	}
+
+	// A rename that cannot succeed: job.json is a non-empty directory.
+	m2 := newTestManager(t)
+	if err := os.MkdirAll(filepath.Join(m2.statePath(), "blocker"), 0o700); err != nil {
+		t.Fatalf("making job.json a directory: %v", err)
+	}
+	if err := m2.write(Job{ID: "doomed"}); err == nil {
+		t.Fatal("write succeeded over a directory, want an error")
+	}
+	assertNoTempFiles(t, m2.dir)
+}
+
+func assertNoTempFiles(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.tmp"))
+	if err != nil {
+		t.Fatalf("globbing temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("temp files left behind: %v", matches)
 	}
 }

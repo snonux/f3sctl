@@ -67,13 +67,18 @@ func (r jobReporter) HostState(host string, phase power.HostPhase, detail string
 // of dying on the default signal action, so an interrupted `power all cycle`
 // still restores f-host AC and the outcome still reaches job.json.
 func Run(ctx context.Context, cfg config.Config, args []string) error {
-	dir := os.Getenv("F3SCTL_JOB_DIR")
+	dir := os.Getenv(coordination.JobDirEnv)
 	if dir == "" {
 		dir = cfg.StateDir
 	}
-	mgr := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg))
+	// The recorder is bound to the job this child was spawned for, so a child
+	// that hangs past the staleness ceiling and is superseded by a newer job
+	// cannot overwrite that job's record. An unset JobIDEnv (job-run invoked
+	// by hand) matches no job, so nothing is recorded.
+	rec := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)).
+		Recorder(os.Getenv(coordination.JobIDEnv))
 
-	err := cli.RunLocal(ctx, cfg, args, os.Stdout, os.Stderr, jobReporter{rec: mgr})
+	err := cli.RunLocal(ctx, cfg, args, os.Stdout, os.Stderr, jobReporter{rec: rec})
 
 	rc, msg := 0, ""
 	if err != nil {
@@ -81,7 +86,7 @@ func Run(ctx context.Context, cfg config.Config, args []string) error {
 		fmt.Fprintf(os.Stderr, "job failed: %v\n", err)
 	}
 
-	if ferr := mgr.Finish(rc, msg); ferr != nil {
+	if ferr := rec.Finish(rc, msg); ferr != nil {
 		fmt.Fprintf(os.Stderr, "could not record job completion: %v\n", ferr)
 	}
 	return err

@@ -17,7 +17,8 @@ import (
 )
 
 // jobTestConfig points the AC plug at a fake Shelly and F3SCTL_JOB_DIR at a
-// fresh directory holding a running job, as the API leaves it for the child.
+// fresh directory holding a running job, and F3SCTL_JOB_ID at that job, as
+// the API leaves them for the child.
 func jobTestConfig(t *testing.T) (config.Config, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -43,7 +44,8 @@ func jobTestConfig(t *testing.T) (config.Config, string) {
 	if err := os.WriteFile(filepath.Join(dir, "job.json"), raw, 0o600); err != nil {
 		t.Fatalf("writing job.json: %v", err)
 	}
-	t.Setenv("F3SCTL_JOB_DIR", dir)
+	t.Setenv(coordination.JobDirEnv, dir)
+	t.Setenv(coordination.JobIDEnv, job.ID)
 	return cfg, dir
 }
 
@@ -90,5 +92,21 @@ func TestRunRecordsASuccessfulJobAsDone(t *testing.T) {
 	j := readJob(t, cfg, dir)
 	if j.State != coordination.JobDone || j.RC == nil || *j.RC != 0 {
 		t.Fatalf("job = %+v, want state done with rc 0", j)
+	}
+}
+
+// TestRunDoesNotOverwriteANewerJob is the negative test for na: a child whose
+// job has been superseded (it hung past the staleness ceiling and a newer job
+// was started) must leave the newer job's record alone when it finishes.
+func TestRunDoesNotOverwriteANewerJob(t *testing.T) {
+	cfg, dir := jobTestConfig(t)
+	t.Setenv(coordination.JobIDEnv, "an-older-job")
+
+	if err := Run(context.Background(), cfg, []string{"ac", "status"}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	j := readJob(t, cfg, dir)
+	if j.ID != "test" || j.State != coordination.JobRunning || j.RC != nil {
+		t.Fatalf("job = %+v, want the newer job still running and untouched", j)
 	}
 }
