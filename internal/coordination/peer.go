@@ -106,6 +106,10 @@ func (ps *PeerSet) Busy(ctx context.Context, self, apiKey string) (bool, string)
 	return false, ""
 }
 
+// errNoJobState is fetchPeerJob's answer for a 200 whose document carries
+// no job state -- not a job resource at all. See fetchPeerJob.
+var errNoJobState = errors.New("answered 200 with no job state (is peer_job_path the job resource?)")
+
 // ErrPeerJobUnknown wraps a peer that answered RunningJob's question but not
 // with a job: a non-200 status (401 for a wrong or rotated API key, 404 for
 // a wrong peer_job_path, 5xx for a broken node) or a body that is not a job.
@@ -142,6 +146,11 @@ func (ps *PeerSet) runningJob(ctx context.Context, self, apiKey string, strict b
 		}
 
 		job, err := ps.fetchPeer(ctx, addr, apiKey)
+		if !strict && errors.Is(err, errNoJobState) {
+			// Lenient, as before errNoJobState existed: an answer with no
+			// job state is a peer with no job to report, not a failure.
+			continue
+		}
 		if err != nil {
 			var unreachable *peerUnreachableError
 			if strict && !errors.As(err, &unreachable) {
@@ -180,6 +189,9 @@ func (ps *PeerSet) FetchJob(ctx context.Context, self, apiKey string) *Job {
 		}
 
 		job, err := ps.fetchPeer(ctx, addr, apiKey)
+		if errors.Is(err, errNoJobState) {
+			continue // no job to report, as for "none"; see runningJob
+		}
 		if err != nil {
 			ps.warnFunc()(addr, err)
 			continue
@@ -353,6 +365,13 @@ const PeerQueryParam = "peer"
 // stay one: the latter is what Busy and FetchJob warn about and skip past as
 // "peer unreachable", while the former is a peer that answered perfectly
 // well and simply has no job to report.
+//
+// A 200 whose properties carry no state at all -- `null`, `{}`, or some
+// other resource's document, as a peer_job_path pointing at the wrong route
+// would fetch -- is NOT that "none": it returns an error wrapping
+// errNoJobState. Busy and FetchJob skip it silently, exactly as they always
+// treated it, but RunningJob must not read a document that is not a job as
+// an idle peer.
 func fetchPeerJob(ctx context.Context, addr, path, apiKey string) (*Job, error) {
 	url := fmt.Sprintf("http://%s%s?%s=1", addr, path, PeerQueryParam)
 
@@ -386,8 +405,11 @@ func fetchPeerJob(ctx context.Context, addr, path, apiKey string) (*Job, error) 
 		return nil, err
 	}
 
-	if e.Properties.State == "" || e.Properties.State == "none" {
+	switch e.Properties.State {
+	case "none":
 		return nil, nil
+	case "":
+		return nil, fmt.Errorf("peer %s: %w", addr, errNoJobState)
 	}
 	job := e.Properties
 	return &job, nil

@@ -53,32 +53,56 @@ func TestRunningJobIgnoresAnIdlePeer(t *testing.T) {
 
 // TestRunningJobFailsClosedOnAnAnswerItCannotUse is the difference from
 // Busy: a peer that answered 401 (wrong or rotated key), 403, 404 (wrong
-// job path) or 5xx, or answered with something that is not a job, has not
-// said it is idle. RunningJob reports ErrPeerJobUnknown naming the status,
-// and Busy still reads the same peer as idle -- the API's behaviour is
-// unchanged.
+// job path) or 5xx, or answered 200 with something that is not a job -- not
+// JSON, `null`, `{}`, or another resource's document, as a peer_job_path
+// pointing at the wrong route would fetch -- has not said it is idle. Only
+// state "none" says that. RunningJob reports ErrPeerJobUnknown, and Busy and
+// FetchJob still read the same peer as having no job -- the API's behaviour
+// is unchanged.
 func TestRunningJobFailsClosedOnAnAnswerItCannotUse(t *testing.T) {
-	cases := map[string]http.HandlerFunc{
-		"401":      func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) },
-		"403":      func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) },
-		"404":      http.NotFound,
-		"500":      func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) },
-		"not json": func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "<html>") },
+	body := func(doc string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, doc) }
 	}
-	for name, handler := range cases {
-		t.Run(name, func(t *testing.T) {
-			ps, _ := strictPeerSet(t, handler)
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		status  bool // answered with a non-200 status
+		noState bool // answered 200 with a JSON document carrying no job state
+	}{
+		{"401", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }, true, false},
+		{"403", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }, true, false},
+		{"404", http.NotFound, true, false},
+		{"500", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }, true, false},
+		{"not json", body("<html>"), false, false},
+		{"not a job", body(`{"properties":{"node":"pi1"}}`), false, true},
+		{"null", body("null"), false, true},
+		{"empty object", body("{}"), false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ps, warns := strictPeerSet(t, tc.handler)
 
 			job, err := ps.RunningJob(context.Background(), "pi0", "k")
 			if !errors.Is(err, ErrPeerJobUnknown) || job != nil {
 				t.Fatalf("RunningJob() = %+v, %v; want ErrPeerJobUnknown", job, err)
 			}
 			var statusErr *peerHTTPStatusError
-			if isStatus := errors.As(err, &statusErr); isStatus != (name != "not json") {
+			if isStatus := errors.As(err, &statusErr); isStatus != tc.status {
 				t.Errorf("err = %v; want a *peerHTTPStatusError exactly for the status cases", err)
 			}
+			if noState := errors.Is(err, errNoJobState); noState != tc.noState {
+				t.Errorf("err = %v; want errNoJobState exactly for the stateless documents", err)
+			}
+
+			*warns = nil
 			if busy, _ := ps.Busy(context.Background(), "pi0", "k"); busy {
 				t.Error("Busy() = true; the API's lenient check must still read this peer as idle")
+			}
+			if got := ps.FetchJob(context.Background(), "pi0", "k"); got != nil {
+				t.Errorf("FetchJob() = %+v, want nil", got)
+			}
+			if tc.noState && len(*warns) != 0 {
+				t.Errorf("lenient checks warned %v; a stateless answer was always skipped silently", *warns)
 			}
 		})
 	}
