@@ -8,6 +8,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -360,11 +361,11 @@ func describeFields(r contract.Route, widest contract.State) map[string]any {
 // `force` field from the document. Every f-host covers both guards -- the fan
 // guard's power group and the AC guard's full set.
 func widestState(inv inventory.Inventory) contract.State {
-	var s contract.State
+	var snap powerapi.Snapshot
 	for _, h := range inv.EveryFHost() {
-		s.Hosts = append(s.Hosts, power.HostStatus{
+		snap.Hosts = append(snap.Hosts, power.HostStatus{
 			Name: h.Name, Role: string(h.Role), Ping: true, PingKnown: true, SSH: true,
 		})
 	}
-	return s
+	return powerapi.WithSnapshot(contract.State{}, snap)
 }

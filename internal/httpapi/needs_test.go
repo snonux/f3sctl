@@ -85,12 +85,11 @@ func needsBaseStates() []contract.State {
 		return out
 	}
 	enriched := func(up, peerBusy bool) contract.State {
-		s := contract.State{
-			Hosts:    fHosts(up),
-			Fans:     power.FansState{On: up},
-			AC:       power.ACState{On: up},
-			PeerBusy: peerBusy,
-		}
+		s := powerapi.WithSnapshot(contract.State{PeerBusy: peerBusy}, powerapi.Snapshot{
+			Hosts: fHosts(up),
+			Fans:  power.FansState{On: up},
+			AC:    power.ACState{On: up},
+		})
 		s = gogiosapi.WithMonitoring(s, []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}})
 		return gogiosapi.WithReport(s, needsReport, nil)
 	}

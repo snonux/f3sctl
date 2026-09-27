@@ -103,13 +103,13 @@ func fState(name string, ping, known bool) power.HostStatus {
 
 // coldSnapshot is a rack every host of which was probed and found silent.
 func coldSnapshot() contract.State {
-	return contract.State{
+	return WithSnapshot(contract.State{}, Snapshot{
 		Hosts: []power.HostStatus{
 			fState("f0", false, true), fState("f1", false, true),
 			fState("f2", false, true), fState("f3", false, true),
 		},
 		Fans: power.FansState{On: true},
-	}
+	})
 }
 
 // forced is a POST /fans/off carrying the confirmation checkbox.
@@ -198,13 +198,13 @@ func TestFansOffRefusedWhenTheRackCouldNotBeProbed(t *testing.T) {
 		return power.RackActivity{}
 	})
 
-	unprobed := contract.State{
+	unprobed := WithSnapshot(contract.State{}, Snapshot{
 		Hosts: []power.HostStatus{
 			fState("f0", false, false), fState("f1", false, false),
 			fState("f2", false, false), fState("f3", false, false),
 		},
 		Fans: power.FansState{On: true},
-	}
+	})
 
 	_, status, err := sf.handleFansOff(context.Background(), unprobed, contract.Request{})
 	if status != http.StatusConflict {
@@ -233,7 +233,7 @@ func TestFansOffRefusedWhileAHostAnswers(t *testing.T) {
 	})
 
 	hot := coldSnapshot()
-	hot.Hosts[1] = fState("f1", true, true)
+	SnapshotOf(hot).Hosts[1] = fState("f1", true, true)
 
 	_, status, err := sf.handleFansOff(context.Background(), hot, contract.Request{})
 	if status != http.StatusConflict {
@@ -314,7 +314,7 @@ func TestFansOffWithForceSkipsTheGuardEntirely(t *testing.T) {
 	})
 
 	hot := coldSnapshot()
-	hot.Hosts[1] = fState("f1", true, true)
+	SnapshotOf(hot).Hosts[1] = fState("f1", true, true)
 
 	if _, status, err := sf.handleFansOff(context.Background(), hot, forced()); err != nil || status != http.StatusOK {
 		t.Fatalf("forced fans off: status = %d, err = %v", status, err)
@@ -371,10 +371,10 @@ func TestACOffRefusedWhileAF3Answers(t *testing.T) {
 		return power.RackActivity{}
 	})
 
-	hot := contract.State{
+	hot := WithSnapshot(contract.State{}, Snapshot{
 		Hosts: []power.HostStatus{fState("f3", true, true)},
 		AC:    power.ACState{On: true},
-	}
+	})
 	_, status, err := sf.handleACOff(context.Background(), hot, contract.Request{})
 	if err == nil {
 		t.Fatal("ac-off succeeded while f3 answered")
@@ -396,10 +396,10 @@ func TestACOffWithForceSkipsTheGuardEntirely(t *testing.T) {
 		return power.RackActivity{}
 	})
 
-	hot := contract.State{
+	hot := WithSnapshot(contract.State{}, Snapshot{
 		Hosts: []power.HostStatus{fState("f0", true, true)},
 		AC:    power.ACState{On: true},
-	}
+	})
 	req := contract.Request{Form: url.Values{"force": {"true"}}}
 	if _, status, err := sf.handleACOff(context.Background(), hot, req); err != nil || status != http.StatusOK {
 		t.Fatalf("forced ac off: status = %d, err = %v", status, err)

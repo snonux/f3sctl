@@ -89,9 +89,9 @@ type Route struct {
 	NoRootLink bool
 	// SkipsProbe declares that this route's own Handle, and every
 	// Available/Fields predicate the router evaluates while rendering it,
-	// provably never read State.Hosts or State.Fans -- so the composition
-	// root's snapshot can skip the ~3s fleet probe and the Shelly plug read
-	// entirely when serving it. Zero value is false: a new route needs the
+	// provably never read the fleet snapshot (powerapi.Snapshot: hosts and
+	// plugs) -- so the composition root's snapshot can skip the ~3s fleet
+	// probe and the Shelly plug reads entirely when serving it. Zero value is false: a new route needs the
 	// probe by default and must opt out explicitly and correctly, rather than
 	// silently inherit an exemption because its path happened to match a
 	// hardcoded prefix meant for someone else's routes. That is what went

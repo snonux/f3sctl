@@ -177,7 +177,7 @@ func JobRunning(s contract.State) bool {
 
 // Host returns the named host's status.
 func Host(s contract.State, name string) (power.HostStatus, bool) {
-	for _, h := range s.Hosts {
+	for _, h := range SnapshotOf(s).Hosts {
 		if h.Name == name {
 			return h, true
 		}
@@ -196,7 +196,7 @@ func Host(s contract.State, name string) (power.HostStatus, bool) {
 // exactly what happened on 2026-08-08, when f3 was shut down 48 seconds after
 // waking and the pre-flight got "connection refused".
 func (sf *Surface) clusterHostsUp(s contract.State) (up, sshUp, total int) {
-	return hostsUp(power.PowerGroupStatuses(sf.Inv, s.Hosts))
+	return hostsUp(power.PowerGroupStatuses(sf.Inv, SnapshotOf(s).Hosts))
 }
 
 // everyFHostUp counts every f-host (f0-f3, power.EveryFHostStatuses): the set
@@ -208,7 +208,7 @@ func (sf *Surface) clusterHostsUp(s contract.State) (up, sshUp, total int) {
 // advertised action never covers a different set of hosts than the job it
 // starts.
 func (sf *Surface) everyFHostUp(s contract.State) (up, sshUp, total int) {
-	return hostsUp(power.EveryFHostStatuses(sf.Inv, s.Hosts))
+	return hostsUp(power.EveryFHostStatuses(sf.Inv, SnapshotOf(s).Hosts))
 }
 
 // hostsUp counts statuses: all of them, those answering ICMP, and those
@@ -241,11 +241,11 @@ func hostsUp(statuses []power.HostStatus) (up, sshUp, total int) {
 // afford it. handleFansOff confirms with the strict half before it switches
 // anything.
 func (sf *Surface) rackBusy(s contract.State) power.RackActivity {
-	return power.RackActivityFrom(sf.Inv, s.Hosts)
+	return power.RackActivityFrom(sf.Inv, SnapshotOf(s).Hosts)
 }
 
 // acBusy reports which f-hosts may still be drawing power on the AC circuit
 // (f0–f3), judged against this request's snapshot. Gates switching AC off.
 func (sf *Surface) acBusy(s contract.State) power.RackActivity {
-	return power.ACActivityFrom(sf.Inv, s.Hosts)
+	return power.ACActivityFrom(sf.Inv, SnapshotOf(s).Hosts)
 }

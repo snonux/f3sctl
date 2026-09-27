@@ -44,7 +44,7 @@ func (sf *Surface) handleStatus(ctx context.Context, state contract.State, req c
 		Actions: append(sf.actions.SectionActions(state, contract.SectionPower), sf.actions.SectionActions(state, contract.SectionAC)...),
 	}
 
-	e.Entities = append(e.Entities, sf.hostEntities(state.Hosts)...)
+	e.Entities = append(e.Entities, sf.hostEntities(SnapshotOf(state).Hosts)...)
 	e.Entities = append(e.Entities, sf.fansEntity(state))
 	e.Entities = append(e.Entities, sf.acEntity(state))
 
@@ -148,12 +148,13 @@ func hostEntity(h power.HostStatus, powerGroup bool) contract.Entity {
 }
 
 func (sf *Surface) fansEntity(state contract.State) contract.Entity {
-	props := map[string]any{"on": state.Fans.On, "ip": state.Fans.IP}
-	if state.FansErr != nil {
+	snap := SnapshotOf(state)
+	props := map[string]any{"on": snap.Fans.On, "ip": snap.Fans.IP}
+	if snap.FansErr != nil {
 		// Reported rather than swallowed: "the plug is unreachable" is a
 		// different situation from "the plug is off", and a client showing
 		// the latter for the former would be actively misleading.
-		props["error"] = state.FansErr.Error()
+		props["error"] = snap.FansErr.Error()
 	}
 	return contract.Entity{
 		Class:      []string{"fans"},
@@ -277,15 +278,17 @@ func (sf *Surface) setFans(ctx context.Context, state contract.State, req contra
 		return contract.Entity{}, http.StatusBadGateway, err
 	}
 
-	state.Fans, state.FansErr = fans, nil
-	e, _, _ := sf.handleFans(ctx, state, req)
+	snap := SnapshotOf(state)
+	snap.Fans, snap.FansErr = fans, nil
+	e, _, _ := sf.handleFans(ctx, WithSnapshot(state, snap), req)
 	return e, http.StatusOK, nil
 }
 
 func (sf *Surface) acEntity(state contract.State) contract.Entity {
-	props := map[string]any{"on": state.AC.On, "ip": state.AC.IP}
-	if state.ACErr != nil {
-		props["error"] = state.ACErr.Error()
+	snap := SnapshotOf(state)
+	props := map[string]any{"on": snap.AC.On, "ip": snap.AC.IP}
+	if snap.ACErr != nil {
+		props["error"] = snap.ACErr.Error()
 	}
 	return contract.Entity{
 		Class:      []string{"ac"},
@@ -355,8 +358,9 @@ func (sf *Surface) setAC(ctx context.Context, state contract.State, req contract
 		return contract.Entity{}, http.StatusBadGateway, err
 	}
 
-	state.AC, state.ACErr = ac, nil
-	e, _, _ := sf.handleAC(ctx, state, req)
+	snap := SnapshotOf(state)
+	snap.AC, snap.ACErr = ac, nil
+	e, _, _ := sf.handleAC(ctx, WithSnapshot(state, snap), req)
 	return e, http.StatusOK, nil
 }
 

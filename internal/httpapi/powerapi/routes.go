@@ -234,7 +234,7 @@ func (sf *Surface) allHostsRoutes() []contract.Route {
 			// the wake half, and one that is up but not answering SSH makes
 			// the shutdown half refuse before AC is touched.
 			Available: func(s contract.State) bool {
-				return !JobRunning(s) && s.ACErr == nil
+				return !JobRunning(s) && SnapshotOf(s).ACErr == nil
 			},
 		},
 	})
@@ -260,7 +260,8 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			// Unavailable when the plug cannot be read: without a read-back
 			// there is no way to report truthfully whether it worked.
 			Available: func(s contract.State) bool {
-				return !JobRunning(s) && s.FansErr == nil && !s.Fans.On
+				snap := SnapshotOf(s)
+				return !JobRunning(s) && snap.FansErr == nil && !snap.Fans.On
 			},
 			Handle: sf.handleFansOn,
 		},
@@ -271,7 +272,8 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
 			Needs:   contract.Needs{contract.NeedPeerBusy},
 			Available: func(s contract.State) bool {
-				return !JobRunning(s) && s.FansErr == nil && s.Fans.On
+				snap := SnapshotOf(s)
+				return !JobRunning(s) && snap.FansErr == nil && snap.Fans.On
 			},
 			// The guard is expressed as a field rather than documented as a
 			// rule: while the rack may be busy the client is handed a
@@ -325,7 +327,8 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Errors:  []contract.ErrorResponse{plugWriteFailed},
 			Needs:   contract.Needs{contract.NeedPeerBusy},
 			Available: func(s contract.State) bool {
-				return !JobRunning(s) && s.ACErr == nil && !s.AC.On
+				snap := SnapshotOf(s)
+				return !JobRunning(s) && snap.ACErr == nil && !snap.AC.On
 			},
 			Handle: sf.handleACOn,
 		},
@@ -336,7 +339,8 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
 			Needs:   contract.Needs{contract.NeedPeerBusy},
 			Available: func(s contract.State) bool {
-				return !JobRunning(s) && s.ACErr == nil && s.AC.On
+				snap := SnapshotOf(s)
+				return !JobRunning(s) && snap.ACErr == nil && snap.AC.On
 			},
 			// Guard looks at every f-host (f0–f3): shelly2 powers all of them.
 			// Hard-cutting AC under a live host risks ZFS / bhyve damage.

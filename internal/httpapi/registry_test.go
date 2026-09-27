@@ -114,33 +114,32 @@ func TestActionAvailability(t *testing.T) {
 		return power.HostStatus{Name: name, Role: "f", Ping: true, PingKnown: true, SSH: false}
 	}
 
-	allUp := contract.State{
+	allUp := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{fHost("f0", true), fHost("f1", true), fHost("f2", true), fHost("f3", true)},
 		Fans:  power.FansState{On: true},
-	}
-	allDown := contract.State{
+	})
+	allDown := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{fHost("f0", false), fHost("f1", false), fHost("f2", false), fHost("f3", false)},
 		Fans:  power.FansState{On: false},
-	}
-	partial := contract.State{
+	})
+	partial := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{fHost("f0", true), fHost("f1", false), fHost("f2", true), fHost("f3", false)},
 		Fans:  power.FansState{On: true},
-	}
-	busy := contract.State{
-		Hosts: allUp.Hosts,
+	})
+	busy := powerapi.WithSnapshot(contract.State{Job: &coordination.Job{State: coordination.JobRunning, Action: "off"}}, powerapi.Snapshot{
+		Hosts: powerapi.SnapshotOf(allUp).Hosts,
 		Fans:  power.FansState{On: true},
-		Job:   &coordination.Job{State: coordination.JobRunning, Action: "off"},
-	}
-	acOn := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: true}}
-	acOff := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: false}}
+	})
+	acOn := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts, AC: power.ACState{On: true}})
+	acOff := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts, AC: power.ACState{On: false}})
 	// A cycle in its standby wait or AC-off dwell: every host silent, which is
 	// exactly when ac-off would otherwise be offered without a force field.
 	cycling := &coordination.Job{State: coordination.JobRunning, Action: "all-cycle"}
-	busyFansOff := contract.State{Hosts: allDown.Hosts, Job: busy.Job}
-	busyACOn := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: true}, Job: cycling}
-	busyACOff := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: false}, Job: cycling}
-	peerBusyACOn := contract.State{Hosts: allDown.Hosts, AC: power.ACState{On: true}, PeerBusy: true}
-	peerBusyFansOff := contract.State{Hosts: allDown.Hosts, PeerBusy: true}
+	busyFansOff := powerapi.WithSnapshot(contract.State{Job: busy.Job}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts})
+	busyACOn := powerapi.WithSnapshot(contract.State{Job: cycling}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts, AC: power.ACState{On: true}})
+	busyACOff := powerapi.WithSnapshot(contract.State{Job: cycling}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts, AC: power.ACState{On: false}})
+	peerBusyACOn := powerapi.WithSnapshot(contract.State{PeerBusy: true}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts, AC: power.ACState{On: true}})
+	peerBusyFansOff := powerapi.WithSnapshot(contract.State{PeerBusy: true}, powerapi.Snapshot{Hosts: powerapi.SnapshotOf(allDown).Hosts})
 
 	cases := []struct {
 		name   string
@@ -192,10 +191,10 @@ func TestActionAvailability(t *testing.T) {
 	// operation runs over SSH, so the job could only fail. This was a real
 	// failure on 2026-08-08, when f3 was offered f3-off 48 seconds after
 	// waking and the zusb pre-flight got "connection refused".
-	midBoot := contract.State{
+	midBoot := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{booting("f0"), booting("f1"), booting("f2"), booting("f3")},
 		Fans:  power.FansState{On: true},
-	}
+	})
 	cases = append(cases,
 		struct {
 			name   string
@@ -232,14 +231,14 @@ func TestFansOffForceField(t *testing.T) {
 		t.Fatal("no fans-off route")
 	}
 
-	hot := contract.State{
+	hot := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true}},
 		Fans:  power.FansState{On: true},
-	}
-	cold := contract.State{
+	})
+	cold := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: false, PingKnown: true}},
 		Fans:  power.FansState{On: true},
-	}
+	})
 
 	fields := r.FieldsFor(hot)
 	if len(fields) != 1 || fields[0].Name != "force" {
@@ -268,10 +267,10 @@ func TestACOffForceFieldIncludesF3(t *testing.T) {
 		t.Fatal("no ac-off route")
 	}
 
-	onlyF3 := contract.State{
+	onlyF3 := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{{Name: "f3", Role: "f", Ping: true, PingKnown: true}},
 		AC:    power.ACState{On: true},
-	}
+	})
 	fields := r.FieldsFor(onlyF3)
 	if len(fields) != 1 || fields[0].Name != "force" {
 		t.Fatalf("expected a force field while only f3 is up, got %+v", fields)
@@ -280,13 +279,13 @@ func TestACOffForceFieldIncludesF3(t *testing.T) {
 		t.Errorf("title = %q, want it to name f3", fields[0].Title)
 	}
 
-	cold := contract.State{
+	cold := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", PingKnown: true},
 			{Name: "f3", Role: "f", PingKnown: true},
 		},
 		AC: power.ACState{On: true},
-	}
+	})
 	if got := r.FieldsFor(cold); len(got) != 0 {
 		t.Errorf("expected no fields when every f-host is silent, got %+v", got)
 	}
@@ -310,10 +309,10 @@ func TestFansOffForceFieldWhenTheRackCouldNotBeProbed(t *testing.T) {
 	}
 
 	// Ping false, PingKnown false: the probe never reached a conclusion.
-	unprobed := contract.State{
+	unprobed := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f"}, {Name: "f3", Role: "f"}},
 		Fans:  power.FansState{On: true},
-	}
+	})
 
 	fields := r.FieldsFor(unprobed)
 	if len(fields) != 1 || fields[0].Name != "force" {
@@ -334,14 +333,14 @@ func TestFansOffIgnoresNonFHosts(t *testing.T) {
 		t.Fatal("no fans-off route")
 	}
 
-	s := contract.State{
+	s := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: false, PingKnown: true},
 			{Name: "r0", Role: "cluster", Ping: true, PingKnown: true},
 			{Name: "r1", Role: "cluster"}, // not probed at all
 		},
 		Fans: power.FansState{On: true},
-	}
+	})
 	if got := r.FieldsFor(s); len(got) != 0 {
 		t.Errorf("fields = %+v, want none: only f-hosts are in the rack", got)
 	}
@@ -351,7 +350,7 @@ func TestFansOffIgnoresNonFHosts(t *testing.T) {
 // both fan actions. Offering a switch whose result cannot be read back would
 // mean reporting success without evidence.
 func TestFansUnavailableWhenPlugUnreadable(t *testing.T) {
-	broken := contract.State{FansErr: errFake{}}
+	broken := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{FansErr: errFake{}})
 	for _, name := range []string{"fans-on", "fans-off"} {
 		r, _ := routeByName(name)
 		if r.IsAvailable(broken) {
@@ -421,13 +420,13 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 // offered no way to clear it, and Gogios stayed blind until somebody SSHed to
 // both gateways by hand.
 func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
-	allUp := gogiosapi.WithMonitoring(contract.State{
+	allUp := gogiosapi.WithMonitoring(powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: true},
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
 			{Name: "f2", Role: "f", Ping: true, SSH: true},
 		},
-	}, []gogios.GatewayMute{
+	}), []gogios.GatewayMute{
 		{Name: "blowfish", Muted: true},
 		{Name: "fishfinger", Muted: true},
 	})
@@ -538,8 +537,9 @@ func TestPowerActionsWithheldWhileThePeerIsBusy(t *testing.T) {
 	// the state that would otherwise offer it. Job is nil in both: this node
 	// itself is idle, which is the whole point.
 	fixtures := map[string]contract.State{
-		"plugs on":  {Hosts: hosts, Fans: power.FansState{On: true}, AC: power.ACState{On: true}},
-		"plugs off": {Hosts: hosts},
+		"plugs on": powerapi.WithSnapshot(contract.State{},
+			powerapi.Snapshot{Hosts: hosts, Fans: power.FansState{On: true}, AC: power.ACState{On: true}}),
+		"plugs off": powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Hosts: hosts}),
 	}
 
 	for name, busy := range fixtures {
@@ -588,14 +588,14 @@ func isJobGatedPath(path string) bool {
 // cluster is already up -- but "all-on" must still be offered, or the group
 // that exists specifically to include f3 would ignore it.
 func TestAllActionsAccountForF3(t *testing.T) {
-	onlyF3Down := contract.State{
+	onlyF3Down := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: true},
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
 			{Name: "f2", Role: "f", Ping: true, SSH: true},
 			{Name: "f3", Role: "f", Ping: false, SSH: false},
 		},
-	}
+	})
 
 	if r, ok := routeByName("power-on"); ok && r.IsAvailable(onlyF3Down) {
 		t.Error("power-on offered with the whole cluster up; it ignores f3 by design")
@@ -610,14 +610,14 @@ func TestAllActionsAccountForF3(t *testing.T) {
 // TestAllOffNeedsSSHNotPing mirrors power-off: the shutdown runs over SSH, so a
 // rack that only answers ICMP cannot be shut down and must not be offered.
 func TestAllOffNeedsSSHNotPing(t *testing.T) {
-	midBoot := contract.State{
+	midBoot := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: false},
 			{Name: "f1", Role: "f", Ping: true, SSH: false},
 			{Name: "f2", Role: "f", Ping: true, SSH: false},
 			{Name: "f3", Role: "f", Ping: true, SSH: false},
 		},
-	}
+	})
 	r, ok := routeByName("all-off")
 	if !ok {
 		t.Fatal("no all-off action")
@@ -641,15 +641,18 @@ func TestAllCycleNeedsAReadableACPlugAndNoJob(t *testing.T) {
 		t.Errorf("all-cycle CLIVerb = %q, want %q", r.CLIVerb, "power all cycle")
 	}
 
-	allOff := contract.State{Hosts: []power.HostStatus{
-		{Name: "f0", Role: "f"}, {Name: "f3", Role: "f"},
-	}}
+	allOff := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f"}, {Name: "f3", Role: "f"},
+		},
+	})
 	if !r.IsAvailable(allOff) {
 		t.Error("all-cycle withheld with every host off; a cold cycle of a dark rack is valid")
 	}
 
-	plugDown := allOff
-	plugDown.ACErr = errors.New("unreachable")
+	snap := powerapi.SnapshotOf(allOff)
+	snap.ACErr = errors.New("unreachable")
+	plugDown := powerapi.WithSnapshot(allOff, snap)
 	if r.IsAvailable(plugDown) {
 		t.Error("all-cycle offered while the AC plug cannot be read")
 	}
@@ -665,26 +668,27 @@ func TestAllCycleNeedsAReadableACPlugAndNoJob(t *testing.T) {
 // route.SkipsProbe (see server.go's snapshot and rz0): it does not trust
 // the flag on the declaring author's word alone, it asks each route marked
 // SkipsProbe whether its own Available/Fields answer actually changes when
-// only Hosts/Fans/FansErr/AC/ACErr change, and requires the answer to be no.
+// only the fleet snapshot (powerapi.Snapshot) changes, and requires the answer
+// to be no.
 //
 // This is what would actually catch the failure rz0 was opened over: a
 // future route added under a SkipsProbe:true path (e.g. a new
-// /monitoring/... action) whose Available or Fields reads state.Hosts or
-// state.Fans gets zero-value versions of both from snapshot() -- this test
+// /monitoring/... action) whose Available or Fields reads the fleet snapshot
+// (powerapi.SnapshotOf) gets the zero Snapshot from snapshot() -- this test
 // fails the moment such a route is declared, rather than relying on someone
 // noticing the mismatch during review.
 func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
-	// probed and unprobed differ only in Hosts/Fans/FansErr/AC/ACErr --
+	// probed and unprobed differ only in the power surface's Snapshot --
 	// probed is what a real fleet probe and Shelly reads might produce,
-	// unprobed is exactly what snapshot() leaves those fields as when it
-	// skips them. Every other field (Job, Monitoring, PeerBusy) stays at
-	// its zero value in both, so a mismatch below can only come from the
-	// probe fields SkipsProbe claims the route does not look at.
-	probed := contract.State{
+	// unprobed is exactly what snapshot() leaves when it skips them (no
+	// Snapshot at all). Everything else (Job, PeerBusy, the Gogios state)
+	// stays at its zero value in both, so a mismatch below can only come from
+	// the probe SkipsProbe claims the route does not look at.
+	probed := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{
 		Hosts: []power.HostStatus{{Name: "f0", Role: "f", Ping: true, PingKnown: true, SSH: true}},
 		Fans:  power.FansState{On: true},
 		AC:    power.ACState{On: true},
-	}
+	})
 	unprobed := contract.State{}
 
 	for _, r := range testRoutes(inventory.Default()) {

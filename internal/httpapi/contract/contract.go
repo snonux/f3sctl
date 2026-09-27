@@ -10,12 +10,13 @@
 // disagreement between the surfaces about the shape of a response impossible
 // rather than merely unlikely.
 //
-// State carries only what every surface shares. A domain's own request state
-// (the Gogios mute and alert report, for one) is kept by the surface owning
-// it, under a Slot of its own, and gathered on demand by that surface's
-// Providers for the Needs its routes declare -- so this package need not
-// import the domain, and adding one edits neither this package nor the
-// composition root's enrichState.
+// State carries only what every surface shares: this node's job and whether
+// the peer is busy. A domain's own request state (the power surface's fleet
+// snapshot, the Gogios mute and alert report) is kept by the surface owning
+// it, under a Slot of its own; what costs a round trip is gathered on demand
+// by that surface's Providers for the Needs its routes declare. So this
+// package imports no domain package, and adding a domain edits neither this
+// package nor the composition root's enrichState.
 //
 // Siren (https://github.com/kevinswiber/siren) is used rather than HAL because
 // HAL describes links but not *actions*: it can say "here is the fans

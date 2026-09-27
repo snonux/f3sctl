@@ -114,8 +114,9 @@ func (sf *Surface) overviewRoute() contract.Route {
 		Name: "gogios", Title: "Gogios status and alerting",
 		Method: http.MethodGet, Path: "/gogios",
 		// handleOverview and every /gogios* handler below read only
-		// Report(state) (NeedReport), never state.Hosts/state.Fans. The folder also advertises the mute
-		// pair, judged on the gateway mute -- hence NeedMonitoring too.
+		// Report(state) (NeedReport), never the power surface's fleet
+		// snapshot. The folder also advertises the mute pair, judged on
+		// the gateway mute -- hence NeedMonitoring too.
 		SkipsProbe: true,
 		Needs:      contract.Needs{NeedReport, NeedMonitoring},
 		Handle:     sf.handleOverview,

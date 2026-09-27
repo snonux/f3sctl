@@ -58,21 +58,22 @@ type Server struct {
 	siren SirenRenderer
 	node  string
 
-	// probeHosts probes every host worth reporting, feeding State.Hosts. Nil
+	// probeHosts probes every host worth reporting, feeding the power
+	// surface's Snapshot.Hosts (see snapshot). Nil
 	// means the engine's own probe (Engine.ProbeAll, ~3s of concurrent
 	// ping+TCP dials); only tests substitute anything else -- to count calls,
 	// or to avoid paying for real network probes when what is under test is
 	// whether snapshot() ran them at all. See Server.probeHostsFn.
 	probeHosts func(context.Context) []power.HostStatus
 
-	// fansStatus reads the rack-fan Shelly plug, feeding State.Fans and
-	// State.FansErr. Nil means the engine's own read (Engine.FansStatus, an
+	// fansStatus reads the rack-fan Shelly plug, feeding Snapshot.Fans and
+	// Snapshot.FansErr. Nil means the engine's own read (Engine.FansStatus, an
 	// HTTP call bounded by a 5s timeout); same reasoning as probeHosts. See
 	// Server.fansStatusFn.
 	fansStatus func(context.Context) (power.FansState, error)
 
-	// acStatus reads the f-host mains AC Shelly plug, feeding State.AC and
-	// State.ACErr. Nil means Engine.ACStatus; same reasoning as fansStatus.
+	// acStatus reads the f-host mains AC Shelly plug, feeding Snapshot.AC and
+	// Snapshot.ACErr. Nil means Engine.ACStatus; same reasoning as fansStatus.
 	acStatus func(context.Context) (power.ACState, error)
 
 	// fetchers is the Fetch behind every Need a route may declare, keyed by
@@ -324,15 +325,21 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 // The routes that do render probe-judged actions -- /status and the /power
 // and /ac-control folders, through SectionActions -- are not SkipsProbe; the
 // root, which renders links only, is.
+//
+// The fleet half is the power surface's state (powerapi.Snapshot), so it is
+// stored under that surface's own Slot rather than as fields of the shared
+// contract.State; a SkipsProbe route's state carries none at all.
 func (s *Server) snapshot(ctx context.Context, r contract.Route) contract.State {
 	st := contract.State{Job: s.jobs.Read()}
-
-	if !r.SkipsProbe {
-		st.Hosts = s.probeHostsFn()(ctx)
-		st.Fans, st.FansErr = s.fansStatusFn()(ctx)
-		st.AC, st.ACErr = s.acStatusFn()(ctx)
+	if r.SkipsProbe {
+		return st
 	}
-	return st
+
+	var snap powerapi.Snapshot
+	snap.Hosts = s.probeHostsFn()(ctx)
+	snap.Fans, snap.FansErr = s.fansStatusFn()(ctx)
+	snap.AC, snap.ACErr = s.acStatusFn()(ctx)
+	return powerapi.WithSnapshot(st, snap)
 }
 
 // probeHostsFn returns the fleet probe, falling back to the engine's real

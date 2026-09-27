@@ -97,7 +97,7 @@ func runEveryHandler(t *testing.T, actions contract.ActionRenderer) {
 	pw := powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, actions)
 	gg := gogiosapi.New("test", contract.Hrefs(""), unreachableReports(), o.monitor, actions)
 
-	state := contract.State{Fans: power.FansState{On: true}, AC: power.ACState{On: true}}
+	state := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Fans: power.FansState{On: true}, AC: power.ACState{On: true}})
 	state = gogiosapi.WithMonitoring(state, []gogios.GatewayMute{{Name: "gw", Muted: true}})
 	state = gogiosapi.WithReport(state, &gogios.Report{}, nil)
 	req := contract.Request{Query: url.Values{"name": {"x"}}, Form: url.Values{"force": {"true"}}}
@@ -121,7 +121,7 @@ func runEveryHandler(t *testing.T, actions contract.ActionRenderer) {
 func TestTestRouterSharesItsBaseWithTheSurfaces(t *testing.T) {
 	const base = "/cgi-bin/f3sctl"
 	rt := testRouter(inventory.Default(), base)
-	state := gogiosapi.WithMonitoring(contract.State{Fans: power.FansState{On: true}},
+	state := gogiosapi.WithMonitoring(powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Fans: power.FansState{On: true}}),
 		[]gogios.GatewayMute{{Name: "gw", Muted: true}})
 
 	for _, path := range []string{"/fans", "/monitoring"} {

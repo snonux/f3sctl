@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
 )
@@ -117,7 +118,7 @@ func TestRouterActionsForNarrowsToTheNamedRoutes(t *testing.T) {
 	// The fan plug readably on, so fans-off (and only fans-off, of the pair)
 	// is available; every other action stays withheld by its own Available
 	// predicate regardless of the name filter.
-	state := contract.State{Fans: power.FansState{On: true}}
+	state := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Fans: power.FansState{On: true}})
 	got := rt.ActionsFor(state, "fans-on", "fans-off")
 	if len(got) != 1 || got[0].Name != "fans-off" {
 		t.Fatalf("ActionsFor(fans-on, fans-off) = %v, want just [fans-off]", names(got))

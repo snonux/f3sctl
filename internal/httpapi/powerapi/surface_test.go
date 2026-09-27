@@ -29,13 +29,15 @@ func TestHostCountsFollowAConfiguredInventory(t *testing.T) {
 		{Name: "r0", Role: inventory.RoleCluster},
 	}}
 	sf := &Surface{Inv: inv}
-	s := contract.State{Hosts: []power.HostStatus{
-		{Name: "f0", Role: "f"},
-		{Name: "f3", Role: "f", Ping: true},
-		{Name: "f9", Role: "f", Ping: true, SSH: true},
-		{Name: "stray", Role: "f", Ping: true, SSH: true},
-		{Name: "r0", Role: "cluster", Ping: true, SSH: true},
-	}}
+	s := WithSnapshot(contract.State{}, Snapshot{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f"},
+			{Name: "f3", Role: "f", Ping: true},
+			{Name: "f9", Role: "f", Ping: true, SSH: true},
+			{Name: "stray", Role: "f", Ping: true, SSH: true},
+			{Name: "r0", Role: "cluster", Ping: true, SSH: true},
+		},
+	})
 
 	if up, sshUp, total := sf.clusterHostsUp(s); up != 1 || sshUp != 0 || total != 2 {
 		t.Errorf("clusterHostsUp = (%d, %d, %d), want (1, 0, 2): f0 down, f3 ping-only", up, sshUp, total)
@@ -50,9 +52,11 @@ func TestHostCountsFollowAConfiguredInventory(t *testing.T) {
 // action is offered, and both snapshot guards read a silent rack as busy, so
 // cutting the fans or AC still asks for force.
 func TestGuardsNeedTheInventory(t *testing.T) {
-	s := contract.State{Hosts: []power.HostStatus{
-		{Name: "f0", Role: "f", PingKnown: true},
-	}}
+	s := WithSnapshot(contract.State{}, Snapshot{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", PingKnown: true},
+		},
+	})
 	bare := &Surface{}
 	if up, sshUp, total := bare.everyFHostUp(s); up+sshUp+total != 0 {
 		t.Errorf("everyFHostUp with no inventory = (%d, %d, %d), want nothing counted", up, sshUp, total)
@@ -65,7 +69,7 @@ func TestGuardsNeedTheInventory(t *testing.T) {
 	if configured.rackBusy(s).Busy() || configured.acBusy(s).Busy() {
 		t.Error("rackBusy/acBusy with the default inventory call a silent f0 busy")
 	}
-	s.Hosts[0].Ping = true
+	SnapshotOf(s).Hosts[0].Ping = true
 	if !configured.rackBusy(s).Busy() || !configured.acBusy(s).Busy() {
 		t.Error("rackBusy/acBusy with the default inventory ignore a running f0")
 	}
@@ -100,7 +104,7 @@ func TestStatusMarksThePowerGroupOnHostEntities(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sf := testNew(tc.inv)
-			e, _, err := sf.handleStatus(context.Background(), contract.State{Hosts: snapshot}, contract.Request{})
+			e, _, err := sf.handleStatus(context.Background(), WithSnapshot(contract.State{}, Snapshot{Hosts: snapshot}), contract.Request{})
 			if err != nil {
 				t.Fatalf("handleStatus: %v", err)
 			}

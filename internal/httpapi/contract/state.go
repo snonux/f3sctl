@@ -4,7 +4,6 @@ import (
 	"maps"
 
 	"github.com/snonux/f3sctl/internal/coordination"
-	"github.com/snonux/f3sctl/internal/power"
 )
 
 // State is a snapshot of the world, taken once per request before anything is
@@ -14,18 +13,16 @@ import (
 // own, so every action in a single response is judged against the same instant.
 //
 // Its exported fields are the vocabulary every surface shares: this node's
-// job, whether the peer node is busy, and the fleet snapshot. Anything owned
-// by a single domain -- the Gogios mute and alert report, for one -- is not a
-// field here at all: the surface owning it keeps it under a Slot of its own,
-// with its own typed accessors, so this package need not know the domain's
-// types and adding a domain does not edit this struct.
+// job, and whether the peer node is busy. Anything owned by a single domain
+// -- the power surface's fleet snapshot, the Gogios mute and alert report --
+// is not a field here at all: the surface owning it keeps it under a Slot of
+// its own, with its own typed accessors, so this package need not know the
+// domain's types and adding a domain does not edit this struct.
 type State struct {
-	Hosts   []power.HostStatus
-	Fans    power.FansState
-	FansErr error
-	AC      power.ACState
-	ACErr   error
-	Job     *coordination.Job
+	// Job is this node's own job, read from local disk for every request.
+	// Every power action is judged on it (with PeerBusy), and /job and
+	// /status render it.
+	Job *coordination.Job
 
 	// PeerBusy reports whether the *other* API node is running a job.
 	//

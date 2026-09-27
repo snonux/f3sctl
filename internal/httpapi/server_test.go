@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -139,7 +140,7 @@ func TestResolvePeerJobPathFallsBackToDefaultCGIMountWhenBaseIsEmpty(t *testing.
 // Engine.ProbeAll (7 concurrent ping+TCP probes, ~3s) and Engine.FansStatus
 // (a Shelly HTTP call, up to 5s) on every request -- including /job, polled
 // every 10s through a multi-minute shutdown, and /openapi.json, a static
-// document. Neither handler renders state.Hosts or state.Fans (see powerapi's
+// document. Neither handler renders the fleet snapshot (see powerapi's
 // handleJob and the root's handleOpenAPI), so both reads were pure waste on
 // these two routes. This pins that they are no longer made at all.
 func TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt(t *testing.T) {
@@ -164,7 +165,7 @@ func TestSnapshotSkipsTheProbeForRoutesThatNeverReadIt(t *testing.T) {
 }
 
 // TestSnapshotStillProbesRoutesThatNeedIt is the control for the test above:
-// /status renders state.Hosts, state.Fans and state.AC directly (handleStatus),
+// /status renders the hosts and both plugs of powerapi.Snapshot (handleStatus),
 // so the laziness in snapshot() must not have turned into "never probes
 // anything" -- it has to still pay for exactly one of each read here.
 func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
@@ -181,6 +182,31 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 	}
 	if pc.acReads != 1 {
 		t.Errorf("ACStatus called %d times serving /status, want exactly 1", pc.acReads)
+	}
+}
+
+// TestSnapshotStoresTheFleetUnderThePowerSurfacesSlot pins where snapshot()
+// puts what it probed: in the power surface's own Snapshot (the contract's
+// State has no fleet fields any more), whole -- hosts, both plugs and their
+// read errors -- and, for a SkipsProbe route, nothing at all, even though
+// the probes would have answered.
+func TestSnapshotStoresTheFleetUnderThePowerSurfacesSlot(t *testing.T) {
+	srv, _ := countingServer(t)
+	errAC := errors.New("ac plug unreachable")
+	srv.probeHosts = func(context.Context) []power.HostStatus {
+		return []power.HostStatus{{Name: "f0", Role: "f", Ping: true}}
+	}
+	srv.fansStatus = func(context.Context) (power.FansState, error) { return power.FansState{On: true}, nil }
+	srv.acStatus = func(context.Context) (power.ACState, error) { return power.ACState{}, errAC }
+
+	snap := powerapi.SnapshotOf(srv.snapshot(context.Background(), contract.Route{}))
+	if len(snap.Hosts) != 1 || snap.Hosts[0].Name != "f0" || !snap.Fans.On || !errors.Is(snap.ACErr, errAC) {
+		t.Errorf("probed snapshot = %+v, want f0, the fans on and the AC read error", snap)
+	}
+
+	skipped := powerapi.SnapshotOf(srv.snapshot(context.Background(), contract.Route{SkipsProbe: true}))
+	if skipped.Hosts != nil || skipped.Fans.On || skipped.ACErr != nil {
+		t.Errorf("SkipsProbe snapshot = %+v, want no fleet state at all", skipped)
 	}
 }
 
