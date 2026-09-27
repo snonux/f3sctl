@@ -98,7 +98,7 @@ func TestConstructedSurfaceRendersActionsThroughItsRenderer(t *testing.T) {
 	}
 	sf := New("test", contract.Hrefs(""), &fakeReports{}, fakeMonitor{}, echoActions{})
 	// An unreachable report: the folder still renders, controls included.
-	state := contract.State{GogiosErr: errFake{}}
+	state := WithReport(contract.State{}, nil, errFake{})
 
 	for _, r := range sf.Routes() {
 		key := r.Method + " " + r.Path

@@ -53,11 +53,11 @@ type Surface struct {
 	// Siren action shape (name, title, method, href, cliVerb, fields).
 	actions contract.ActionRenderer
 	// reports reads and clears the Gogios alert report. It is unexported and
-	// set once, by New, which rejects a nil one. The composition root owns
-	// it: it creates the source, hands it to New, and reads the report
-	// through the same source for the routes that declare
-	// contract.NeedReport, so the handlers and the state they are handed
-	// never disagree on where it came from. In production it is a
+	// set once, by New, which rejects a nil one. This surface owns it: its
+	// NeedReport Provider (see Providers) fetches through it for the routes
+	// that declare NeedReport, and the cache clear clears and re-reads
+	// through it, so the handlers and the state they are handed never
+	// disagree on where the report came from. In production it is a
 	// *gogios.Source (the cached-or-fetched report over its own HTTP client).
 	reports ReportSource
 }
@@ -108,15 +108,16 @@ func New(node string, href func(string) string, reports ReportSource, monitor Mo
 }
 
 // Reports returns the report source this Surface was built with, so the
-// composition root's wiring can be checked against it.
+// composition root's production wiring can be checked against it.
 func (sf *Surface) Reports() ReportSource { return sf.reports }
 
 // Muted reports whether Gogios is muted on at least one gateway.
 //
 // A method on contract.State cannot exist for this -- State is shared
 // vocabulary, and only this surface knows what "muted" means (gogios.AnyMuted
-// over the gateways) -- so it is a plain function here.
-func Muted(s contract.State) bool { return gogios.AnyMuted(s.Monitoring) }
+// over the gateways it keeps in its own Slot) -- so it is a plain function
+// here.
+func Muted(s contract.State) bool { return gogios.AnyMuted(Monitoring(s)) }
 
 // NotAllMuted reports whether some gateway is not known to be muted -- i.e.
 // whether a mute might still change anything. False when no gateway was read
@@ -137,7 +138,7 @@ func Muted(s contract.State) bool { return gogios.AnyMuted(s.Monitoring) }
 // a no-op -- and {muted, unreachable} is exactly what a partial mute usually
 // leaves behind.
 func NotAllMuted(s contract.State) bool {
-	for _, gw := range s.Monitoring {
+	for _, gw := range Monitoring(s) {
 		if gw.Err != nil || !gw.Muted {
 			return true
 		}

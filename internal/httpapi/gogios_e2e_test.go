@@ -140,8 +140,11 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("e2e", href, cfg.Inventory, nil, nil, nil, a)
 	}
-	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New("e2e", href, r, nil, a)
+	// The gateway mute reads as nothing at all: no gateway is reached.
+	gg := func(a contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New("e2e", href, gogios.NewSource(cfg), mutesRead(func(context.Context) []gogios.GatewayMute {
+			return nil
+		}), a)
 	}
 	srv := (&Server{
 		cfg:   cfg,
@@ -154,14 +157,12 @@ func gogiosE2EServer(t *testing.T, upstream *httptest.Server) (*httptest.Server,
 		// (there is none here -- see above) would otherwise panic the moment
 		// the stubs are reached. The root is SkipsProbe since the section
 		// folders took over its actions list, and /gogios reads the mute
-		// through the monitorStatus seam, so both stay engine-free too.
+		// through the Gogios surface's own Monitor (mutesRead, above), so
+		// both stay engine-free too.
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
 		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
-		monitorStatus: func(context.Context) []gogios.GatewayMute {
-			return nil
-		},
-	}).assemble(cfg.Inventory, gogios.NewSource(cfg), pw, gg, "")
+	}).assemble(cfg.Inventory, pw, gg, "")
 
 	e2e := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

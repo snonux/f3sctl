@@ -101,9 +101,10 @@ type Route struct {
 	// snapshot -- the peer's job, the Gogios mute, the alert report -- in its
 	// own Handle, in its Available predicate (which serve() checks before any
 	// handler runs) and its Fields, and in the Available/Fields of every
-	// action its handler renders. The composition root fetches exactly what
-	// is declared and nothing else (see enrichState), so each costly round
-	// trip is paid only by the routes that use its answer. See Need.
+	// action its handler renders. The composition root runs exactly the
+	// Fetch each declared Need's Provider supplies and nothing else (see
+	// enrichState), so each costly round trip is paid only by the routes that
+	// use its answer. See Need and Provider.
 	//
 	// Unlike SkipsProbe this is opt-in: a route declares what it reads rather
 	// than what it may skip. The guard is a test rather than the zero value
@@ -112,7 +113,7 @@ type Route struct {
 	// availability) changes for a Need it did not declare. That catches
 	// exactly the omission path predicates once let through: a new route
 	// rendering the mute pair without the mute state behind it.
-	Needs Need
+	Needs Needs
 	// CLIVerb is the exact CLI words that invoke this action, e.g. "power on"
 	// or "power f1 on". It is the single declaration of the "power off" <->
 	// action-name <-> job-run-argv contract: the detached child's argv is
@@ -195,27 +196,6 @@ func (k ResponseKind) Status() int {
 	}
 	return http.StatusOK
 }
-
-// Need is a set of request-scoped facts a route reads that the composition
-// root gathers only on demand, because each costs a round trip to another
-// machine. See Route.Needs.
-type Need uint8
-
-const (
-	// NeedPeerBusy is State.PeerBusy: whether the other API node is running
-	// a job -- an HTTP GET of the peer's /job, bounded by a 3s client
-	// timeout. Every power and plug action is judged on it (JobRunning).
-	NeedPeerBusy Need = 1 << iota
-	// NeedMonitoring is State.Monitoring: the Gogios mute marker on each
-	// gateway -- an SSH round trip to each. The mute pair is judged on it.
-	NeedMonitoring
-	// NeedReport is State.Gogios/GogiosErr: the Gogios alert report -- a stat
-	// of the on-disk cache, and on a cold or expired cache an HTTP fetch.
-	NeedReport
-)
-
-// Has reports whether n includes every need in x.
-func (n Need) Has(x Need) bool { return n&x == x }
 
 // QueryParam is one query-string parameter a route reads. See Route.Query.
 type QueryParam struct {

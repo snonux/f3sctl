@@ -84,7 +84,7 @@ func (sf *Surface) powerResourceRoutes() []contract.Route {
 		{
 			Name: "power", Title: "Power control",
 			Method: http.MethodGet, Path: "/power",
-			Needs:  contract.NeedPeerBusy,
+			Needs:  contract.Needs{contract.NeedPeerBusy},
 			Handle: sf.handlePowerFolder,
 		},
 		{
@@ -144,21 +144,21 @@ func (sf *Surface) acResourceRoutes() []contract.Route {
 		{
 			Name: "ac-control", Title: "AC control",
 			Method: http.MethodGet, Path: "/ac-control",
-			Needs:  contract.NeedPeerBusy,
+			Needs:  contract.Needs{contract.NeedPeerBusy},
 			Handle: sf.handleACControlFolder,
 		},
 		{
 			Name: "fans", Title: "Rack fan plug",
 			Method: http.MethodGet, Path: "/fans",
 			NoRootLink: true,
-			Needs:      contract.NeedPeerBusy,
+			Needs:      contract.Needs{contract.NeedPeerBusy},
 			Handle:     sf.handleFans,
 		},
 		{
 			Name: "ac", Title: "F-host mains AC plug",
 			Method: http.MethodGet, Path: "/ac",
 			NoRootLink: true,
-			Needs:      contract.NeedPeerBusy,
+			Needs:      contract.Needs{contract.NeedPeerBusy},
 			Handle:     sf.handleAC,
 		},
 	}
@@ -256,7 +256,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/fans/on", Action: true,
 			CLIVerb: "fans on",
 			Errors:  []contract.ErrorResponse{plugWriteFailed},
-			Needs:   contract.NeedPeerBusy,
+			Needs:   contract.Needs{contract.NeedPeerBusy},
 			// Unavailable when the plug cannot be read: without a read-back
 			// there is no way to report truthfully whether it worked.
 			Available: func(s contract.State) bool {
@@ -269,7 +269,7 @@ func (sf *Surface) fanRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/fans/off", Action: true,
 			CLIVerb: "fans off",
 			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
-			Needs:   contract.NeedPeerBusy,
+			Needs:   contract.Needs{contract.NeedPeerBusy},
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.FansErr == nil && s.Fans.On
 			},
@@ -323,7 +323,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/ac/on", Action: true,
 			CLIVerb: "ac on",
 			Errors:  []contract.ErrorResponse{plugWriteFailed},
-			Needs:   contract.NeedPeerBusy,
+			Needs:   contract.Needs{contract.NeedPeerBusy},
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil && !s.AC.On
 			},
@@ -334,7 +334,7 @@ func (sf *Surface) acRoutes() []contract.Route {
 			Method: http.MethodPost, Path: "/ac/off", Action: true,
 			CLIVerb: "ac off",
 			Errors:  []contract.ErrorResponse{plugWriteFailed, unconfirmedCut},
-			Needs:   contract.NeedPeerBusy,
+			Needs:   contract.Needs{contract.NeedPeerBusy},
 			Available: func(s contract.State) bool {
 				return !JobRunning(s) && s.ACErr == nil && s.AC.On
 			},
@@ -410,7 +410,7 @@ func (sf *Surface) jobRoutes(rs []contract.Route) []contract.Route {
 	for i := range rs {
 		rs[i].Handle = sf.action(rs[i].JobAction())
 		rs[i].Response = contract.ResponseJob
-		rs[i].Needs |= contract.NeedPeerBusy
+		rs[i].Needs = rs[i].Needs.With(contract.NeedPeerBusy)
 	}
 	return rs
 }

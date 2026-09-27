@@ -13,8 +13,6 @@ import (
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/gogios"
-	"github.com/snonux/f3sctl/internal/httpapi/contract"
-	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 )
 
@@ -67,8 +65,8 @@ func (g *gatewayRecorder) callCount() int {
 }
 
 // muteServer is a Server whose Gogios surface drives gw, and whose
-// NeedMonitoring fetch (enrichState) reads the mute from gw too -- so
-// availability and the handler see the same gateways, as they do in
+// NeedMonitoring Provider (run by enrichState) reads the mute from the same
+// gw -- so availability and the handler see the same gateways, as they do in
 // production through the engine.
 func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 	t.Helper()
@@ -81,16 +79,13 @@ func muteServer(t *testing.T, gw *gatewayRecorder) *Server {
 	cfg.StateDir = t.TempDir()
 	inv := inventory.Default()
 	return (&Server{
-		cfg:           cfg,
-		jobs:          coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
-		peers:         coordination.NewPeerSet(nil, ""),
-		auth:          NewAuthenticator(keyFile),
-		siren:         NewSirenRenderer(),
-		node:          "test",
-		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, unreachableReports(), testPowerSurface(inv, ""), func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), r, gw, a)
-	}, "")
+		cfg:   cfg,
+		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
+		peers: coordination.NewPeerSet(nil, ""),
+		auth:  NewAuthenticator(keyFile),
+		siren: NewSirenRenderer(),
+		node:  "test",
+	}).assemble(inv, testPowerSurface(inv, ""), gogiosSurfaceOver("", unreachableReports(), gw), "")
 }
 
 // TestPostMonitoringMuteFinishesAPartialMute drives POST /monitoring/mute

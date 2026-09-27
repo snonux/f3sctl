@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -74,21 +75,13 @@ type Server struct {
 	// State.ACErr. Nil means Engine.ACStatus; same reasoning as fansStatus.
 	acStatus func(context.Context) (power.ACState, error)
 
-	// monitorStatus reads the Gogios mute marker from both gateways, feeding
-	// State.Monitoring. Nil means the engine's own read
-	// (Engine.MonitoringStatus, an SSH round trip to each gateway, several
-	// seconds); same reasoning as probeHosts. Fetched only for the routes
-	// that declare contract.NeedMonitoring (see enrichState). See
-	// Server.monitorStatusFn.
-	monitorStatus func(context.Context) []gogios.GatewayMute
-
-	// reports is where the Gogios alert report comes from, feeding
-	// State.Gogios and State.GogiosErr for the routes that declare
-	// contract.NeedReport (see enrichState). Set by build, which hands the
-	// same source to the Gogios surface it constructs, so enrichState and
-	// that surface's own handlers (the cache clear's re-read) share one
-	// source.
-	reports gogiosapi.ReportSource
+	// fetchers is the Fetch behind every Need a route may declare, keyed by
+	// that Need: this Server's own (NeedPeerBusy, over peers) and the ones
+	// each surface provides for the state it owns (see
+	// gogiosapi.Surface.Providers).
+	// Set by build, which refuses a route table declaring a Need nobody
+	// provides; enrichState runs exactly the matched route's.
+	fetchers map[*contract.Need]contract.Fetch
 }
 
 // ServeCGI answers a single CGI request read from the process environment and
@@ -167,10 +160,19 @@ func newServer(cfg config.Config) (*Server, error) {
 	newPower := func(actions contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New(node, href, cfg.Inventory, eng, jobs, peers, actions)
 	}
-	newGogios := func(actions contract.ActionRenderer, reports gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New(node, href, reports, eng, actions)
+	return srv.build(cfg.Inventory, newPower, productionGogiosSurface(cfg, node, href, eng), base)
+}
+
+// productionGogiosSurface is the Gogios surface factory newServer hands
+// build: the mute driven through monitor (the power engine), and the alert
+// report read through a gogios.Source of the surface's own. The surface owns
+// that source outright -- its NeedReport Provider reads the report through
+// it and its cache clear clears it -- so nothing else is handed it.
+func productionGogiosSurface(cfg config.Config, node string, href func(string) string, monitor gogiosapi.Monitor) gogiosSurfaceFunc {
+	reports := gogios.NewSource(cfg)
+	return func(actions contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New(node, href, reports, monitor, actions)
 	}
-	return srv.build(cfg.Inventory, gogios.NewSource(cfg), newPower, newGogios, base)
 }
 
 // build constructs both domain surfaces, builds this Server's route table
@@ -180,22 +182,29 @@ func newServer(cfg config.Config) (*Server, error) {
 // build owns the surfaces' construction, taking factories rather than
 // finished surfaces, so the renderer is always build's to supply: each
 // factory is handed this Server's own (see serverActions), which resolves the
-// Router built here, and must pass it through to its surface's New. The
-// Gogios report source is build's to supply the same way: build keeps
-// reports for enrichState and hands the very same source to the Gogios
-// factory, which must pass it through too. It is its own step so tests can
-// construct a Server literal, supply the surfaces and report source they
+// Router built here, and must pass it through to its surface's New. It is its
+// own step so tests can construct a Server literal, supply the surfaces they
 // want, and go through exactly the same path production takes (their
 // assemble helper wraps this one).
 //
-// It fails only on an ambiguous route table (see NewRouter).
-func (s *Server) build(inv inventory.Inventory, reports gogiosapi.ReportSource, newPower powerSurfaceFunc, newGogios gogiosSurfaceFunc, base string) (*Server, error) {
+// build also collects the Fetch behind every Need: this Server's own and the
+// Providers of each surface owning request-scoped state (see needFetchers).
+//
+// It fails on an ambiguous route table (see NewRouter), and on one declaring
+// a Need that no Provider -- or more than one -- fills.
+func (s *Server) build(inv inventory.Inventory, newPower powerSurfaceFunc, newGogios gogiosSurfaceFunc, base string) (*Server, error) {
 	actions := s.actionRenderer()
-	router, err := NewRouter(base, s.buildRoutes(inv, newPower(actions), newGogios(actions, reports)))
+	gg := newGogios(actions)
+	routes := s.buildRoutes(inv, newPower(actions), gg)
+	fetchers, err := needFetchers(routes, append(s.providers(), gg.Providers()...))
 	if err != nil {
 		return nil, err
 	}
-	s.reports = reports
+	router, err := NewRouter(base, routes)
+	if err != nil {
+		return nil, err
+	}
+	s.fetchers = fetchers
 	s.router = router
 	s.openapi = NewOpenAPIBuilder(router, inv)
 	return s, nil
@@ -353,14 +362,19 @@ func (s *Server) acStatusFn() func(context.Context) (power.ACState, error) {
 	return s.engine.ACStatus
 }
 
-// monitorStatusFn returns the gateway mute read, falling back to the
-// engine's real one. Same nil-safety pattern as the power surface's
-// confirmRack.
-func (s *Server) monitorStatusFn() func(context.Context) []gogios.GatewayMute {
-	if s.monitorStatus != nil {
-		return s.monitorStatus
-	}
-	return s.engine.MonitoringStatus
+// providers is the Needs this Server itself fills: NeedPeerBusy, over the
+// peer set it owns. Every other Need is provided by the surface owning its
+// state.
+func (s *Server) providers() []contract.Provider {
+	return []contract.Provider{{Need: contract.NeedPeerBusy, Fetch: s.fetchPeerBusy}}
+}
+
+// fetchPeerBusy fills State.PeerBusy. An unreachable peer counts as idle, for
+// the same reason PeerSet.Busy gives: if one node is down the other must
+// still be able to power the cluster on.
+func (s *Server) fetchPeerBusy(ctx context.Context, state contract.State, req contract.Request) contract.State {
+	state.PeerBusy, _ = s.peers.Busy(ctx, s.node, req.APIKey)
+	return state
 }
 
 // enrichState adds the request-scoped facts r declares it reads (see
@@ -373,19 +387,50 @@ func (s *Server) monitorStatusFn() func(context.Context) []gogios.GatewayMute {
 //
 // The route is the matched one (method and path), not a path prefix: what to
 // fetch is part of each route's own declaration, so a new route cannot
-// silently inherit, or miss, a fetch meant for its neighbours.
+// silently inherit, or miss, a fetch meant for its neighbours. What each Need
+// fetches is its Provider's business, not this function's: a new domain's
+// state needs a Provider, not an edit here.
 func (s *Server) enrichState(ctx context.Context, state contract.State, r contract.Route, req contract.Request) contract.State {
-	if r.Needs.Has(contract.NeedPeerBusy) {
-		// An unreachable peer counts as idle, for the same reason PeerSet.Busy
-		// gives: if one node is down the other must still be able to power the
-		// cluster on.
-		state.PeerBusy, _ = s.peers.Busy(ctx, s.node, req.APIKey)
-	}
-	if r.Needs.Has(contract.NeedMonitoring) {
-		state.Monitoring = s.monitorStatusFn()(ctx)
-	}
-	if r.Needs.Has(contract.NeedReport) {
-		state.Gogios, state.GogiosErr = s.reports.Fetch(ctx)
+	for _, n := range r.Needs {
+		fetch, ok := s.fetchers[n]
+		if !ok {
+			// build refuses a table declaring an unprovided Need, so this is
+			// a Server whose router was swapped past build: a wiring bug.
+			panic(fmt.Sprintf("httpapi: route %q declares Need %v, which nothing provides", r.Name, n))
+		}
+		state = fetch(ctx, state, req)
 	}
 	return state
+}
+
+// needFetchers indexes providers by Need, refusing what enrichState could not
+// serve: a Provider without a Need or a Fetch, two Providers for one Need
+// (which of them a route got would be an accident), a route declaring a Need
+// that nothing provides (it would be served without the state it reads), and
+// a route declaring one Need twice (it would pay for the fetch twice). A
+// Provider no route uses is fine -- its Fetch simply never runs.
+func needFetchers(routes []contract.Route, providers []contract.Provider) (map[*contract.Need]contract.Fetch, error) {
+	fetchers := make(map[*contract.Need]contract.Fetch, len(providers))
+	for _, p := range providers {
+		switch _, dup := fetchers[p.Need]; {
+		case p.Need == nil:
+			return nil, errors.New("a Provider declares no Need")
+		case p.Fetch == nil:
+			return nil, fmt.Errorf("the Provider of Need %v has no Fetch", p.Need)
+		case dup:
+			return nil, fmt.Errorf("more than one Provider fills Need %v", p.Need)
+		}
+		fetchers[p.Need] = p.Fetch
+	}
+	for _, r := range routes {
+		for i, n := range r.Needs {
+			if _, ok := fetchers[n]; !ok {
+				return nil, fmt.Errorf("route %q (%s %s) declares Need %v, which no Provider fills", r.Name, r.Method, r.Path, n)
+			}
+			if r.Needs[:i].Has(n) {
+				return nil, fmt.Errorf("route %q (%s %s) declares Need %v twice", r.Name, r.Method, r.Path, n)
+			}
+		}
+	}
+	return fetchers, nil
 }

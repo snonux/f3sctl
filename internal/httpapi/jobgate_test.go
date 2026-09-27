@@ -118,7 +118,7 @@ func jobGateServer(t *testing.T, plugsOn bool, src jobSource) (*Server, *plugRec
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: plugsOn}, nil
 		},
-	}).assemble(inv, unreachableReports(), surface, testGogiosSurface(""), "")
+	}).assemble(inv, surface, testGogiosSurface(""), "")
 	return srv, eng
 }
 

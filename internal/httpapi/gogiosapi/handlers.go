@@ -19,8 +19,9 @@ import (
 // resource is what makes a *stranded* mute visible: nothing else in the API
 // would reveal that alerting is off.
 func (sf *Surface) handleMonitoring(_ context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
-	gateways := make([]contract.Entity, 0, len(state.Monitoring))
-	for _, gw := range state.Monitoring {
+	gws := Monitoring(state)
+	gateways := make([]contract.Entity, 0, len(gws))
+	for _, gw := range gws {
 		props := map[string]any{"name": gw.Name}
 		if gw.Err != nil {
 			// Unreachable is not the same as un-muted, and reporting it as
@@ -79,8 +80,7 @@ func (sf *Surface) setMute(ctx context.Context, state contract.State, _ contract
 		return contract.Entity{}, http.StatusBadGateway, err
 	}
 
-	state.Monitoring = sf.Monitor.MonitoringStatus(ctx)
-	return sf.handleMonitoring(ctx, state, contract.Request{})
+	return sf.handleMonitoring(ctx, WithMonitoring(state, sf.Monitor.MonitoringStatus(ctx)), contract.Request{})
 }
 
 // handleOverview renders the Gogios folder: the alert report overview -- the
@@ -109,18 +109,18 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 	}
 
 	props := map[string]any{"node": sf.Node}
-	if state.GogiosErr != nil {
-		props["error"] = state.GogiosErr.Error()
+	if report, err := Report(state); err != nil {
+		props["error"] = err.Error()
 	} else {
-		props["subject"] = state.Gogios.Subject
-		props["lastUpdated"] = state.Gogios.LastUpdated
+		props["subject"] = report.Subject
+		props["lastUpdated"] = report.LastUpdated
 		props["summary"] = map[string]any{
-			"critical":   state.Gogios.Summary.Critical,
-			"warning":    state.Gogios.Summary.Warning,
-			"unknown":    state.Gogios.Summary.Unknown,
-			"stale":      state.Gogios.Summary.Stale,
-			"suppressed": state.Gogios.Summary.Suppressed,
-			"ok":         state.Gogios.Summary.Ok,
+			"critical":   report.Summary.Critical,
+			"warning":    report.Summary.Warning,
+			"unknown":    report.Summary.Unknown,
+			"stale":      report.Summary.Stale,
+			"suppressed": report.Summary.Suppressed,
+			"ok":         report.Summary.Ok,
 		}
 	}
 
@@ -131,7 +131,7 @@ func (sf *Surface) handleOverview(_ context.Context, state contract.State, _ con
 		Links:      links,
 		// The folder advertises the whole family's controls: the report cache
 		// clear, and the gateway mute pair -- which is why every route that
-		// renders the folder declares contract.NeedMonitoring.
+		// renders the folder declares NeedMonitoring.
 		Actions: sf.actions.ActionsFor(state, "gogios-cache-clear", "monitoring-mute", "monitoring-unmute"),
 	}, http.StatusOK, nil
 }
@@ -157,12 +157,13 @@ func (sf *Surface) statusHandle(status string) contract.Handle {
 			},
 		}
 
-		if state.GogiosErr != nil {
-			props["error"] = state.GogiosErr.Error()
+		report, err := Report(state)
+		if err != nil {
+			props["error"] = err.Error()
 			return e, http.StatusOK, nil
 		}
 
-		for _, c := range state.Gogios.ChecksFor(status) {
+		for _, c := range report.ChecksFor(status) {
 			e.Entities = append(e.Entities, sf.checkEntity(c))
 		}
 		return e, http.StatusOK, nil
@@ -208,12 +209,13 @@ func (sf *Surface) checkEntity(c gogios.Check) contract.Entity {
 // but a single-entity lookup cannot answer "does this check exist" at all
 // without the report, so there is nothing meaningful to return as a 200.
 func (sf *Surface) handleCheck(_ context.Context, state contract.State, req contract.Request) (contract.Entity, int, error) {
-	if state.GogiosErr != nil {
-		return contract.Entity{}, http.StatusBadGateway, fmt.Errorf("fetching the Gogios report: %w", state.GogiosErr)
+	report, err := Report(state)
+	if err != nil {
+		return contract.Entity{}, http.StatusBadGateway, fmt.Errorf("fetching the Gogios report: %w", err)
 	}
 
 	name := req.Query.Get("name")
-	check, ok := state.Gogios.Check(name)
+	check, ok := report.Check(name)
 	if !ok {
 		return contract.Entity{}, http.StatusNotFound, fmt.Errorf("no such Gogios check: %q", name)
 	}
@@ -233,7 +235,7 @@ func (sf *Surface) handleCheck(_ context.Context, state contract.State, req cont
 // re-read; a failed re-read renders as the overview's "error" property.
 //
 // Only the report is re-read: clearing it does not touch the gateway mute, so
-// state.Monitoring -- fetched because the route declares NeedMonitoring -- is
+// Monitoring(state) -- fetched because the route declares NeedMonitoring -- is
 // passed through as-is, and the re-rendered folder advertises the mute pair
 // exactly as GET /gogios does.
 func (sf *Surface) handleClearCache(ctx context.Context, state contract.State, _ contract.Request) (contract.Entity, int, error) {
@@ -241,6 +243,5 @@ func (sf *Surface) handleClearCache(ctx context.Context, state contract.State, _
 		return contract.Entity{}, http.StatusInternalServerError, fmt.Errorf("clearing the Gogios report cache: %w", err)
 	}
 
-	state.Gogios, state.GogiosErr = sf.reports.Fetch(ctx)
-	return sf.handleOverview(ctx, state, contract.Request{})
+	return sf.handleOverview(ctx, sf.fetchReport(ctx, state, contract.Request{}), contract.Request{})
 }

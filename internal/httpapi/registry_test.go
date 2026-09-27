@@ -10,6 +10,7 @@ import (
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
@@ -420,17 +421,16 @@ func TestEveryFHostIsIndividuallyControllable(t *testing.T) {
 // offered no way to clear it, and Gogios stayed blind until somebody SSHed to
 // both gateways by hand.
 func TestMonitoringUnmuteIsReachableWithTheFleetUp(t *testing.T) {
-	allUp := contract.State{
+	allUp := gogiosapi.WithMonitoring(contract.State{
 		Hosts: []power.HostStatus{
 			{Name: "f0", Role: "f", Ping: true, SSH: true},
 			{Name: "f1", Role: "f", Ping: true, SSH: true},
 			{Name: "f2", Role: "f", Ping: true, SSH: true},
 		},
-		Monitoring: []gogios.GatewayMute{
-			{Name: "blowfish", Muted: true},
-			{Name: "fishfinger", Muted: true},
-		},
-	}
+	}, []gogios.GatewayMute{
+		{Name: "blowfish", Muted: true},
+		{Name: "fishfinger", Muted: true},
+	})
 
 	if _, ok := routeByName("power-on"); !ok {
 		t.Fatal("power-on route missing")
@@ -479,7 +479,7 @@ func TestMonitoringActionsFollowEachGatewaysState(t *testing.T) {
 		{"no gateways", []gogios.GatewayMute{}, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := contract.State{Monitoring: tc.gateways}
+			s := gogiosapi.WithMonitoring(contract.State{}, tc.gateways)
 			want := map[string]bool{"monitoring-mute": tc.wantMute, "monitoring-unmute": tc.wantUnmute}
 			for name, wantAvail := range want {
 				r, ok := routeByName(name)
@@ -501,7 +501,7 @@ func TestMonitoringActionsFollowEachGatewaysState(t *testing.T) {
 // gateway. Offering "mute" off the back of a zero value would mean offering it
 // on every response that skipped the lookup.
 func TestMonitoringActionsWithheldWhenUnknown(t *testing.T) {
-	var unknown contract.State // Monitoring is nil
+	var unknown contract.State // no mute state: gogiosapi.Monitoring is nil
 	for _, name := range []string{"monitoring-mute", "monitoring-unmute"} {
 		r, ok := routeByName(name)
 		if !ok {
@@ -712,7 +712,7 @@ func TestSkipsProbeRoutesDontDependOnHostsOrFans(t *testing.T) {
 // generic TestRoutesAreUnique/TestOpenAPICoversEveryRoute already give it,
 // matching the "Gogios alerting" section of docs/CLIENT.md. Every one of them
 // reads only the cached/fetched report (or, for the drill-down routes,
-// contract.State.Gogios via the Gogios surface's route closures), so all
+// gogiosapi.Report(state) via the Gogios surface's route closures), so all
 // are SkipsProbe:true -- see gogiosapi's route declarations.
 func TestGogiosRoutesExist(t *testing.T) {
 	want := []struct {
@@ -756,7 +756,11 @@ func TestGogiosCacheClearIsAlwaysAvailable(t *testing.T) {
 	if !ok {
 		t.Fatal("no gogios-cache-clear action")
 	}
-	for _, s := range []contract.State{{}, {GogiosErr: errFake{}}, {Gogios: &gogios.Report{}}} {
+	for _, s := range []contract.State{
+		{},
+		gogiosapi.WithReport(contract.State{}, nil, errFake{}),
+		gogiosapi.WithReport(contract.State{}, &gogios.Report{}, nil),
+	} {
 		if !r.IsAvailable(s) {
 			t.Errorf("gogios-cache-clear unavailable for state %+v, want always available", s)
 		}

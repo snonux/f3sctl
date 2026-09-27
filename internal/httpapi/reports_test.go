@@ -34,10 +34,9 @@ func reportsServer(t *testing.T, reports *fakeReports) *Server {
 		auth:  NewAuthenticator(cfg.APIKeyFile),
 		siren: NewSirenRenderer(),
 		node:  "test",
-		monitorStatus: func(context.Context) []gogios.GatewayMute {
-			return []gogios.GatewayMute{{Name: "blowfish"}}
-		},
-	}).assemble(inv, reports, testPowerSurface(inv, ""), testGogiosSurface(""), "")
+	}).assemble(inv, testPowerSurface(inv, ""), gogiosSurfaceOver("", reports, mutesRead(func(context.Context) []gogios.GatewayMute {
+		return []gogios.GatewayMute{{Name: "blowfish"}}
+	})), "")
 }
 
 // serveReportRoute serves one authenticated request and returns its status
@@ -162,38 +161,42 @@ func TestReportFetchFailureRendersAsToday(t *testing.T) {
 	}
 }
 
-// TestBuildSharesOneSourceWithTheSurface pins the ownership build takes on:
-// the source enrichState reads is the very one the Gogios factory is handed
-// and its surface is built with -- one source, not two that could diverge.
-func TestBuildSharesOneSourceWithTheSurface(t *testing.T) {
-	reports := unreachableReports()
-	var built *gogiosapi.Surface
-	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
-		built = testGogiosSurface("")(a, r)
-		return built
-	}
+// TestReportNeedIsFilledThroughTheSurfacesSource pins the ownership seam
+// build wires: the Fetch the Server runs for gogiosapi.NeedReport is the
+// Gogios surface's own, reading the very source that surface was built with
+// -- the one its cache clear clears -- rather than one the Server keeps.
+func TestReportNeedIsFilledThroughTheSurfacesSource(t *testing.T) {
+	reports := &fakeReports{report: needsReport}
 	inv := inventory.Default()
-	srv := (&Server{}).assemble(inv, reports, testPowerSurface(inv, ""), gg, "")
+	srv := (&Server{}).assemble(inv, testPowerSurface(inv, ""), gogiosSurfaceOver("", reports, nil), "")
 
-	if srv.reports != gogiosapi.ReportSource(reports) {
-		t.Errorf("enrichState's source = %p, want the %p build was given", srv.reports, reports)
+	fetch, ok := srv.fetchers[gogiosapi.NeedReport]
+	if !ok {
+		t.Fatal("build installed no Fetch for gogiosapi.NeedReport")
 	}
-	if built == nil || built.Reports() != gogiosapi.ReportSource(reports) {
-		t.Errorf("the Gogios surface was not built with the source build was given")
+	report, err := gogiosapi.Report(fetch(context.Background(), contract.State{}, contract.Request{}))
+	if report != needsReport || err != nil {
+		t.Errorf("the NeedReport Fetch returned %p, %v; want the surface source's %p", report, err, needsReport)
+	}
+	if got := reports.fetches.Load(); got != 1 {
+		t.Errorf("surface source fetches = %d, want 1", got)
 	}
 }
 
-// TestNewServerInjectsTheProductionSource pins the production wiring:
-// newServer hands build a real report source, over the dedicated-client
-// gogios.Source rather than any stand-in. power.New accepts any config (it
-// only builds clients), so the server test config is enough.
-func TestNewServerInjectsTheProductionSource(t *testing.T) {
-	t.Setenv("SCRIPT_NAME", "")
-	srv, err := newServer(serverTestConfig(t, "sekrit"))
-	if err != nil {
-		t.Fatalf("newServer: %v", err)
+// TestProductionGogiosSurfaceOwnsARealSource pins the production wiring:
+// the factory newServer hands build gives the Gogios surface a real report
+// source, over the dedicated-client gogios.Source rather than any stand-in,
+// and the same one on every call -- so the surface's reads and its cache
+// clear always meet at one cache.
+func TestProductionGogiosSurfaceOwnsARealSource(t *testing.T) {
+	factory := productionGogiosSurface(serverTestConfig(t, "sekrit"), "test", contract.Hrefs(""), nil)
+	actions := (&Server{}).actionRenderer()
+
+	first := factory(actions).Reports()
+	if src, ok := first.(*gogios.Source); !ok || src == nil {
+		t.Errorf("the Gogios surface's report source = %#v, want a non-nil *gogios.Source", first)
 	}
-	if src, ok := srv.reports.(*gogios.Source); !ok || src == nil {
-		t.Errorf("enrichState's report source = %#v, want a non-nil *gogios.Source", srv.reports)
+	if again := factory(actions).Reports(); again != first {
+		t.Error("two surfaces from one factory read from two different sources")
 	}
 }

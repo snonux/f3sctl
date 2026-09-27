@@ -66,7 +66,7 @@ func countingServer(t *testing.T) (*Server, *probeCounter) {
 			pc.acReads++
 			return power.ACState{}, nil
 		},
-	}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 	return srv, pc
 }
 
@@ -188,7 +188,7 @@ func TestSnapshotStillProbesRoutesThatNeedIt(t *testing.T) {
 // snapshot() follows for the mute family: the /monitoring resource and its
 // mute/unmute actions all skip the probe. Every handler in the mute family --
 // Gogios surface's handleMonitoring, handleMute, handleUnmute -- renders only
-// state.Monitoring; see gogiosapi/handlers.go.
+// gogiosapi.Monitoring(state); see gogiosapi/handlers.go.
 //
 // The root belongs on the SkipsProbe side since the section folders took
 // over its actions list: handleRoot renders properties and links only, no
@@ -306,7 +306,7 @@ func TestBuildRendersPowerSurfaceActionsThroughItsRouter(t *testing.T) {
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: true}, nil
 		},
-	}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), "/cgi-bin/f3sctl"), testGogiosSurface("/cgi-bin/f3sctl"), "/cgi-bin/f3sctl")
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), "/cgi-bin/f3sctl"), testGogiosSurface("/cgi-bin/f3sctl"), "/cgi-bin/f3sctl")
 
 	var out bytes.Buffer
 	if err := srv.serve(&out, getRequest("/fans")); err != nil {
@@ -576,11 +576,11 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		acStatus: func(context.Context) (power.ACState, error) {
 			return power.ACState{On: true}, nil
 		},
-		monitorStatus: monitor,
-		// The Gogios surface's report source is a fake with no report, so
-		// neither a report read nor gogios-cache-clear touches the real Gogios
-		// or a real cache dir.
-	}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
+		// The Gogios surface reads the gateway mute through monitor, and its
+		// report source is a fake with no report, so neither a report read nor
+		// gogios-cache-clear touches the real Gogios or a real cache dir.
+	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""),
+		gogiosSurfaceOver("", unreachableReports(), mutesRead(monitor)), "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:
@@ -656,7 +656,7 @@ func TestACControlFolderOffersThePlugActions(t *testing.T) {
 // always, and the mute pair judged on the same gateway mute state /monitoring
 // renders -- one of them for a uniform state, both after a partial mute. This
 // is what makes /gogios a folder rather than only a report -- see
-// handleOverview and the route's contract.NeedMonitoring.
+// handleOverview and the route's gogiosapi.NeedMonitoring.
 func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 	tests := []struct {
 		name string
@@ -695,8 +695,8 @@ func TestGogiosFolderCarriesTheMutePair(t *testing.T) {
 // /gogios/cache/clear, whose response is the re-rendered /gogios folder,
 // advertises exactly the actions GET /gogios does -- including the mute pair,
 // judged on the same gateway mute read. It once rendered the folder with
-// state.Monitoring nil (a path predicate fetched the mute only for GET
-// /gogios; the route now declares contract.NeedMonitoring), so a stranded
+// no mute state (a path predicate fetched the mute only for GET /gogios;
+// the route now declares gogiosapi.NeedMonitoring), so a stranded
 // mute's monitoring-unmute silently vanished after a cache clear.
 // The "unreadable" case is the negative one: with no mute state at all, both
 // responses must withhold both mute actions rather than guess.

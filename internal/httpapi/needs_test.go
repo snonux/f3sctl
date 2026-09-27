@@ -37,7 +37,7 @@ import (
 // turns a state in which the need was fetched into exactly what enrichState
 // leaves behind when a route does not declare it.
 type needCase struct {
-	need contract.Need
+	need *contract.Need
 	name string
 	drop func(contract.State) contract.State
 }
@@ -47,13 +47,11 @@ var needCases = []needCase{
 		s.PeerBusy = false
 		return s
 	}},
-	{contract.NeedMonitoring, "NeedMonitoring", func(s contract.State) contract.State {
-		s.Monitoring = nil
-		return s
+	{gogiosapi.NeedMonitoring, "NeedMonitoring", func(s contract.State) contract.State {
+		return gogiosapi.WithMonitoring(s, nil)
 	}},
-	{contract.NeedReport, "NeedReport", func(s contract.State) contract.State {
-		s.Gogios, s.GogiosErr = nil, nil
-		return s
+	{gogiosapi.NeedReport, "NeedReport", func(s contract.State) contract.State {
+		return gogiosapi.WithReport(s, nil, nil)
 	}},
 }
 
@@ -87,14 +85,14 @@ func needsBaseStates() []contract.State {
 		return out
 	}
 	enriched := func(up, peerBusy bool) contract.State {
-		return contract.State{
-			Hosts:      fHosts(up),
-			Fans:       power.FansState{On: up},
-			AC:         power.ACState{On: up},
-			PeerBusy:   peerBusy,
-			Monitoring: []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}},
-			Gogios:     needsReport,
+		s := contract.State{
+			Hosts:    fHosts(up),
+			Fans:     power.FansState{On: up},
+			AC:       power.ACState{On: up},
+			PeerBusy: peerBusy,
 		}
+		s = gogiosapi.WithMonitoring(s, []gogios.GatewayMute{{Name: "blowfish", Muted: true}, {Name: "fishfinger"}})
+		return gogiosapi.WithReport(s, needsReport, nil)
 	}
 	return []contract.State{enriched(true, true), enriched(false, true), enriched(true, false), enriched(false, false)}
 }
@@ -129,13 +127,9 @@ func needsServer(t *testing.T) *Server {
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", href, inv, &plugRecorder{}, needsJobs{}, peers, a)
 	}
-	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, r, gw, a)
-	}
 	return (&Server{
 		cfg: cfg, jobs: jobs, peers: peers, siren: NewSirenRenderer(), node: "test",
-		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, unreachableReports(), pw, gg, "")
+	}).assemble(inv, pw, gogiosSurfaceOver("", unreachableReports(), gw), "")
 }
 
 // observeRoute is everything about route name that the state enrichState
@@ -203,14 +197,16 @@ func handleOutput(r contract.Route, state contract.State) (out string) {
 // for nothing -- the reason /job must not declare NeedPeerBusy, and the cache
 // clear, whose handler re-reads the report after clearing it, NeedReport.
 func TestRoutesDeclareTheStateTheyRead(t *testing.T) {
-	var covered contract.Need
+	var covered contract.Needs
 	for _, c := range needCases {
-		covered |= c.need
+		covered = append(covered, c.need)
 	}
 
 	for _, r := range needsServer(t).router.routes {
-		if extra := r.Needs &^ covered; extra != 0 {
-			t.Errorf("route %q declares Need %#x, which this guard has no needCase for: add one", r.Name, extra)
+		for _, n := range r.Needs {
+			if !covered.Has(n) {
+				t.Errorf("route %q declares Need %v, which this guard has no needCase for: add one", r.Name, n)
+			}
 		}
 		for _, c := range needCases {
 			reads := false
@@ -257,10 +253,10 @@ func TestNeedsBaseStatesOfferEveryAction(t *testing.T) {
 // TestRoutesDeclareTheStateTheyRead would pass vacuously -- flagging every
 // declaration as unused, and missing every omission.
 func TestNeedsGuardSeesEachNeed(t *testing.T) {
-	readers := map[contract.Need]string{
-		contract.NeedPeerBusy:   "power",
-		contract.NeedMonitoring: "monitoring",
-		contract.NeedReport:     "gogios-critical",
+	readers := map[*contract.Need]string{
+		contract.NeedPeerBusy:    "power",
+		gogiosapi.NeedMonitoring: "monitoring",
+		gogiosapi.NeedReport:     "gogios-critical",
 	}
 	for _, c := range needCases {
 		base := needsBaseStates()[0]
@@ -284,8 +280,9 @@ func (fc *fetchCounts) counts() [3]int32 {
 }
 
 // countingMonitor is a gatewayRecorder that counts its gateway reads into
-// reads -- both enrichState's (as the Server's monitorStatus) and a mute
-// handler's own re-read (as the Gogios surface's Monitor).
+// reads -- both enrichState's (through the Gogios surface's NeedMonitoring
+// Provider) and a mute handler's own re-read -- which in production are the
+// same engine, and here the same Monitor.
 type countingMonitor struct {
 	gatewayRecorder
 	reads *int32
@@ -333,15 +330,12 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 	return (&Server{
 		cfg: cfg, jobs: jobs, peers: peers,
 		auth: NewAuthenticator(keyFile), siren: NewSirenRenderer(), node: "test",
-		probeHosts:    func(context.Context) []power.HostStatus { return nil },
-		fansStatus:    func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
-		acStatus:      func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
-		monitorStatus: gw.MonitoringStatus,
-	}).assemble(inv, fc.reports, func(a contract.ActionRenderer) *powerapi.Surface {
+		probeHosts: func(context.Context) []power.HostStatus { return nil },
+		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
+		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
+	}).assemble(inv, func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", href, inv, &plugRecorder{}, jobs, peers, a)
-	}, func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New("test", href, r, gw, a)
-	}, ""), fc
+	}, gogiosSurfaceOver("", fc.reports, gw), ""), fc
 }
 
 // TestEachRouteFetchesExactlyWhatItDeclares serves representative routes
@@ -441,27 +435,37 @@ func TestStatusRendersOnlyActionsJudgedOnItsOwnState(t *testing.T) {
 // TestEnrichStateFollowsTheMatchedRouteNotThePath pins that what is fetched
 // belongs to the route serving the request -- method and path -- rather than
 // to its path alone, which is all the old path predicates could see. Two
-// routes share one path here; only the one declaring NeedMonitoring may pay
-// for the gateway read.
+// routes share one path here; only the one declaring the Need may pay for
+// its fetch.
+//
+// The Need, its state and its Provider are all declared right here, as a
+// new domain would declare its own: nothing in contract or in enrichState
+// knows about them, and the routes' Needs alone decide what runs.
 func TestEnrichStateFollowsTheMatchedRouteNotThePath(t *testing.T) {
+	need := contract.NewNeed("test-gateways")
+	gateways := contract.NewSlot[int]("test gateways")
 	var reads int
 	render := func(_ context.Context, s contract.State, _ contract.Request) (contract.Entity, int, error) {
-		return contract.Entity{Properties: map[string]any{"gateways": len(s.Monitoring)}}, http.StatusOK, nil
+		return contract.Entity{Properties: map[string]any{"gateways": gateways.Get(s)}}, http.StatusOK, nil
 	}
-	srv, _ := countingServer(t)
-	srv.monitorStatus = func(context.Context) []gogios.GatewayMute {
-		reads++
-		return []gogios.GatewayMute{{Name: "blowfish"}}
-	}
-	srv.router = routerOver(t, []contract.Route{
+	routes := []contract.Route{
 		{Name: "shared-get", Method: http.MethodGet, Path: "/shared", SkipsProbe: true,
-			Needs: contract.NeedMonitoring, Handle: render},
+			Needs: contract.Needs{need}, Handle: render},
 		{Name: "shared-post", Method: http.MethodPost, Path: "/shared", Action: true, SkipsProbe: true,
 			Handle: render},
-	})
+	}
+	fetchers, err := needFetchers(routes, []contract.Provider{{Need: need, Fetch: func(_ context.Context, s contract.State, _ contract.Request) contract.State {
+		reads++
+		return gateways.With(s, 1)
+	}}})
+	if err != nil {
+		t.Fatalf("needFetchers: %v", err)
+	}
+	srv, _ := countingServer(t)
+	srv.router, srv.fetchers = routerOver(t, routes), fetchers
 
 	if got := postEntity(t, srv, "/shared").Properties["gateways"]; got != float64(0) || reads != 0 {
-		t.Errorf("POST /shared: gateways = %v after %d reads, want 0 after 0: it declares no NeedMonitoring", got, reads)
+		t.Errorf("POST /shared: gateways = %v after %d reads, want 0 after 0: it declares no Need", got, reads)
 	}
 	if got := getEntity(t, srv, "/shared").Properties["gateways"]; got != float64(1) || reads != 1 {
 		t.Errorf("GET /shared: gateways = %v after %d reads, want 1 after 1", got, reads)
@@ -478,4 +482,98 @@ func routerOver(t *testing.T, rs []contract.Route) *Router {
 		t.Fatalf("NewRouter: %v", err)
 	}
 	return rt
+}
+
+// TestNeedFetchersRefusesWhatEnrichStateCannotServe is the negative half of
+// the Provider seam build relies on: a route table declaring a Need nobody
+// provides would be served without the state it reads, and a Need with two
+// Providers would get whichever happened to be indexed last -- both are
+// refused when the Server is built, not discovered on a request.
+func TestNeedFetchersRefusesWhatEnrichStateCannotServe(t *testing.T) {
+	need, other := contract.NewNeed("need"), contract.NewNeed("other")
+	fetch := func(_ context.Context, s contract.State, _ contract.Request) contract.State { return s }
+	route := func(ns ...*contract.Need) []contract.Route {
+		return []contract.Route{{Name: "r", Method: http.MethodGet, Path: "/r", Needs: ns}}
+	}
+	for _, tc := range []struct {
+		name      string
+		routes    []contract.Route
+		providers []contract.Provider
+		wantErr   string // "" means build must succeed
+	}{
+		{"declared and provided", route(need), []contract.Provider{{Need: need, Fetch: fetch}}, ""},
+		{"provided but unused", route(), []contract.Provider{{Need: need, Fetch: fetch}}, ""},
+		{"declared, not provided", route(need), []contract.Provider{{Need: other, Fetch: fetch}}, `route "r" (GET /r) declares Need need`},
+		{"declared nil Need", route(nil), nil, "declares Need <nil Need>"},
+		{"declared twice", route(need, need), []contract.Provider{{Need: need, Fetch: fetch}}, `route "r" (GET /r) declares Need need twice`},
+		{"provided twice", route(need), []contract.Provider{{Need: need, Fetch: fetch}, {Need: need, Fetch: fetch}}, "more than one Provider fills Need need"},
+		{"provider without a Need", route(), []contract.Provider{{Fetch: fetch}}, "declares no Need"},
+		{"provider without a Fetch", route(need), []contract.Provider{{Need: need}}, "Need need has no Fetch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetchers, err := needFetchers(tc.routes, tc.providers)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("needFetchers: %v, want success", err)
+			case tc.wantErr == "" && len(fetchers) != len(tc.providers):
+				t.Errorf("needFetchers indexed %d Fetches, want %d", len(fetchers), len(tc.providers))
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("needFetchers error = %v, want one containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestBuildWiresEachNeedToItsOwner pins who fills what once build has run:
+// every Need a served route declares has a Fetch, NeedPeerBusy is the
+// Server's own (the peer set is the composition root's), and the Gogios
+// Needs are the Gogios surface's -- the state each surface owns is filled by
+// that surface, not by the root.
+func TestBuildWiresEachNeedToItsOwner(t *testing.T) {
+	srv := testServer()
+	for _, r := range srv.router.routes {
+		for _, n := range r.Needs {
+			if _, ok := srv.fetchers[n]; !ok {
+				t.Errorf("route %q declares Need %v, which build left without a Fetch", r.Name, n)
+			}
+		}
+	}
+
+	owners := map[*contract.Need]string{contract.NeedPeerBusy: "server"}
+	for _, p := range srv.providers() {
+		if p.Need != contract.NeedPeerBusy {
+			t.Errorf("the Server provides Need %v: only the shared NeedPeerBusy is the root's", p.Need)
+		}
+	}
+	for _, p := range testGogiosSurface("")(srv.actionRenderer()).Providers() {
+		owners[p.Need] = "gogiosapi"
+	}
+	for need, want := range map[*contract.Need]string{
+		contract.NeedPeerBusy:    "server",
+		gogiosapi.NeedMonitoring: "gogiosapi",
+		gogiosapi.NeedReport:     "gogiosapi",
+	} {
+		if got := owners[need]; got != want {
+			t.Errorf("Need %v is provided by %q, want %q", need, got, want)
+		}
+	}
+	if len(srv.fetchers) != len(owners) {
+		t.Errorf("build indexed %d Fetches, want exactly the %d the Server and the Gogios surface provide",
+			len(srv.fetchers), len(owners))
+	}
+}
+
+// TestEnrichStatePanicsOnAnUnprovidedNeed pins the backstop for a Server
+// whose router was swapped in past build: serving a route declaring a Need
+// with no Fetch is a wiring bug, and fails loudly (serveCGI turns the panic
+// into a 500) instead of rendering the route as if its state were absent.
+func TestEnrichStatePanicsOnAnUnprovidedNeed(t *testing.T) {
+	srv, _ := countingServer(t)
+	r := contract.Route{Name: "orphaned", Needs: contract.Needs{contract.NewNeed("orphan")}}
+	defer func() {
+		if p := recover(); p == nil || !strings.Contains(fmt.Sprint(p), "orphan") {
+			t.Errorf("enrichState recovered %v, want a panic naming the unprovided Need", p)
+		}
+	}()
+	srv.enrichState(context.Background(), contract.State{}, r, getRequest("/"))
 }

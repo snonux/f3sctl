@@ -112,6 +112,18 @@ func (fakeMonitor) MonitoringStatus(context.Context) []gogios.GatewayMute {
 	return []gogios.GatewayMute{{Name: "gw"}}
 }
 
+// docMonitor is o.monitor with the gateway read replaced by o.muted's: the
+// mute writes go to the collaborator a test chose, while the state the mute
+// pair is judged on is the one docOpts describes.
+type docMonitor struct {
+	gogiosapi.Monitor
+	muted bool
+}
+
+func (m docMonitor) MonitoringStatus(context.Context) []gogios.GatewayMute {
+	return []gogios.GatewayMute{{Name: "gw", Muted: m.muted}}
+}
+
 // docOpts shapes a docServer: what the fleet, the plugs and the gateways
 // read as, and the collaborators behind the two surfaces. A nil collaborator
 // is a well-behaved fake (writes succeed, no job, idle peer).
@@ -148,9 +160,7 @@ func docServer(t *testing.T, o docOpts) *Server {
 	pw := func(a contract.ActionRenderer) *powerapi.Surface {
 		return powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, a)
 	}
-	gg := func(a contract.ActionRenderer, r gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(""), r, o.monitor, a)
-	}
+	gg := gogiosSurfaceOver("", unreachableReports(), docMonitor{Monitor: o.monitor, muted: o.muted})
 	return (&Server{
 		cfg: cfg, jobs: coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0),
 		peers: coordination.NewPeerSet(nil, ""),
@@ -158,10 +168,7 @@ func docServer(t *testing.T, o docOpts) *Server {
 		probeHosts: func(context.Context) []power.HostStatus { return hosts },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{On: o.plugsOn}, nil },
 		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{On: o.plugsOn}, nil },
-		monitorStatus: func(context.Context) []gogios.GatewayMute {
-			return []gogios.GatewayMute{{Name: "gw", Muted: o.muted}}
-		},
-	}).assemble(inv, unreachableReports(), pw, gg, "")
+	}).assemble(inv, pw, gg, "")
 }
 
 // withDefaults fills every nil collaborator with its well-behaved fake.

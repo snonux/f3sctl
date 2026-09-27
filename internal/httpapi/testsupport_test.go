@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"io"
 	"sync/atomic"
 
 	"github.com/snonux/f3sctl/internal/gogios"
@@ -32,14 +33,36 @@ func testPowerSurface(inv inventory.Inventory, base string) powerSurfaceFunc {
 }
 
 // testGogiosSurface returns a factory for the Gogios surface with inert
-// collaborators (see testPowerSurface): no Monitor, and whatever report
-// source Server.build hands it -- unreachableReports, in the helpers below,
-// so no test serving a report route through them can reach the real Gogios.
+// collaborators (see testPowerSurface): no Monitor, and unreachableReports as
+// its report source, so no test serving a report route through it can reach
+// the real Gogios.
 func testGogiosSurface(base string) gogiosSurfaceFunc {
-	return func(actions contract.ActionRenderer, reports gogiosapi.ReportSource) *gogiosapi.Surface {
-		return gogiosapi.New("test", contract.Hrefs(base), reports, nil, actions)
+	return gogiosSurfaceOver(base, unreachableReports(), nil)
+}
+
+// gogiosSurfaceOver returns a factory for the Gogios surface reading its
+// report from reports and its gateway mute from monitor -- the collaborators
+// its NeedReport and NeedMonitoring Providers fetch through, so a test
+// serving a route that declares either wires them here.
+func gogiosSurfaceOver(base string, reports gogiosapi.ReportSource, monitor gogiosapi.Monitor) gogiosSurfaceFunc {
+	return func(actions contract.ActionRenderer) *gogiosapi.Surface {
+		return gogiosapi.New("test", contract.Hrefs(base), reports, monitor, actions)
 	}
 }
+
+// mutesRead is a gogiosapi.Monitor that only reads the gateway mute, for the
+// tests that serve routes judged on the mute but never change it: a mute or
+// un-mute through it fails.
+type mutesRead func(context.Context) []gogios.GatewayMute
+
+func (m mutesRead) MonitoringStatus(ctx context.Context) []gogios.GatewayMute { return m(ctx) }
+
+func (mutesRead) MuteGogios(context.Context, io.Writer) error { return errMuteReadOnly }
+
+func (mutesRead) UnmuteNow(context.Context, io.Writer) error { return errMuteReadOnly }
+
+// errMuteReadOnly is what a mutesRead answers a mute or un-mute with.
+var errMuteReadOnly = errors.New("mutesRead: this test's gateways are read-only")
 
 // fakeReports is a gogiosapi.ReportSource that serves a fixed report (or a
 // fixed error) and counts its calls, so a test can tell which reads and
@@ -78,7 +101,7 @@ func unreachableReports() *fakeReports { return &fakeReports{err: errNoReport} }
 // it and hrefs a handler renders -- links and actions alike -- always share
 // one base and one table.
 func testRouter(inv inventory.Inventory, base string) *Router {
-	return (&Server{}).assemble(inv, unreachableReports(), testPowerSurface(inv, base), testGogiosSurface(base), base).router
+	return (&Server{}).assemble(inv, testPowerSurface(inv, base), testGogiosSurface(base), base).router
 }
 
 // testRoutes is the route table of testRouter(inv, "") -- the same table
@@ -97,14 +120,14 @@ func testRoutes(inv inventory.Inventory) []contract.Route {
 func declaredRoutes(inv inventory.Inventory) []contract.Route {
 	srv := &Server{}
 	actions := srv.actionRenderer()
-	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions), testGogiosSurface("")(actions, unreachableReports()))
+	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions), testGogiosSurface("")(actions))
 }
 
 // assemble is Server.build for tests, whose route tables are known to be
 // unambiguous: it panics instead of returning the error, so a Server literal
 // can be wired in one expression.
-func (s *Server) assemble(inv inventory.Inventory, reports gogiosapi.ReportSource, pw powerSurfaceFunc, gg gogiosSurfaceFunc, base string) *Server {
-	srv, err := s.build(inv, reports, pw, gg, base)
+func (s *Server) assemble(inv inventory.Inventory, pw powerSurfaceFunc, gg gogiosSurfaceFunc, base string) *Server {
+	srv, err := s.build(inv, pw, gg, base)
 	if err != nil {
 		panic(err)
 	}
@@ -114,7 +137,7 @@ func (s *Server) assemble(inv inventory.Inventory, reports gogiosapi.ReportSourc
 // testServer returns a Server with no collaborators at all, for building the
 // route table (which needs a Server only to bind the root-resource handlers).
 func testServer() *Server {
-	return (&Server{}).assemble(inventory.Default(), unreachableReports(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
+	return (&Server{}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""), testGogiosSurface(""), "")
 }
 
 // routeByName finds a route by its stable client-facing name, the way the

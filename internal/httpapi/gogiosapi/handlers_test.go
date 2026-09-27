@@ -76,7 +76,7 @@ func gogiosSample() *gogios.Report {
 // /monitoring (the separate mute concern).
 func TestHandleGogiosRendersTheOverview(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
+	state := WithReport(contract.State{}, gogiosSample(), nil)
 
 	e, status, err := sf.handleOverview(context.Background(), state, contract.Request{})
 	if err != nil {
@@ -85,8 +85,8 @@ func TestHandleGogiosRendersTheOverview(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, want %d", status, http.StatusOK)
 	}
-	if e.Properties["subject"] != state.Gogios.Subject {
-		t.Errorf("subject = %v, want %v", e.Properties["subject"], state.Gogios.Subject)
+	if report, _ := Report(state); e.Properties["subject"] != report.Subject {
+		t.Errorf("subject = %v, want %v", e.Properties["subject"], report.Subject)
 	}
 
 	summary, ok := e.Properties["summary"].(map[string]any)
@@ -110,7 +110,7 @@ func TestHandleGogiosRendersTheOverview(t *testing.T) {
 // doc comment for why.
 func TestHandleGogiosReportsAFetchErrorAsAProperty(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{GogiosErr: errFake{}}
+	state := WithReport(contract.State{}, nil, errFake{})
 
 	e, status, err := sf.handleOverview(context.Background(), state, contract.Request{})
 	if err != nil {
@@ -134,7 +134,7 @@ func TestHandleGogiosReportsAFetchErrorAsAProperty(t *testing.T) {
 // once, not twice, and a suppressed check not at all.
 func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
+	state := WithReport(contract.State{}, gogiosSample(), nil)
 
 	for _, tc := range []struct {
 		status string
@@ -170,15 +170,15 @@ func TestHandleGogiosStatusFiltersBySeverity(t *testing.T) {
 // StatusChanged copy carries.
 func TestHandleGogiosCriticalListsAChangedCheckOnce(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
+	state := WithReport(contract.State{}, gogiosSample(), nil)
 
 	e, _, err := sf.statusHandle("critical")(context.Background(), state, contract.Request{})
 	if err != nil {
 		t.Fatalf("statusHandle(critical): %v", err)
 	}
-	if len(e.Entities) != state.Gogios.Summary.Critical {
+	if report, _ := Report(state); len(e.Entities) != report.Summary.Critical {
 		t.Fatalf("critical entities = %d, want %d (summary.critical): %+v",
-			len(e.Entities), state.Gogios.Summary.Critical, e.Entities)
+			len(e.Entities), report.Summary.Critical, e.Entities)
 	}
 	if got := e.Entities[0].Properties["prevStatus"]; got != "OK" {
 		t.Errorf("critical[0].prevStatus = %v, want OK", got)
@@ -191,8 +191,9 @@ func TestHandleGogiosCriticalListsAChangedCheckOnce(t *testing.T) {
 // per-check lookup still finds the suppressed CRITICAL by name.
 func TestHandleGogiosSeverityDrillDownsMatchTheSummary(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
-	sum := state.Gogios.Summary
+	state := WithReport(contract.State{}, gogiosSample(), nil)
+	report, _ := Report(state)
+	sum := report.Summary
 
 	for status, want := range map[string]int{
 		"critical": sum.Critical, "warning": sum.Warning, "unknown": sum.Unknown, "ok": sum.Ok,
@@ -223,7 +224,7 @@ func TestHandleGogiosSeverityDrillDownsMatchTheSummary(t *testing.T) {
 // none of which is the literal string "stale"/"suppressed").
 func TestHandleGogiosStatusLifecycleGroupings(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
+	state := WithReport(contract.State{}, gogiosSample(), nil)
 
 	for _, tc := range []struct {
 		status string
@@ -252,7 +253,7 @@ func TestHandleGogiosStatusLifecycleGroupings(t *testing.T) {
 // TestHandleGogiosReportsAFetchErrorAsAProperty.
 func TestHandleGogiosStatusReportsAFetchError(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{GogiosErr: errFake{}}
+	state := WithReport(contract.State{}, nil, errFake{})
 
 	e, status, err := sf.statusHandle("critical")(context.Background(), state, contract.Request{})
 	if err != nil {
@@ -275,7 +276,7 @@ func TestHandleGogiosStatusReportsAFetchError(t *testing.T) {
 // takes the name as a query parameter rather than a path segment.
 func TestHandleGogiosCheckFindsByName(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
+	state := WithReport(contract.State{}, gogiosSample(), nil)
 	name := "Check Ping6 r1.wg0.wan.buetow.org"
 
 	e, status, err := sf.handleCheck(context.Background(), state, contract.Request{Query: url.Values{"name": {name}}})
@@ -297,7 +298,7 @@ func TestHandleGogiosCheckFindsByName(t *testing.T) {
 // check is a 404, not an empty 200 or a silently-ignored lookup.
 func TestHandleGogiosCheckNotFound(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{Gogios: gogiosSample()}
+	state := WithReport(contract.State{}, gogiosSample(), nil)
 
 	_, status, err := sf.handleCheck(context.Background(), state, contract.Request{Query: url.Values{"name": {"no such check"}}})
 	if status != http.StatusNotFound {
@@ -313,7 +314,7 @@ func TestHandleGogiosCheckNotFound(t *testing.T) {
 // lookup cannot answer "does this check exist" at all without the report.
 func TestHandleGogiosCheckFailsHardOnAFetchError(t *testing.T) {
 	sf := testSurface()
-	state := contract.State{GogiosErr: errFake{}}
+	state := WithReport(contract.State{}, nil, errFake{})
 
 	_, status, err := sf.handleCheck(context.Background(), state, contract.Request{Query: url.Values{"name": {"anything"}}})
 	if status != http.StatusBadGateway {
@@ -451,7 +452,7 @@ func TestDrillDownsFollowGogiosStatuses(t *testing.T) {
 		t.Errorf("drill-down routes = %v, want %v", routes, want)
 	}
 
-	e, _, err := sf.handleOverview(context.Background(), contract.State{Gogios: gogiosSample()}, contract.Request{})
+	e, _, err := sf.handleOverview(context.Background(), WithReport(contract.State{}, gogiosSample(), nil), contract.Request{})
 	if err != nil {
 		t.Fatalf("handleOverview: %v", err)
 	}
