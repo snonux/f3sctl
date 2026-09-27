@@ -15,19 +15,20 @@ import (
 
 // Testsupport helpers for the composition-root tests: the route table here is
 // assembled from the two domain surfaces bound to inert collaborators (nil
-// engine, nil jobs, nil peers, nil monitor), which is enough to *declare* the
-// table -- names, paths, methods, availability predicates -- and to serve the
-// routes whose handlers never dereference those collaborators. A test that
-// needs a served power or mute handler builds a real Surface itself (see
-// powerapi/gogiosapi's own tests) or uses the fully-wired newServer / ServeCGI
-// paths.
+// engine, nil jobs and nil peers on the power side; noGateways and
+// unreachableReports() on the Gogios side, whose New rejects nil ones), which
+// is enough to *declare* the table -- names, paths, methods, availability
+// predicates -- and to serve the routes whose handlers never dereference those
+// collaborators. A test that needs a served power or mute handler builds a
+// real Surface itself (see powerapi/gogiosapi's own tests) or uses the
+// fully-wired newServer / ServeCGI paths.
 
 // testPowerSurface returns a factory for the power surface with inert
 // collaborators, building its links under base, for Server.build (via
 // assemble) to bind to its renderer and its Prober -- the Server's own, so a
 // test's probeHosts/fansStatus/acStatus hooks are what the surface's snapshot
-// reads. base must be the one the Server is
-// assembled with, as newServer shares one base between the two.
+// reads. base must be the one the Server is assembled with, as newServer
+// shares one base between the two.
 func testPowerSurface(inv inventory.Inventory, base string) powerSurfaceFunc {
 	return func(actions contract.ActionRenderer, p powerapi.Prober) *powerapi.Surface {
 		return powerapi.New("test", contract.Hrefs(base), inv, nil, p, nil, nil, actions)
