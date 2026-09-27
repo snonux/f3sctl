@@ -183,8 +183,12 @@ func TestSignalContextSurvivesAClosedStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	r.Close()
-	defer w.Close()
+	// Closing the read end is the point of the test (the child's writes then
+	// hit EPIPE); a failure to close it would show up as the child blocking.
+	if err := r.Close(); err != nil {
+		t.Fatalf("close pipe read end: %v", err)
+	}
+	defer func() { _ = w.Close() }()
 
 	cmd := helperCommand("pipe")
 	cmd.Stdout = w
