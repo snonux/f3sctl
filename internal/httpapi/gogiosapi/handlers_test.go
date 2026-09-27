@@ -30,7 +30,7 @@ func hasRel(links []contract.Link, rel string) bool {
 
 // testSurface returns a Surface with no real collaborators beyond the echo
 // renderer: the read-side handlers under test here render only from state, so
-// no Monitor is needed to serve them.
+// the fake Monitor New requires is never reached.
 func testSurface() *Surface {
 	return reportSurface(&fakeReports{})
 }
@@ -348,9 +348,10 @@ func (f *fakeReports) Clear() error {
 	return f.clearErr
 }
 
-// reportSurface returns a Surface reading its report from reports.
+// reportSurface returns a Surface reading its report from reports (and its
+// mute from fakeMonitor, which New requires).
 func reportSurface(reports ReportSource) *Surface {
-	return New("test", contract.Hrefs(""), reports, nil, echoActions{})
+	return New("test", contract.Hrefs(""), reports, fakeMonitor{}, echoActions{})
 }
 
 // TestHandleGogiosClearCacheClearsAndRefetches pins the whole point of the

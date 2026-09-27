@@ -94,7 +94,7 @@ func runEveryHandler(t *testing.T, actions contract.ActionRenderer) {
 	t.Helper()
 	o := docOpts{}.withDefaults()
 	inv := inventory.Default()
-	pw := powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, actions)
+	pw := powerapi.New("test", contract.Hrefs(""), inv, o.eng, nil, o.jobs, o.peers, actions)
 	gg := gogiosapi.New("test", contract.Hrefs(""), unreachableReports(), o.monitor, actions)
 
 	state := powerapi.WithSnapshot(contract.State{}, powerapi.Snapshot{Fans: power.FansState{On: true}, AC: power.ACState{On: true}})

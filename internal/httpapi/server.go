@@ -59,11 +59,12 @@ type Server struct {
 	node  string
 
 	// probeHosts probes every host worth reporting, feeding the power
-	// surface's Snapshot.Hosts (see snapshot). Nil
-	// means the engine's own probe (Engine.ProbeAll, ~3s of concurrent
-	// ping+TCP dials); only tests substitute anything else -- to count calls,
-	// or to avoid paying for real network probes when what is under test is
-	// whether snapshot() ran them at all. See Server.probeHostsFn.
+	// surface's Snapshot.Hosts through the Prober build hands that surface
+	// (see serverProbes). Nil means the engine's own probe (Engine.ProbeAll,
+	// ~3s of concurrent ping+TCP dials); only tests substitute anything else
+	// -- to count calls, or to avoid paying for real network probes when what
+	// is under test is whether snapshot() ran them at all. See
+	// Server.probeHostsFn.
 	probeHosts func(context.Context) []power.HostStatus
 
 	// fansStatus reads the rack-fan Shelly plug, feeding Snapshot.Fans and
@@ -75,6 +76,11 @@ type Server struct {
 	// acStatus reads the f-host mains AC Shelly plug, feeding Snapshot.AC and
 	// Snapshot.ACErr. Nil means Engine.ACStatus; same reasoning as fansStatus.
 	acStatus func(context.Context) (power.ACState, error)
+
+	// probe is the power surface's Probe, set by build: it takes the fleet
+	// snapshot, which snapshot() asks for on every route not declaring
+	// SkipsProbe. The Snapshot, and how it is read, are the surface's.
+	probe func(context.Context, contract.State) contract.State
 
 	// fetchers is the Fetch behind every Need a route may declare, keyed by
 	// that Need: this Server's own (NeedPeerBusy, over peers) and the ones
@@ -158,8 +164,8 @@ func newServer(cfg config.Config) (*Server, error) {
 	// The two domain surfaces, each bound to exactly the collaborators its
 	// handlers need and sharing this node's href builder. build constructs
 	// them, handing both its own action renderer.
-	newPower := func(actions contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New(node, href, cfg.Inventory, eng, jobs, peers, actions)
+	newPower := func(actions contract.ActionRenderer, probe powerapi.Prober) *powerapi.Surface {
+		return powerapi.New(node, href, cfg.Inventory, eng, probe, jobs, peers, actions)
 	}
 	return srv.build(cfg.Inventory, newPower, productionGogiosSurface(cfg, node, href, eng), base)
 }
@@ -183,8 +189,10 @@ func productionGogiosSurface(cfg config.Config, node string, href func(string) s
 // build owns the surfaces' construction, taking factories rather than
 // finished surfaces, so the renderer is always build's to supply: each
 // factory is handed this Server's own (see serverActions), which resolves the
-// Router built here, and must pass it through to its surface's New. It is its
-// own step so tests can construct a Server literal, supply the surfaces they
+// Router built here, and must pass it through to its surface's New. The power
+// factory is handed this Server's Prober the same way (see serverProbes):
+// the engine's own probes in production, a test's hooks where it set them.
+// It is its own step so tests can construct a Server literal, supply the surfaces they
 // want, and go through exactly the same path production takes (their
 // assemble helper wraps this one).
 //
@@ -195,8 +203,8 @@ func productionGogiosSurface(cfg config.Config, node string, href func(string) s
 // a Need that no Provider -- or more than one -- fills.
 func (s *Server) build(inv inventory.Inventory, newPower powerSurfaceFunc, newGogios gogiosSurfaceFunc, base string) (*Server, error) {
 	actions := s.actionRenderer()
-	gg := newGogios(actions)
-	routes := s.buildRoutes(inv, newPower(actions), gg)
+	pw, gg := newPower(actions, serverProbes{s: s}), newGogios(actions)
+	routes := s.buildRoutes(inv, pw, gg)
 	fetchers, err := needFetchers(routes, append(s.providers(), gg.Providers()...))
 	if err != nil {
 		return nil, err
@@ -206,6 +214,7 @@ func (s *Server) build(inv inventory.Inventory, newPower powerSurfaceFunc, newGo
 		return nil, err
 	}
 	s.fetchers = fetchers
+	s.probe = pw.Probe
 	s.router = router
 	s.openapi = NewOpenAPIBuilder(router, inv)
 	return s, nil
@@ -326,20 +335,38 @@ func (s *Server) serve(out io.Writer, req contract.Request) error {
 // and /ac-control folders, through SectionActions -- are not SkipsProbe; the
 // root, which renders links only, is.
 //
-// The fleet half is the power surface's state (powerapi.Snapshot), so it is
-// stored under that surface's own Slot rather than as fields of the shared
-// contract.State; a SkipsProbe route's state carries none at all.
+// The fleet half is the power surface's state (powerapi.Snapshot): the
+// surface takes it itself (powerapi.Surface.Probe) and keeps it under its own
+// Slot; this only decides whether it is taken. A SkipsProbe route's state
+// carries none at all.
 func (s *Server) snapshot(ctx context.Context, r contract.Route) contract.State {
 	st := contract.State{Job: s.jobs.Read()}
 	if r.SkipsProbe {
 		return st
 	}
+	return s.probe(ctx, st)
+}
 
-	var snap powerapi.Snapshot
-	snap.Hosts = s.probeHostsFn()(ctx)
-	snap.Fans, snap.FansErr = s.fansStatusFn()(ctx)
-	snap.AC, snap.ACErr = s.acStatusFn()(ctx)
-	return powerapi.WithSnapshot(st, snap)
+// serverProbes is the powerapi.Prober build hands the power surface: each
+// read is this Server's test hook when one is set (probeHosts, fansStatus,
+// acStatus), the engine's own otherwise -- so in production the surface
+// probes through the power engine, and a test that sets a hook sees exactly
+// that hook called, as it did before the surface owned the snapshot.
+type serverProbes struct{ s *Server }
+
+// ProbeAll delegates to Server.probeHostsFn.
+func (p serverProbes) ProbeAll(ctx context.Context) []power.HostStatus {
+	return p.s.probeHostsFn()(ctx)
+}
+
+// FansStatus delegates to Server.fansStatusFn.
+func (p serverProbes) FansStatus(ctx context.Context) (power.FansState, error) {
+	return p.s.fansStatusFn()(ctx)
+}
+
+// ACStatus delegates to Server.acStatusFn.
+func (p serverProbes) ACStatus(ctx context.Context) (power.ACState, error) {
+	return p.s.acStatusFn()(ctx)
 }
 
 // probeHostsFn returns the fleet probe, falling back to the engine's real

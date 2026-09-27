@@ -16,6 +16,7 @@ import (
 	"github.com/snonux/f3sctl/internal/coordination"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/httpapi/contract"
+	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power"
@@ -586,6 +587,10 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		t.Fatalf("writing the API key file: %v", err)
 	}
 	cfg := config.Default()
+	var gateways gogiosapi.Monitor = noGateways
+	if monitor != nil {
+		gateways = mutesRead(monitor)
+	}
 	return (&Server{
 		cfg:   cfg,
 		jobs:  coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0),
@@ -606,7 +611,7 @@ func folderServer(t *testing.T, hosts []power.HostStatus, monitor func(context.C
 		// report source is a fake with no report, so neither a report read nor
 		// gogios-cache-clear touches the real Gogios or a real cache dir.
 	}).assemble(inventory.Default(), testPowerSurface(inventory.Default(), ""),
-		gogiosSurfaceOver("", unreachableReports(), mutesRead(monitor)), "")
+		gogiosSurfaceOver("", unreachableReports(), gateways), "")
 }
 
 // TestPowerFolderOffersThePowerActions pins that /power is host power only:

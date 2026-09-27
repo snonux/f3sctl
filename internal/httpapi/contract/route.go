@@ -91,11 +91,12 @@ type Route struct {
 	// Available/Fields predicate the router evaluates while rendering it,
 	// provably never read the fleet snapshot (powerapi.Snapshot: hosts and
 	// plugs) -- so the composition root's snapshot can skip the ~3s fleet
-	// probe and the Shelly plug reads entirely when serving it. Zero value is false: a new route needs the
-	// probe by default and must opt out explicitly and correctly, rather than
-	// silently inherit an exemption because its path happened to match a
-	// hardcoded prefix meant for someone else's routes. That is what went
-	// wrong before this field existed -- see rz0.
+	// probe and the Shelly plug reads entirely when serving it. Zero value is
+	// false: a new route needs the probe by default and must opt out
+	// explicitly and correctly, rather than silently inherit an exemption
+	// because its path happened to match a hardcoded prefix meant for someone
+	// else's routes. That is what went wrong before this field existed -- see
+	// rz0.
 	SkipsProbe bool
 	// Needs declares the request-scoped State this route reads beyond the
 	// snapshot -- the peer's job, the Gogios mute, the alert report -- in its
@@ -105,6 +106,9 @@ type Route struct {
 	// Fetch each declared Need's Provider supplies and nothing else (see
 	// enrichState), so each costly round trip is paid only by the routes that
 	// use its answer. See Need and Provider.
+	//
+	// The Fetches run in declaration order, one after another, so the order
+	// of Needs is the order of the round trips a request makes.
 	//
 	// Unlike SkipsProbe this is opt-in: a route declares what it reads rather
 	// than what it may skip. The guard is a test rather than the zero value

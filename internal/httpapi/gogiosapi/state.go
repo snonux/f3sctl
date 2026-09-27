@@ -49,7 +49,7 @@ func WithMonitoring(s contract.State, gws []gogios.GatewayMute) contract.State {
 // Report returns the fetched-or-cached alert report in s, and the fetch
 // error when there is none. Both are nil when the report was not collected
 // for this request (the route did not declare NeedReport) -- the same
-// pattern as contract.State's Fans/FansErr.
+// pattern as powerapi.Snapshot's Fans/FansErr.
 func Report(s contract.State) (*gogios.Report, error) {
 	rs := reportSlot.Get(s)
 	return rs.report, rs.err

@@ -168,7 +168,7 @@ func TestReportFetchFailureRendersAsToday(t *testing.T) {
 func TestReportNeedIsFilledThroughTheSurfacesSource(t *testing.T) {
 	reports := &fakeReports{report: needsReport}
 	inv := inventory.Default()
-	srv := (&Server{}).assemble(inv, testPowerSurface(inv, ""), gogiosSurfaceOver("", reports, nil), "")
+	srv := (&Server{}).assemble(inv, testPowerSurface(inv, ""), gogiosSurfaceOver("", reports, noGateways), "")
 
 	fetch, ok := srv.fetchers[gogiosapi.NeedReport]
 	if !ok {
@@ -189,7 +189,7 @@ func TestReportNeedIsFilledThroughTheSurfacesSource(t *testing.T) {
 // and the same one on every call -- so the surface's reads and its cache
 // clear always meet at one cache.
 func TestProductionGogiosSurfaceOwnsARealSource(t *testing.T) {
-	factory := productionGogiosSurface(serverTestConfig(t, "sekrit"), "test", contract.Hrefs(""), nil)
+	factory := productionGogiosSurface(serverTestConfig(t, "sekrit"), "test", contract.Hrefs(""), noGateways)
 	actions := (&Server{}).actionRenderer()
 
 	first := factory(actions).Reports()

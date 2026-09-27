@@ -32,7 +32,7 @@ func (echoActions) SectionActions(_ contract.State, section string) []contract.A
 // testNew is New with inert collaborators and the echo renderer: enough to
 // declare the table and serve every resource that reads only state.
 func testNew(inv inventory.Inventory) *Surface {
-	return New("test", contract.Hrefs(""), inv, nil, nil, nil, echoActions{})
+	return New("test", contract.Hrefs(""), inv, nil, nil, nil, nil, echoActions{})
 }
 
 // TestNewRejectsANilActionRenderer pins the constructor's guard: a Surface
@@ -45,7 +45,7 @@ func TestNewRejectsANilActionRenderer(t *testing.T) {
 			t.Error("New with a nil ActionRenderer returned a Surface; want a panic")
 		}
 	}()
-	New("test", contract.Hrefs(""), inventory.Default(), nil, nil, nil, nil)
+	New("test", contract.Hrefs(""), inventory.Default(), nil, nil, nil, nil, nil)
 }
 
 // TestConstructedSurfaceRendersActionsThroughItsRenderer serves every

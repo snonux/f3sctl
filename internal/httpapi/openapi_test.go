@@ -157,8 +157,8 @@ func docServer(t *testing.T, o docOpts) *Server {
 	cfg := config.Default()
 	cfg.StateDir = dir
 	inv := inventory.Default()
-	pw := func(a contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", contract.Hrefs(""), inv, o.eng, o.jobs, o.peers, a)
+	pw := func(a contract.ActionRenderer, p powerapi.Prober) *powerapi.Surface {
+		return powerapi.New("test", contract.Hrefs(""), inv, o.eng, p, o.jobs, o.peers, a)
 	}
 	gg := gogiosSurfaceOver("", unreachableReports(), docMonitor{Monitor: o.monitor, muted: o.muted})
 	return (&Server{

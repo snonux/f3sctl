@@ -105,8 +105,8 @@ func jobGateServer(t *testing.T, plugsOn bool, src jobSource) (*Server, *plugRec
 	jobs := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), 0)
 	eng := &plugRecorder{}
 	inv := inventory.Default()
-	surface := func(a contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", contract.Hrefs(""), inv, eng, jobs, peers, a)
+	surface := func(a contract.ActionRenderer, p powerapi.Prober) *powerapi.Surface {
+		return powerapi.New("test", contract.Hrefs(""), inv, eng, p, jobs, peers, a)
 	}
 	srv := (&Server{
 		cfg: cfg, jobs: jobs, peers: peers,

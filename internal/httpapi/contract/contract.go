@@ -13,10 +13,14 @@
 // State carries only what every surface shares: this node's job and whether
 // the peer is busy. A domain's own request state (the power surface's fleet
 // snapshot, the Gogios mute and alert report) is kept by the surface owning
-// it, under a Slot of its own; what costs a round trip is gathered on demand
-// by that surface's Providers for the Needs its routes declare. So this
-// package imports no domain package, and adding a domain edits neither this
-// package nor the composition root's enrichState.
+// it, under a Slot of its own, and read through that surface's own
+// collaborators. What costs a round trip is gathered on demand by the
+// surface's Providers for the Needs its routes declare (opt-in, per route).
+// The one exception to that shape is the fleet snapshot: the power surface
+// takes it (powerapi.Surface.Probe), but for every route not declaring
+// SkipsProbe (opt-out), so the composition root calls it directly rather than
+// through a Need. Either way this package imports no domain package, and a
+// new domain's state edits neither this package nor the root's enrichState.
 //
 // Siren (https://github.com/kevinswiber/siren) is used rather than HAL because
 // HAL describes links but not *actions*: it can say "here is the fans

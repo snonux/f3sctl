@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/snonux/f3sctl/internal/gogios"
@@ -55,12 +56,28 @@ func actionNames(e contract.Entity) []string {
 // -- indistinguishable, to a client, from "nothing is possible right now" --
 // so New refuses to build one at all.
 func TestNewRejectsANilActionRenderer(t *testing.T) {
-	defer func() {
-		if recover() == nil {
-			t.Error("New with a nil ActionRenderer returned a Surface; want a panic")
-		}
-	}()
-	New("test", contract.Hrefs(""), &fakeReports{}, nil, nil)
+	defer wantPanic(t, "nil ActionRenderer")
+	New("test", contract.Hrefs(""), &fakeReports{}, fakeMonitor{}, nil)
+}
+
+// TestNewRejectsANilMonitor pins the Monitor guard: the NeedMonitoring
+// Provider reads the mute through it for GET /gogios and every route
+// rendering the mute pair, so a Surface without one would crash the Gogios
+// folder on its first request rather than only the mute routes.
+func TestNewRejectsANilMonitor(t *testing.T) {
+	defer wantPanic(t, "nil Monitor")
+	New("test", contract.Hrefs(""), &fakeReports{}, nil, echoActions{})
+}
+
+// wantPanic fails t unless the deferred call recovers a panic naming what,
+// so each constructor guard is pinned by its own refusal rather than by
+// whichever guard happens to fire first.
+func wantPanic(t *testing.T, what string) {
+	t.Helper()
+	p := recover()
+	if msg, _ := p.(string); !strings.Contains(msg, what) {
+		t.Errorf("New recovered %v, want a panic naming %q", p, what)
+	}
 }
 
 // TestNewRejectsANilReportSource pins the other constructor guard: the
@@ -74,12 +91,8 @@ func TestNewRejectsANilReportSource(t *testing.T) {
 		"nil *gogios.Source": (*gogios.Source)(nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			defer func() {
-				if recover() == nil {
-					t.Error("New with a nil ReportSource returned a Surface; want a panic")
-				}
-			}()
-			New("test", contract.Hrefs(""), reports, nil, echoActions{})
+			defer wantPanic(t, "nil ReportSource")
+			New("test", contract.Hrefs(""), reports, fakeMonitor{}, echoActions{})
 		})
 	}
 }

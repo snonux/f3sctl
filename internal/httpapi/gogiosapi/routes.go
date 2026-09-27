@@ -118,7 +118,7 @@ func (sf *Surface) overviewRoute() contract.Route {
 		// snapshot. The folder also advertises the mute pair, judged on
 		// the gateway mute -- hence NeedMonitoring too.
 		SkipsProbe: true,
-		Needs:      contract.Needs{NeedReport, NeedMonitoring},
+		Needs:      contract.Needs{NeedMonitoring, NeedReport},
 		Handle:     sf.handleOverview,
 	}
 }

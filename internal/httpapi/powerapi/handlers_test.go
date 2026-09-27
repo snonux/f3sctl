@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -89,7 +90,7 @@ func testSurface(t *testing.T, plug *fakePlug, confirm func(context.Context) pow
 	// switching (jobStartedMeanwhile), and a nil here would panic -- which is
 	// the point, since production always wires both.
 	jobs := coordination.NewManager(t.TempDir(), cfg.UnmuteTimeout.D(), 0)
-	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, jobs, coordination.NewPeerSet(nil, ""), echoActions{})
+	sf := New("test", contract.Hrefs(""), cfg.Inventory, eng, eng, jobs, coordination.NewPeerSet(nil, ""), echoActions{})
 	sf.RackConfirm = confirm
 	sf.ACConfirm = confirm
 	return sf
@@ -110,6 +111,17 @@ func coldSnapshot() contract.State {
 		},
 		Fans: power.FansState{On: true},
 	})
+}
+
+// hotSnapshot is coldSnapshot with f1 answering: a new Snapshot stored over
+// the cold one, never a write into the cold one's Hosts, which State copies
+// share (see WithSnapshot).
+func hotSnapshot() contract.State {
+	cold := coldSnapshot()
+	snap := SnapshotOf(cold)
+	snap.Hosts = slices.Clone(snap.Hosts)
+	snap.Hosts[1] = fState("f1", true, true)
+	return WithSnapshot(cold, snap)
 }
 
 // forced is a POST /fans/off carrying the confirmation checkbox.
@@ -232,8 +244,7 @@ func TestFansOffRefusedWhileAHostAnswers(t *testing.T) {
 		return power.RackActivity{}
 	})
 
-	hot := coldSnapshot()
-	SnapshotOf(hot).Hosts[1] = fState("f1", true, true)
+	hot := hotSnapshot()
 
 	_, status, err := sf.handleFansOff(context.Background(), hot, contract.Request{})
 	if status != http.StatusConflict {
@@ -313,8 +324,7 @@ func TestFansOffWithForceSkipsTheGuardEntirely(t *testing.T) {
 		return power.RackActivity{}
 	})
 
-	hot := coldSnapshot()
-	SnapshotOf(hot).Hosts[1] = fState("f1", true, true)
+	hot := hotSnapshot()
 
 	if _, status, err := sf.handleFansOff(context.Background(), hot, forced()); err != nil || status != http.StatusOK {
 		t.Fatalf("forced fans off: status = %d, err = %v", status, err)
@@ -433,7 +443,7 @@ func testSurfaceWithPeer(t *testing.T, peer *httptest.Server) *Surface {
 	t.Helper()
 	jobs := coordination.NewManager(t.TempDir(), config.Default().UnmuteTimeout.D(), power.ShutdownWorstCase(config.Default()))
 	peers := &coordination.PeerSet{Nodes: []string{peer.Listener.Addr().String()}, JobPath: "/job"}
-	return New("test", contract.Hrefs(""), inventory.Inventory{}, nil, jobs, peers, echoActions{})
+	return New("test", contract.Hrefs(""), inventory.Inventory{}, nil, nil, jobs, peers, echoActions{})
 }
 
 // TestHandleJobMergesLocalAndPeerJobs pins currentJob's purpose end to end:

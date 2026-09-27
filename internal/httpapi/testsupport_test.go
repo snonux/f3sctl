@@ -24,20 +24,22 @@ import (
 
 // testPowerSurface returns a factory for the power surface with inert
 // collaborators, building its links under base, for Server.build (via
-// assemble) to bind to its renderer. base must be the one the Server is
+// assemble) to bind to its renderer and its Prober -- the Server's own, so a
+// test's probeHosts/fansStatus/acStatus hooks are what the surface's snapshot
+// reads. base must be the one the Server is
 // assembled with, as newServer shares one base between the two.
 func testPowerSurface(inv inventory.Inventory, base string) powerSurfaceFunc {
-	return func(actions contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", contract.Hrefs(base), inv, nil, nil, nil, actions)
+	return func(actions contract.ActionRenderer, p powerapi.Prober) *powerapi.Surface {
+		return powerapi.New("test", contract.Hrefs(base), inv, nil, p, nil, nil, actions)
 	}
 }
 
 // testGogiosSurface returns a factory for the Gogios surface with inert
-// collaborators (see testPowerSurface): no Monitor, and unreachableReports as
-// its report source, so no test serving a report route through it can reach
-// the real Gogios.
+// collaborators (see testPowerSurface): noGateways as its Monitor, and
+// unreachableReports as its report source, so no test serving a Gogios route
+// through it can reach a real gateway or the real Gogios.
 func testGogiosSurface(base string) gogiosSurfaceFunc {
-	return gogiosSurfaceOver(base, unreachableReports(), nil)
+	return gogiosSurfaceOver(base, unreachableReports(), noGateways)
 }
 
 // gogiosSurfaceOver returns a factory for the Gogios surface reading its
@@ -60,6 +62,10 @@ func (m mutesRead) MonitoringStatus(ctx context.Context) []gogios.GatewayMute { 
 func (mutesRead) MuteGogios(context.Context, io.Writer) error { return errMuteReadOnly }
 
 func (mutesRead) UnmuteNow(context.Context, io.Writer) error { return errMuteReadOnly }
+
+// noGateways is a Monitor with no gateways at all: the mute reads as nothing
+// (neither mute action is offered) and a mute or un-mute fails.
+var noGateways = mutesRead(func(context.Context) []gogios.GatewayMute { return nil })
 
 // errMuteReadOnly is what a mutesRead answers a mute or un-mute with.
 var errMuteReadOnly = errors.New("mutesRead: this test's gateways are read-only")
@@ -120,7 +126,7 @@ func testRoutes(inv inventory.Inventory) []contract.Route {
 func declaredRoutes(inv inventory.Inventory) []contract.Route {
 	srv := &Server{}
 	actions := srv.actionRenderer()
-	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions), testGogiosSurface("")(actions))
+	return srv.buildRoutes(inv, testPowerSurface(inv, "")(actions, nil), testGogiosSurface("")(actions))
 }
 
 // assemble is Server.build for tests, whose route tables are known to be

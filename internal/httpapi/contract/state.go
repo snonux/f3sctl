@@ -57,9 +57,16 @@ func NewSlot[T any](name string) *Slot[T] { return &Slot[T]{name: name} }
 func (k *Slot[T]) String() string { return k.name }
 
 // Lookup returns the value stored under k in s, and whether one was stored.
+// A stored nil -- of an interface or pointer T -- is still stored: it reads
+// back as nil, true, not as nothing stored.
 func (k *Slot[T]) Lookup(s State) (T, bool) {
-	v, ok := s.domains[k].(T)
-	return v, ok
+	v, ok := s.domains[k]
+	if !ok {
+		var zero T
+		return zero, false
+	}
+	t, _ := v.(T) // only With stores under k, so v is a T -- or a nil one
+	return t, true
 }
 
 // Get returns the value stored under k in s, or T's zero value when none was
@@ -72,6 +79,10 @@ func (k *Slot[T]) Get(s State) T {
 // With returns s with v stored under k. s itself is left unchanged: the
 // domain map is copied rather than written through, so a State passed by
 // value never aliases another's domain state.
+//
+// The copy is shallow: v itself is stored as given, so a slice or pointer
+// inside it is shared with every State it was stored in. A surface changes
+// its state by storing a new value, never by writing through one it read.
 func (k *Slot[T]) With(s State, v T) State {
 	m := make(map[any]any, len(s.domains)+1)
 	maps.Copy(m, s.domains)

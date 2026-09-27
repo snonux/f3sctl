@@ -12,8 +12,8 @@
 //
 // A deliberate subtlety of the split: the power ENGINE (internal/power)
 // remains one implementation shared by the CLI and this surface, and this
-// package never imports it wholesale -- it depends on the three slices of it
-// it actually drives (Engine, Jobs, Peers below), declared as interfaces so
+// package never imports it wholesale -- it depends on the slices of it it
+// actually drives (Engine, Prober, Jobs, Peers below), declared as interfaces so
 // the surface can be table-declared, tested and served without a real engine
 // on the end of them.
 package powerapi
@@ -86,6 +86,8 @@ type Surface struct {
 	// drives directly (the plug write, and the strict rack-activity probe the
 	// fan guard confirms with).
 	Engine Engine
+	// Prober reads the fleet for the per-request Snapshot (see Probe).
+	Prober Prober
 	// Jobs starts a detached power job and reports its staleness ceiling.
 	Jobs Jobs
 	// Peers asks the other API node about its job state.
@@ -153,13 +155,13 @@ type Peers interface {
 // caller, not a state to serve in. In production actions resolves the
 // composition root's Router lazily, since the Router is built from the very
 // route table this Surface declares.
-func New(node string, href func(string) string, inv inventory.Inventory, eng Engine, jobs Jobs, peers Peers, actions contract.ActionRenderer) *Surface {
+func New(node string, href func(string) string, inv inventory.Inventory, eng Engine, probe Prober, jobs Jobs, peers Peers, actions contract.ActionRenderer) *Surface {
 	if actions == nil {
 		panic("powerapi: New called with a nil ActionRenderer")
 	}
 	return &Surface{
 		Node: node, Href: href, Inv: inv,
-		Engine: eng, Jobs: jobs, Peers: peers,
+		Engine: eng, Prober: probe, Jobs: jobs, Peers: peers,
 		actions: actions,
 	}
 }

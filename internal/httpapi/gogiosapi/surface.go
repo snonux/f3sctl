@@ -32,9 +32,10 @@ import (
 // Everything here is injected by the composition root (internal/httpapi) when
 // it assembles a Server: the node name and href builder identify this
 // deployment, reports is where the alert report comes from, and Monitor is
-// the one slice of the power engine the mute drives. Nil Href/Monitor are
-// safe at table-declaration time -- the closures dereference them only while
-// serving the route that needs them.
+// the one slice of the power engine the mute drives and the mute state is
+// read through. A nil Href is safe at table-declaration time -- the closures
+// dereference it only while serving a route; New rejects a nil Monitor,
+// reports or renderer outright.
 type Surface struct {
 	// Node is this node's hostname, reported on every entity ("node"
 	// property) so a client can tell which of pi0/pi1 answered.
@@ -88,18 +89,23 @@ type ReportSource interface {
 // New returns a Surface bound to its collaborators, reading the alert report
 // from reports and rendering every actions list through actions.
 //
-// It panics on a nil reports or actions: unlike Monitor, which a test serving
-// only the report routes may leave nil, the report routes read through
-// reports and every resource with controls renders through actions -- a
-// Surface without either is a wiring bug in the caller, not a state to serve
-// in. A nil *gogios.Source wrapped in the interface (the production type) is
-// caught too; any other typed nil is the caller's to avoid, as checking for it
-// in general would take reflection. In production actions resolves the
-// composition root's Router lazily, since the Router is built from the very
-// route table this Surface declares.
+// It panics on a nil reports, monitor or actions: the report routes read
+// through reports, the NeedMonitoring Provider -- run for GET /gogios and
+// every other route rendering the mute pair, not only the mute routes --
+// reads through monitor, and every resource with controls renders through
+// actions. A Surface without any of them is a wiring bug in the caller, not a
+// state to serve in; a test that never mutes still passes a Monitor (a fake
+// that reads no gateways, say). A nil *gogios.Source wrapped in the interface
+// (the production type) is caught too; any other typed nil is the caller's to
+// avoid, as checking for it in general would take reflection. In production
+// actions resolves the composition root's Router lazily, since the Router is
+// built from the very route table this Surface declares.
 func New(node string, href func(string) string, reports ReportSource, monitor Monitor, actions contract.ActionRenderer) *Surface {
 	if src, ok := reports.(*gogios.Source); reports == nil || (ok && src == nil) {
 		panic("gogiosapi: New called with a nil ReportSource")
+	}
+	if monitor == nil {
+		panic("gogiosapi: New called with a nil Monitor")
 	}
 	if actions == nil {
 		panic("gogiosapi: New called with a nil ActionRenderer")

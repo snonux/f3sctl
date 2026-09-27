@@ -123,8 +123,8 @@ func needsServer(t *testing.T) *Server {
 	inv := inventory.Default()
 
 	href := contract.Hrefs("")
-	pw := func(a contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", href, inv, &plugRecorder{}, needsJobs{}, peers, a)
+	pw := func(a contract.ActionRenderer, p powerapi.Prober) *powerapi.Surface {
+		return powerapi.New("test", href, inv, &plugRecorder{}, p, needsJobs{}, peers, a)
 	}
 	return (&Server{
 		cfg: cfg, jobs: jobs, peers: peers, siren: NewSirenRenderer(), node: "test",
@@ -332,8 +332,8 @@ func fetchCountingServer(t *testing.T) (*Server, *fetchCounts) {
 		probeHosts: func(context.Context) []power.HostStatus { return nil },
 		fansStatus: func(context.Context) (power.FansState, error) { return power.FansState{}, nil },
 		acStatus:   func(context.Context) (power.ACState, error) { return power.ACState{}, nil },
-	}).assemble(inv, func(a contract.ActionRenderer) *powerapi.Surface {
-		return powerapi.New("test", href, inv, &plugRecorder{}, jobs, peers, a)
+	}).assemble(inv, func(a contract.ActionRenderer, p powerapi.Prober) *powerapi.Surface {
+		return powerapi.New("test", href, inv, &plugRecorder{}, p, jobs, peers, a)
 	}, gogiosSurfaceOver("", fc.reports, gw), ""), fc
 }
 
@@ -575,4 +575,33 @@ func TestEnrichStatePanicsOnAnUnprovidedNeed(t *testing.T) {
 		}
 	}()
 	srv.enrichState(context.Background(), contract.State{}, r, getRequest("/"))
+}
+
+// TestNeedsAreFetchedInDeclarationOrder pins the order Route.Needs promises:
+// enrichState runs the Fetches one after another in the order the route
+// declares its Needs -- and the Gogios folder declares the gateway mute
+// before the report, the order it was fetched in before Needs were a set.
+func TestNeedsAreFetchedInDeclarationOrder(t *testing.T) {
+	first, second := contract.NewNeed("first"), contract.NewNeed("second")
+	var order []string
+	record := func(name string) contract.Fetch {
+		return func(_ context.Context, s contract.State, _ contract.Request) contract.State {
+			order = append(order, name)
+			return s
+		}
+	}
+	srv := &Server{fetchers: map[*contract.Need]contract.Fetch{first: record("first"), second: record("second")}}
+
+	srv.enrichState(context.Background(), contract.State{}, contract.Route{Needs: contract.Needs{second, first}}, contract.Request{})
+	if !slices.Equal(order, []string{"second", "first"}) {
+		t.Errorf("fetch order = %v, want the declaration order [second first]", order)
+	}
+
+	r, ok := routeNamed(testServer(), "gogios")
+	if !ok {
+		t.Fatal("no gogios route")
+	}
+	if want := (contract.Needs{gogiosapi.NeedMonitoring, gogiosapi.NeedReport}); !slices.Equal(r.Needs, want) {
+		t.Errorf("GET /gogios Needs = %v, want %v: the mute is fetched before the report", r.Needs, want)
+	}
 }

@@ -69,8 +69,8 @@ func TestGuardsNeedTheInventory(t *testing.T) {
 	if configured.rackBusy(s).Busy() || configured.acBusy(s).Busy() {
 		t.Error("rackBusy/acBusy with the default inventory call a silent f0 busy")
 	}
-	SnapshotOf(s).Hosts[0].Ping = true
-	if !configured.rackBusy(s).Busy() || !configured.acBusy(s).Busy() {
+	running := WithSnapshot(s, Snapshot{Hosts: []power.HostStatus{{Name: "f0", Role: "f", PingKnown: true, Ping: true}}})
+	if !configured.rackBusy(running).Busy() || !configured.acBusy(running).Busy() {
 		t.Error("rackBusy/acBusy with the default inventory ignore a running f0")
 	}
 }

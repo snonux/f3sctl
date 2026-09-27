@@ -71,3 +71,18 @@ func TestSlotWithKeepsValueSemantics(t *testing.T) {
 		t.Errorf("With dropped the rest of the State: other = %d, PeerBusy = %v", got, changed.PeerBusy)
 	}
 }
+
+// TestSlotStoresANilInterface pins Lookup on an interface-typed Slot: a nil
+// stored there -- a fetch that succeeded, recording "no error" -- is still
+// stored, and must not read back as nothing collected at all.
+func TestSlotStoresANilInterface(t *testing.T) {
+	k := NewSlot[error]("err")
+
+	if _, ok := k.Lookup(State{}); ok {
+		t.Error("Lookup on an empty State found an error slot")
+	}
+	got, ok := k.Lookup(k.With(State{}, nil))
+	if !ok || got != nil {
+		t.Errorf("Lookup after With(nil) = %v, %v; want nil, true", got, ok)
+	}
+}
