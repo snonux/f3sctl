@@ -65,6 +65,7 @@ func (c *ProbeClient) SSH(ctx context.Context, ip string, port int) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	// Only whether the dial succeeded matters; a close error changes nothing.
+	_ = conn.Close()
 	return true
 }
