@@ -32,19 +32,20 @@ import (
 // SCRIPT_NAME mount point. coordination.PeerSet.JobPath is the *full* URL
 // path (mount point included) a peer's job is fetched from over a real HTTP
 // connection; as of uy0 the two are the SAME value by construction in the
-// default case -- resolvePeerJobPath (in the composition root) builds
-// PeerSet.JobPath from this node's own router.Href(JobPath), i.e. this
-// constant plus this node's own SCRIPT_NAME, and passes it to
-// coordination.NewPeerSet. It only diverges from that derivation when
+// default case -- coordination.ResolvePeerJobPath builds PeerSet.JobPath
+// from this node's own SCRIPT_NAME plus coordination.JobPath, which this
+// constant is, and the composition root hands it to the PeerSet (through
+// jobcoord.PeersFor). It only diverges from that derivation when
 // config.Config.PeerJobPath is explicitly set to override it (the
 // asymmetric-mount case; see that field's doc comment) --
 // config.Config.PeerJobPath itself stays empty in the default case, since
-// resolvePeerJobPath never writes back into it.
+// ResolvePeerJobPath never writes back into it.
 //
-// Named because the composition root builds that peer URL from it, and the
-// job route and every link to it share it. The job route declares no
+// Named because the peer URL is built from it, and the job route and every
+// link to it share it. Its value lives in coordination so that derivation
+// needs no import of this surface. The job route declares no
 // contract.NeedPeerBusy on purpose -- see its declaration in routes.go.
-const JobPath = "/job"
+const JobPath = coordination.JobPath
 
 // StatusPath is PATH_INFO for the status route, shared by the route and every
 // link to it.

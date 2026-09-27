@@ -81,6 +81,9 @@ flowchart TD
     CLI --> CLIENT["internal/client<br/>hypermedia client"]
     CLIENT -->|HTTPS| API
     API --> COORD["internal/coordination<br/>job lock, peer check, spawn"]
+    CLI -->|"plug guard"| JOBCOORD["internal/jobcoord<br/>Manager + PeerSet from config"]
+    API --> JOBCOORD
+    JOBCOORD --> COORD
     COORD --> POWER
     CLI --> POWER["internal/power<br/><b>the engine</b>"]
     POWERAPI -->|"Engine · Jobs · Peers<br/>(slices of the real ones)"| POWER
@@ -250,10 +253,14 @@ new job may start, and the old child must not overwrite it when it finally
 returns.
 
 The local `f3sctl fans off` and `ac off` stay out of a job's way with the
-same pieces: they ask the API nodes (`PeerSet`), then run the plug write
-inside `Manager.WhileIdle`, which refuses while `job.json` records a running
-job and holds the flock across the write, so a `Start` in that moment is
-refused rather than cycling the rack under a plug being switched. `fans on`
+same pieces, built from config by `internal/jobcoord` exactly as the API and
+the job child build theirs: they ask the API nodes (`PeerSet.RunningJob`),
+then run the plug write inside `Manager.WhileIdle`, which refuses while
+`job.json` records a running job and holds the flock across the write, so a
+`Start` in that moment is refused rather than cycling the rack under a plug
+being switched. Both fail closed where the API's own check fails open: a
+node that answers without a job (a wrong key's 401) or a `job.json` that
+cannot be read refuses; only an unreachable node counts as idle. `fans on`
 and `ac on` are not gated: they are the recovery path for a job whose process
 died.
 

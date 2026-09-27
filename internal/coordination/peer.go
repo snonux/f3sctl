@@ -93,11 +93,47 @@ func NewPeerSet(nodes []string, jobPath string) *PeerSet {
 //
 // A fetch failure is still reported (see ps.warnFunc / warnPeerFetchFailed)
 // rather than swallowed outright: silently continuing past every error here
-// is exactly what let a mis-derived JobPath (see httpapi.resolvePeerJobPath)
+// is exactly what let a mis-derived JobPath (see ResolvePeerJobPath)
 // look identical, from the field, to a peer that is genuinely down. The
 // behaviour -- treat as idle -- does not change; only whether anything is
 // left behind to debug it with.
 func (ps *PeerSet) Busy(ctx context.Context, self, apiKey string) (bool, string) {
+	// Lenient: every fetch error counts as idle, so err is always nil here.
+	job, _ := ps.runningJob(ctx, self, apiKey, false)
+	if job != nil {
+		return true, job.Node
+	}
+	return false, ""
+}
+
+// ErrPeerJobUnknown wraps a peer that answered RunningJob's question but not
+// with a job: a non-200 status (401 for a wrong or rotated API key, 404 for
+// a wrong peer_job_path, 5xx for a broken node) or a body that is not a job.
+var ErrPeerJobUnknown = errors.New("an API node answered but did not say whether it is running a job")
+
+// RunningJob is Busy for a caller outside the API -- the local `fans off` /
+// `ac off` guard in internal/cli -- that must not read a peer it could not
+// understand as idle. It returns the first running job a peer reports.
+//
+// Only a peer that could not be reached at all (connection refused, timed
+// out, dropped mid-answer: the node is down, the case Busy's fail-open
+// exists for) is skipped as idle, with the same warning. A peer that
+// answered with anything but a job makes it return an error wrapping
+// ErrPeerJobUnknown: that is this caller's configuration (its API key, the
+// job path) talking, and treating it as idle would switch a plug under a
+// job nobody could see.
+//
+// The API itself keeps Busy: a CGI node's peer check must not start
+// refusing every action over the other node's misconfiguration.
+func (ps *PeerSet) RunningJob(ctx context.Context, self, apiKey string) (*Job, error) {
+	return ps.runningJob(ctx, self, apiKey, true)
+}
+
+// runningJob asks every other node in turn for its job and returns the first
+// running one. strict decides what an error does: lenient (Busy) warns and
+// skips every one; strict (RunningJob) skips only an unreachable peer and
+// returns any other failure.
+func (ps *PeerSet) runningJob(ctx context.Context, self, apiKey string, strict bool) (*Job, error) {
 	selfHost := shortHost(self)
 
 	for _, addr := range ps.Nodes {
@@ -107,14 +143,18 @@ func (ps *PeerSet) Busy(ctx context.Context, self, apiKey string) (bool, string)
 
 		job, err := ps.fetchPeer(ctx, addr, apiKey)
 		if err != nil {
+			var unreachable *peerUnreachableError
+			if strict && !errors.As(err, &unreachable) {
+				return nil, fmt.Errorf("%w: %w", ErrPeerJobUnknown, err)
+			}
 			ps.warnFunc()(addr, err)
 			continue
 		}
 		if job != nil && job.State == JobRunning {
-			return true, job.Node
+			return job, nil
 		}
 	}
-	return false, ""
+	return nil, nil
 }
 
 // FetchJob asks each node in the set for its current or last job in turn,
@@ -185,7 +225,7 @@ func (ps *PeerSet) warnFunc() func(addr string, err error) {
 // problems: the former is a peer that is plausibly actually down, which is
 // the case Busy's "treat as idle" is designed for; the latter -- e.g. a 404
 // -- is much more likely this node asking the wrong path, such as the
-// empty-SCRIPT_NAME derivation bug resolvePeerJobPath guards against.
+// empty-SCRIPT_NAME derivation bug ResolvePeerJobPath guards against.
 func warnPeerFetchFailed(addr string, err error) {
 	fmt.Fprintf(os.Stderr, "f3sctl: peer %s fetch failed (%s, treating peer as idle): %v\n",
 		addr, peerFetchFailureKind(err), err)
@@ -210,7 +250,7 @@ func peerFetchFailureKind(err error) string {
 // out, DNS failure, ...). warnPeerFetchFailed distinguishes the two: this
 // one means the peer is reachable but something about the request was
 // wrong -- e.g. the path this node asked for is not served there, which is
-// what a mis-derived JobPath (see httpapi.resolvePeerJobPath) would produce.
+// what a mis-derived JobPath (see ResolvePeerJobPath) would produce.
 type peerHTTPStatusError struct {
 	addr   string
 	status string
@@ -218,6 +258,70 @@ type peerHTTPStatusError struct {
 
 func (e *peerHTTPStatusError) Error() string {
 	return fmt.Sprintf("peer %s returned %s", e.addr, e.status)
+}
+
+// peerUnreachableError means the request to a peer never completed: it
+// could not be dialled, timed out, or the connection dropped before the
+// answer was read. It is the one failure RunningJob may read as an idle peer
+// (the node is down), unlike an answer it could not use.
+type peerUnreachableError struct {
+	addr string
+	err  error
+}
+
+func (e *peerUnreachableError) Error() string {
+	return fmt.Sprintf("peer %s unreachable: %v", e.addr, e.err)
+}
+
+func (e *peerUnreachableError) Unwrap() error { return e.err }
+
+// JobPath is the job resource's path under the API's CGI mount point:
+// powerapi serves its job route here, and a peer's job is fetched from the
+// mount plus this. Declared on this side so the peer path can be derived
+// without this package importing the REST surface.
+const JobPath = "/job"
+
+// DefaultCGIMount is this project's own documented CGI mount convention (see
+// README.md's example config, and config.Default() before uy0). It is the
+// last-resort fallback ResolvePeerJobPath uses when there is no mount to
+// derive anything from -- see that function's doc comment for why an empty
+// base cannot be trusted as "mounted at the root".
+const DefaultCGIMount = "/cgi-bin/f3sctl"
+
+// ResolvePeerJobPath returns the URL path at which a peer's current job is
+// asked for (PeerSet.JobPath). explicit is config.Config.PeerJobPath; base is
+// the asking CGI node's own mount point (SCRIPT_NAME without its trailing
+// slash), or "" for a process that is not serving a CGI request.
+//
+// An explicit path always wins, for the rare case where the two peers are
+// not mounted the same way. Otherwise (the default) it is derived from this
+// node's own mount -- the identical mechanism every link and action handed
+// back to a client already goes through -- on the assumption that pi0 and
+// pi1 are symmetric peers sharing one CGI mount. That keeps a SCRIPT_NAME
+// remount a one-place change instead of two: without this, an operator who
+// moves the mount point but forgets the separate peer_job_path config value
+// gets a peer check that silently reads back as idle forever, which is the
+// dangerous failure mode -- two jobs can start.
+//
+// The one case that derivation must NOT be trusted for: base itself being
+// empty. For a CGI node that happens whenever its own SCRIPT_NAME was empty
+// or missing (bozohttpd not setting it, a proxy that strips the header,
+// ServeCGI invoked outside its normal CGI harness) -- and an empty
+// SCRIPT_NAME is far more likely to be a broken environment than a
+// deliberate "the API is mounted at the filesystem root". Deriving anyway
+// would silently hand PeerSet a bare "/job", which almost certainly 404s on
+// the peer, and Busy treats every fetch error as "peer not busy". Falling
+// back to DefaultCGIMount is a safer bet, and matches every real deployment
+// of this project. It is also the whole answer for a caller with no mount of
+// its own, such as the local plug guard.
+func ResolvePeerJobPath(explicit, base string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if base == "" {
+		base = DefaultCGIMount
+	}
+	return base + JobPath
 }
 
 // PeerQueryParam marks a GET /job request as one node asking another for its
@@ -263,7 +367,7 @@ func fetchPeerJob(ctx context.Context, addr, path, apiKey string) (*Job, error) 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, &peerUnreachableError{addr: addr, err: err}
 	}
 	defer resp.Body.Close()
 
@@ -276,7 +380,7 @@ func fetchPeerJob(ctx context.Context, addr, path, apiKey string) (*Job, error) 
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
-		return nil, err
+		return nil, &peerUnreachableError{addr: addr, err: err}
 	}
 	if err := json.Unmarshal(body, &e); err != nil {
 		return nil, err

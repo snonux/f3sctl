@@ -22,15 +22,17 @@ f3sctl ac status|on|off      # f-host mains AC (shelly2); independent of power o
 
 `fans off` and `ac off` refuse while a host they serve may still be up, and
 while a power job is running: in this host's own job state (`state_dir`) or
-on any API node in `peer_nodes`, asked with the API key the way the API asks
-its peer (an unreachable node counts as idle; with no key only this host is
-checked). The rack-wide jobs switch the fan plug themselves and
-`power all cycle` cuts and restores AC, so a manual switch mid-job would race
-them. The switch runs holding this host's job lock, so no job can start on it
-meanwhile, and a job state that cannot be read (a Pi without `doas`) refuses
-rather than guesses. `--force` skips all of it. `fans on` and `ac on` are
-never gated: they are the way out when a job's process died and its state
-still reads "running".
+on any API node in `peer_nodes`, asked with the API key (`F3SCTL_KEY` or
+`api_key_file`) the way the API asks its peer. The rack-wide jobs switch the
+fan plug themselves and `power all cycle` cuts and restores AC, so a manual
+switch mid-job would race them. The switch runs holding this host's job
+lock, so no job can start on it meanwhile. Not knowing is not idle: a job
+state this user cannot read, no API key to ask the nodes with, or a node
+that answers without saying (a 401 for a wrong key, a 404 for a wrong
+`peer_job_path`) refuses too; only a node that cannot be reached at all
+counts as idle, so one dead Pi does not lock the plugs. `--force` skips all
+of it. `fans on` and `ac on` are never gated: they are the way out when a
+job's process died and its state still reads "running".
 
 **Shutdowns always go through the API**, from anywhere including a Pi. Only
 pi0/pi1 can actually perform one — the restricted SSH key is pinned to them —

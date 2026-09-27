@@ -19,7 +19,7 @@ import (
 
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
-	"github.com/snonux/f3sctl/internal/httpapi"
+	"github.com/snonux/f3sctl/internal/jobcoord"
 	"github.com/snonux/f3sctl/internal/power"
 	"github.com/snonux/f3sctl/internal/presenter"
 )
@@ -158,11 +158,10 @@ func runPlug(ctx context.Context, cfg config.Config, p plug, args []string, forc
 		liveHosts = p.liveHosts(eng)
 	}
 	// Only a guarded off consults the job state: on is never gated, and
-	// --force skips every guard, so neither should pay for (or warn about)
-	// reading the API key.
+	// --force skips every guard, so neither reads the API key or asks a peer.
 	var jobs jobGuard
 	if verb == "off" && !force {
-		jobs = newJobGuard(cfg, stderr)
+		jobs = newJobGuard(cfg)
 	}
 	return plugVerb(ctx, eng, p, verb, force, liveHosts, jobs, stdout)
 }
@@ -287,16 +286,17 @@ func guardInterrupted(subject string, err error) error {
 }
 
 // jobRefusal is plugOff's error when the job guard would not let the switch
-// run: a job in flight, or a job state it could not read. Neither switched
-// anything.
+// run: a job in flight, or a job state it could not establish. Neither
+// switched anything. The guard's own error says what to fix in the second
+// case (see coordGuard).
 func jobRefusal(p plug, err error) error {
 	if errors.Is(err, coordination.ErrJobRunning) {
-		return fmt.Errorf("%w; %s left untouched. Wait for it to finish, "+
+		return fmt.Errorf("%w; %s left untouched. Wait for it to finish "+
+			"(`f3sctl -r power status` shows the rack meanwhile), "+
 			"or use --force if you mean it", err, p.subject)
 	}
 	return fmt.Errorf("cannot tell whether a power job is running: %w; %s left untouched. "+
-		"Run it as a user that can read the state dir (doas on pi0/pi1), "+
-		"or use --force if you mean it", err, p.subject)
+		"Fix that, or use --force if you mean it", err, p.subject)
 }
 
 // jobGuard is plugOff's view of the power jobs: whileIdle runs fn only while
@@ -312,51 +312,64 @@ type jobGuard interface {
 }
 
 // coordGuard is the production jobGuard, built from the same coordination
-// pieces the API's own plug routes use: the other API nodes' PeerSet first,
-// then this node's Manager, the order powerapi's jobStartedMeanwhile asks
-// them in, so the local check and lock sit right against the write.
+// pieces the API's own plug routes use: the API nodes' PeerSet first, then
+// this host's Manager, the order powerapi's jobStartedMeanwhile asks them
+// in, so the local check and lock sit right against the write.
 //
-// Like the API it is a lock on this node only: the peers cannot be locked,
-// just asked, and one that cannot be reached counts as idle (PeerSet.Busy's
-// fail-open, so a dead Pi cannot block the plugs). On a laptop there is no
-// local job state at all and the peers are the whole answer.
+// Like the API it can lock this host only: the peers cannot be locked, just
+// asked. Unlike the API it asks them strictly (PeerSet.RunningJob): a peer
+// that cannot be reached at all counts as idle, so a dead Pi cannot block
+// the plugs, but one that answers with anything but a job -- a 401 for a
+// wrong or rotated key, a 404 for a wrong path -- refuses. So does having no
+// API key to ask with: on a laptop, which has no job state of its own, the
+// peers are the whole answer, and not asking them would be no check at all.
+// Not knowing is not idle; --force is the way past it.
 type coordGuard struct {
-	jobs   *coordination.Manager
-	peers  *coordination.PeerSet // nil when there is no API key to ask with
-	apiKey string
+	jobs     *coordination.Manager
+	stateDir string
+	peers    *coordination.PeerSet // nil when cfg lists no peer nodes
+	apiKey   string
+	keyErr   error // why there is no apiKey, when peers are to be asked
 }
 
 func (g coordGuard) whileIdle(ctx context.Context, fn func() error) error {
 	if g.peers != nil {
+		if g.keyErr != nil {
+			return fmt.Errorf("no API key to ask the API nodes %v with (%w); set F3SCTL_KEY "+
+				"or api_key_file", g.peers.Nodes, g.keyErr)
+		}
 		// "" is this host: PeerSet then skips its own addresses.
-		if busy, node := g.peers.Busy(ctx, "", g.apiKey); busy {
-			return fmt.Errorf("%w on %s", coordination.ErrJobRunning, node)
+		job, err := g.peers.RunningJob(ctx, "", g.apiKey)
+		if err != nil {
+			return fmt.Errorf("%w; check that the API key (F3SCTL_KEY / api_key_file) is one "+
+				"the API nodes accept, and peer_job_path", err)
+		}
+		if job != nil {
+			return coordination.RunningJobError(*job)
 		}
 	}
-	return g.jobs.WhileIdle(fn)
+	// ran keeps fn's own errors (the liveness refusal, the plug write) from
+	// being dressed up as an unreadable job state.
+	ran := false
+	err := g.jobs.WhileIdle(func() error { ran = true; return fn() })
+	if err != nil && !ran && !errors.Is(err, coordination.ErrJobRunning) {
+		return fmt.Errorf("this host's job state in %s: %w; run as a user that can read it",
+			g.stateDir, err)
+	}
+	return err
 }
 
-// newJobGuard builds the production jobGuard from cfg: this node's job state
-// in cfg.StateDir, constructed as the API and the job child construct it, and
-// cfg.PeerNodes asked at httpapi.PeerJobPath with this CLI's API key.
-//
-// Without a readable API key the peers cannot be asked (they would answer
-// 401); that is said on stderr and only this node is checked, the same
-// fail-open the API applies to a peer it cannot reach.
-func newJobGuard(cfg config.Config, stderr io.Writer) jobGuard {
-	g := coordGuard{
-		jobs: coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)),
-	}
+// newJobGuard builds the production jobGuard from cfg: this host's job state
+// in cfg.StateDir and the API nodes in cfg.PeerNodes, both built by jobcoord
+// exactly as the API builds its own, asked with this CLI's API key. A
+// missing key is not an error here but on use, so that only a guarded off
+// -- the one caller -- reports it.
+func newJobGuard(cfg config.Config) jobGuard {
+	g := coordGuard{jobs: jobcoord.ManagerFor(cfg), stateDir: cfg.StateDir}
 	if len(cfg.PeerNodes) == 0 {
 		return g
 	}
-	key, err := cfg.ResolveAPIKey()
-	if err != nil {
-		fmt.Fprintf(stderr, "f3sctl: cannot ask the API nodes whether a power job is running "+
-			"(%v); checking this host only\n", err)
-		return g
-	}
-	g.peers = coordination.NewPeerSet(cfg.PeerNodes, httpapi.PeerJobPath(cfg))
-	g.apiKey = key
+	g.peers = jobcoord.PeersFor(cfg, "")
+	g.apiKey, g.keyErr = cfg.ResolveAPIKey()
 	return g
 }

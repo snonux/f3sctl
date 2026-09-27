@@ -245,7 +245,7 @@ func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
 // TestPeerFetchFailureKindDistinguishesHTTPStatusFromConnectionFailure pins
 // warnPeerFetchFailed's classification: a *peerHTTPStatusError (the peer
 // answered, just not with 200 -- e.g. a 404 from a mis-derived JobPath, see
-// httpapi.resolvePeerJobPath) must read as "HTTP error", while a plain
+// ResolvePeerJobPath) must read as "HTTP error", while a plain
 // error (the request never completed at all) must read as "connection
 // failure". An operator debugging "peer coordination isn't working" needs
 // exactly this distinction: the former points at this node's own

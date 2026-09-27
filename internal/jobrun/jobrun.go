@@ -22,6 +22,7 @@ import (
 	"github.com/snonux/f3sctl/internal/cli"
 	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/coordination"
+	"github.com/snonux/f3sctl/internal/jobcoord"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -77,8 +78,8 @@ func Run(ctx context.Context, cfg config.Config, args []string) error {
 	// by hand, or spawned by a CGI binary predating it) records nothing and
 	// touches no state (coordination.ErrNoJobID); deliberately so, since
 	// adopting whatever job.json holds would reopen that overwrite.
-	rec := coordination.NewManager(dir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg)).
-		Recorder(os.Getenv(coordination.JobIDEnv))
+	cfg.StateDir = dir
+	rec := jobcoord.ManagerFor(cfg).Recorder(os.Getenv(coordination.JobIDEnv))
 
 	err := cli.RunLocal(ctx, cfg, args, os.Stdout, os.Stderr, jobReporter{rec: rec})
 

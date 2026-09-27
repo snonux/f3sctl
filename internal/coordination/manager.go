@@ -530,30 +530,37 @@ func (m *Manager) Start(action string, args []string) (Job, error) {
 // It is how an action that is not itself a job -- the local `f3sctl fans off`
 // and `ac off` (internal/cli) -- stays out of a job's way: the rack-wide jobs
 // switch those plugs themselves, and `power all cycle` cuts and restores AC,
-// so a manual switch mid-job races them. "Running" is judged exactly as
-// Start judges it (Read, so a job past the staleness ceiling or one already
-// finished does not count), and a job running here is refused with an error
-// wrapping ErrJobRunning. Holding the lock is what closes the other half:
-// Start takes it with a single non-blocking attempt, so a job started while
-// fn runs is refused with ErrJobRunning rather than switching the rack under
+// so a manual switch mid-job races them. "Running" means what Read reports
+// as running: a job past the staleness ceiling (its process is gone) or one
+// already finished does not count. A job running here is refused with
+// RunningJobError. Holding the lock is what closes the other half: Start
+// takes it with a single non-blocking attempt, so a job started while fn
+// runs is refused with ErrJobRunning rather than switching the rack under
 // it. fn should therefore be short -- one plug round trip, not a probe.
 //
 // The lock is waited for at most idleLockWait; a holder that keeps it longer
-// is reported as a job in flight (ErrJobRunning), the same answer Start gives.
+// is refused with ErrJobRunning too, since only a job or another such switch
+// holds it that long.
+//
+// Unlike Start, which treats an unreadable job.json as no job (Read's nil),
+// WhileIdle fails closed: job.json that cannot be read or does not parse is
+// returned as an error and fn does not run. Not knowing is not the same as
+// idle. Only a job.json that does not exist means no job.
 //
 // WhileIdle never creates state, for the reason update gives: it may run as
 // root (`doas f3sctl ac off`), and a root-owned job.lock would lock the
 // unprivileged CGI out of Start for good. Without a job.lock -- no state dir,
 // as on a laptop, or a node that has never run a job -- nothing is locked:
 // Start creates the lock before recording its first job, so there is no job
-// to wait for, and the one race left is with that very first Start. Any other
-// failure to take the lock (a state dir this user may not open, say) is
-// returned as is and fn does not run: not knowing is not the same as idle.
+// to wait for, and the one race left is with that very first Start. Any
+// other failure to take the lock (a state dir this user may not open, say)
+// is returned as is, and fn does not run.
 func (m *Manager) WhileIdle(fn func() error) error {
 	unlock, err := m.lock(0, m.idleLockWait)
 	switch {
 	case errors.Is(err, errLockHeld):
-		return fmt.Errorf("%w: %w", ErrJobRunning, err)
+		return fmt.Errorf("%w: another power operation or plug switch holds the job lock: %w",
+			ErrJobRunning, err)
 	case errors.Is(err, fs.ErrNotExist):
 		unlock = func() {}
 	case err != nil:
@@ -561,11 +568,24 @@ func (m *Manager) WhileIdle(fn func() error) error {
 	}
 	defer unlock()
 
-	if cur := m.Read(); cur != nil && cur.State == JobRunning {
-		return fmt.Errorf("%w: %q (job %s on %s, started %s)",
-			ErrJobRunning, cur.Action, cur.ID, cur.Node, cur.Started)
+	cur, err := m.load()
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return fn()
+	case err != nil:
+		return fmt.Errorf("reading %s: %w", m.statePath(), err)
+	case cur.State == JobRunning && !m.stale(*cur):
+		return RunningJobError(*cur)
 	}
 	return fn()
+}
+
+// RunningJobError is the error for an action refused because job j is
+// running: ErrJobRunning, naming the job so the refusal says what to wait
+// for. WhileIdle uses it for this node's job, and a caller that learned of a
+// peer's job from PeerSet.RunningJob for that one.
+func RunningJobError(j Job) error {
+	return fmt.Errorf("%w: %q (job %s on %s, started %s)", ErrJobRunning, j.Action, j.ID, j.Node, j.Started)
 }
 
 // doSpawn starts the job's detached child, through spawnFunc when a test has

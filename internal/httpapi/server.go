@@ -17,6 +17,7 @@ import (
 	"github.com/snonux/f3sctl/internal/httpapi/gogiosapi"
 	"github.com/snonux/f3sctl/internal/httpapi/powerapi"
 	"github.com/snonux/f3sctl/internal/inventory"
+	"github.com/snonux/f3sctl/internal/jobcoord"
 	"github.com/snonux/f3sctl/internal/power"
 )
 
@@ -148,8 +149,8 @@ func newServer(cfg config.Config) (*Server, error) {
 
 	base := strings.TrimSuffix(os.Getenv("SCRIPT_NAME"), "/")
 	href := contract.Hrefs(base)
-	jobs := coordination.NewManager(cfg.StateDir, cfg.UnmuteTimeout.D(), power.ShutdownWorstCase(cfg))
-	peers := coordination.NewPeerSet(cfg.PeerNodes, resolvePeerJobPath(cfg, base))
+	jobs := jobcoord.ManagerFor(cfg)
+	peers := jobcoord.PeersFor(cfg, base)
 
 	srv := &Server{
 		cfg:    cfg,
@@ -219,61 +220,6 @@ func (s *Server) build(inv inventory.Inventory, newPower powerSurfaceFunc, newGo
 	s.openapi = NewOpenAPIBuilder(router, inv)
 	return s, nil
 }
-
-// resolvePeerJobPath returns the URL path this node asks a peer for its
-// current job.
-//
-// An explicit cfg.PeerJobPath always wins, for the rare case where the two
-// peers are not mounted the same way. Otherwise (the default) it is derived
-// from this node's own mount -- the identical mechanism every link and action
-// handed back to a client already goes through -- on the assumption that pi0
-// and pi1 are symmetric peers sharing one CGI mount. That keeps a SCRIPT_NAME
-// remount a one-place change instead of two: without this, an operator who
-// moves the mount point but forgets the separate peer_job_path config value
-// gets a peer check that silently reads back as idle forever, which is the
-// dangerous failure mode -- two jobs can start.
-//
-// The one case that derivation must NOT be trusted for: base itself being
-// empty. That happens whenever this node's own SCRIPT_NAME was empty or
-// missing when the base was read (bozohttpd not setting it, a proxy that
-// strips the header, ServeCGI invoked outside its normal CGI harness) -- and
-// an empty SCRIPT_NAME is far more likely to be a broken environment than a
-// deliberate "the API is mounted at the filesystem root". Deriving anyway
-// would silently hand PeerSet a bare "/job", which almost certainly 404s on
-// the peer; fetchPeerJob then errors, and PeerSet.Busy treats every fetch
-// error as "peer not busy" -- an unreachable-reads-as-idle failure with
-// nothing to distinguish "the peer is genuinely down" from "this node
-// mis-derived the URL it asked at". Falling back to this project's own
-// documented CGI mount convention (defaultCGIMount, the literal that was
-// hardcoded here before this derivation existed) is a safer bet than trusting
-// an empty base at face value, and matches what every real deployment of this
-// project actually uses.
-func resolvePeerJobPath(cfg config.Config, base string) string {
-	if cfg.PeerJobPath != "" {
-		return cfg.PeerJobPath
-	}
-	if base == "" {
-		return defaultCGIMount + powerapi.JobPath
-	}
-	return contract.Href(base, powerapi.JobPath)
-}
-
-// PeerJobPath is the URL path a process that is not serving a CGI request
-// asks the API nodes for their current job: the local `fans off` / `ac off`
-// guard in internal/cli, which must see a job running on either Pi exactly as
-// the API's own plug routes do. It is resolvePeerJobPath with no SCRIPT_NAME
-// to derive from, so cfg.PeerJobPath wins and the documented mount is the
-// fallback -- one derivation for both callers.
-func PeerJobPath(cfg config.Config) string {
-	return resolvePeerJobPath(cfg, "")
-}
-
-// defaultCGIMount is this project's own documented CGI mount convention (see
-// README.md's example config, and config.Default() before uy0). It is the
-// last-resort fallback resolvePeerJobPath uses when this node's own router
-// has no base to derive anything from -- see that function's doc comment for
-// why an empty base cannot be trusted as "mounted at the root".
-const defaultCGIMount = "/cgi-bin/f3sctl"
 
 func (s *Server) serve(out io.Writer, req contract.Request) error {
 	if err := s.auth.Check(req.APIKey); err != nil {

@@ -167,6 +167,9 @@ func TestWhileIdleReportsAHeldLockAsARunningJob(t *testing.T) {
 	if !errors.Is(err, ErrJobRunning) || !errors.Is(err, errLockHeld) {
 		t.Fatalf("WhileIdle = %v, want ErrJobRunning wrapping errLockHeld", err)
 	}
+	if !strings.Contains(err.Error(), "another power operation or plug switch holds the job lock") {
+		t.Errorf("err = %q, want it to say what may be holding the lock", err)
+	}
 	if took < m.idleLockWait || took > m.idleLockWait+time.Second {
 		t.Errorf("WhileIdle gave up after %s, want about %s", took, m.idleLockWait)
 	}
@@ -226,5 +229,61 @@ func TestWhileIdleReturnsFnsError(t *testing.T) {
 	m.spawnFunc = func(string, []string) error { return nil }
 	if _, err := m.Start("off", nil); err != nil {
 		t.Errorf("Start after a failed fn = %v, want the lock released", err)
+	}
+}
+
+// TestWhileIdleFailsClosedOnAnUnreadableJobState: a job.json this user may
+// not read, or one that does not parse, is not "no job" -- Start may read it
+// that way, but a plug switch must not. Here without a job.lock too, so the
+// missing-lock path cannot skip the check. fn does not run.
+func TestWhileIdleFailsClosedOnAnUnreadableJobState(t *testing.T) {
+	t.Run("unreadable", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-000 file regardless")
+		}
+		m := newTestManager(t)
+		if err := m.write(Job{ID: "r", State: JobRunning, Started: time.Now().UTC().Format(time.RFC3339)}); err != nil {
+			t.Fatalf("seeding job.json: %v", err)
+		}
+		if err := os.Chmod(m.statePath(), 0); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		fn, ran := countingFn()
+
+		err := m.WhileIdle(fn)
+		if !errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrJobRunning) {
+			t.Fatalf("WhileIdle = %v, want a permission error that is not ErrJobRunning", err)
+		}
+		if *ran != 0 {
+			t.Errorf("fn ran %d times, want never", *ran)
+		}
+		assertNoLockFile(t, m)
+	})
+	t.Run("corrupt", func(t *testing.T) {
+		m := newTestManager(t)
+		if err := os.WriteFile(m.statePath(), []byte("{not json"), 0o600); err != nil {
+			t.Fatalf("corrupting job.json: %v", err)
+		}
+		fn, ran := countingFn()
+
+		if err := m.WhileIdle(fn); !errors.Is(err, ErrCorruptJobState) {
+			t.Fatalf("WhileIdle = %v, want ErrCorruptJobState", err)
+		}
+		if *ran != 0 {
+			t.Errorf("fn ran %d times, want never", *ran)
+		}
+	})
+}
+
+// TestRunningJobErrorNamesTheJob pins the refusal's wording, shared by this
+// node's and a peer's job.
+func TestRunningJobErrorNamesTheJob(t *testing.T) {
+	err := RunningJobError(Job{ID: "c1", Action: "all-cycle", Node: "pi1", Started: "2026-09-27T08:00:00Z"})
+	if !errors.Is(err, ErrJobRunning) {
+		t.Fatalf("err = %v, want ErrJobRunning", err)
+	}
+	want := `another power operation is already running: "all-cycle" (job c1 on pi1, started 2026-09-27T08:00:00Z)`
+	if err.Error() != want {
+		t.Errorf("err = %q, want %q", err, want)
 	}
 }

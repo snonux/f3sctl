@@ -152,7 +152,7 @@ func newFakePeer(t *testing.T, status int, job *coordination.Job) *fakePeer {
 func (p *fakePeer) addr() string { return strings.TrimPrefix(p.srv.URL, "http://") }
 
 // peerConfig is testConfig asking one fake peer, with an API key in the
-// environment. PeerJobPath is left to httpapi.PeerJobPath's derivation, so
+// environment. PeerJobPath is left to coordination.ResolvePeerJobPath, so
 // the fake peer's path check pins that too.
 func peerConfig(t *testing.T, shelly *powertest.FakeShelly, peer *fakePeer) config.Config {
 	t.Helper()
@@ -174,8 +174,13 @@ func TestPlugOffRefusesWhileAPeerRunsAJob(t *testing.T) {
 	cfg := peerConfig(t, shelly, peer)
 
 	_, _, err := runCLI(t, cfg, hostsUp(), "fans", "off")
-	if !errors.Is(err, coordination.ErrJobRunning) || !strings.Contains(err.Error(), "pi1") {
-		t.Fatalf("fans off = %v, want ErrJobRunning naming pi1", err)
+	if !errors.Is(err, coordination.ErrJobRunning) {
+		t.Fatalf("fans off = %v, want ErrJobRunning", err)
+	}
+	for _, want := range []string{"all-cycle", "cyc1", "pi1", "power status", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
 	}
 	if got := shelly.SetCalls(); len(got) != 0 {
 		t.Errorf("Switch.Set calls = %v, want none", got)
@@ -187,20 +192,15 @@ func TestPlugOffRefusesWhileAPeerRunsAJob(t *testing.T) {
 
 // TestPlugOffTreatsAnIdleOrUnreachablePeerAsIdle: a peer with no running job
 // lets the switch through after being asked twice (before and after the
-// probe); one that fails to answer is treated as idle, the fail-open the API
-// applies too -- a dead Pi must not lock the plugs.
+// probe); one that cannot be reached at all is treated as idle, the
+// fail-open the API applies too -- a dead Pi must not lock the plugs.
 func TestPlugOffTreatsAnIdleOrUnreachablePeerAsIdle(t *testing.T) {
 	done := runningJob(time.Now())
 	done.State = coordination.JobDone
-	peers := map[string]func(t *testing.T) *fakePeer{
-		"no job":   func(t *testing.T) *fakePeer { return newFakePeer(t, http.StatusOK, nil) },
-		"finished": func(t *testing.T) *fakePeer { return newFakePeer(t, http.StatusOK, &done) },
-		"failing":  func(t *testing.T) *fakePeer { return newFakePeer(t, http.StatusInternalServerError, nil) },
-	}
-	for name, newPeer := range peers {
+	for name, job := range map[string]*coordination.Job{"no job": nil, "finished": &done} {
 		t.Run(name, func(t *testing.T) {
 			shelly := powertest.NewFakeShelly(t, true)
-			peer := newPeer(t)
+			peer := newFakePeer(t, http.StatusOK, job)
 			cfg := peerConfig(t, shelly, peer)
 
 			if _, _, err := runCLI(t, cfg, hostsUp(), "ac", "off"); err != nil {
@@ -214,12 +214,63 @@ func TestPlugOffTreatsAnIdleOrUnreachablePeerAsIdle(t *testing.T) {
 			}
 		})
 	}
+	t.Run("unreachable", func(t *testing.T) {
+		shelly := powertest.NewFakeShelly(t, true)
+		peer := newFakePeer(t, http.StatusOK, nil)
+		cfg := peerConfig(t, shelly, peer)
+		peer.srv.Close()
+
+		if _, _, err := runCLI(t, cfg, hostsUp(), "ac", "off"); err != nil {
+			t.Fatalf("ac off with the peer down: %v", err)
+		}
+		if got := shelly.SetCalls(); len(got) != 1 || got[0] {
+			t.Errorf("Switch.Set calls = %v, want exactly one with on=false", got)
+		}
+	})
 }
 
-// TestPlugOffWithoutAnAPIKeyChecksThisHostOnly: the peers cannot be asked
-// without a key. That is said on stderr, the peer is not contacted, and this
-// host's own job state still guards.
-func TestPlugOffWithoutAnAPIKeyChecksThisHostOnly(t *testing.T) {
+// TestPlugOffRefusesWhenAPeerAnswersWithoutAJob: a peer that answered, but
+// not with a job, has not said it is idle. A 401 is a wrong or rotated API
+// key, a 404 a wrong peer_job_path, a 5xx a broken node: each refuses with
+// what to check, and switches nothing.
+func TestPlugOffRefusesWhenAPeerAnswersWithoutAJob(t *testing.T) {
+	cases := map[string]struct {
+		status  int
+		jobPath string // peer_job_path; "" derives the path the fake peer serves
+	}{
+		"401 bad key":  {status: http.StatusUnauthorized},
+		"404 bad path": {status: http.StatusOK, jobPath: "/wrong/job"},
+		"500":          {status: http.StatusInternalServerError},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			shelly := powertest.NewFakeShelly(t, true)
+			peer := newFakePeer(t, tc.status, nil)
+			cfg := peerConfig(t, shelly, peer)
+			cfg.PeerJobPath = tc.jobPath
+			live := hostsUp()
+
+			_, _, err := runCLI(t, cfg, live, "fans", "off")
+			if !errors.Is(err, coordination.ErrPeerJobUnknown) || errors.Is(err, coordination.ErrJobRunning) {
+				t.Fatalf("fans off = %v, want ErrPeerJobUnknown", err)
+			}
+			for _, want := range []string{"cannot tell whether a power job is running", "API key", "--force"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("err = %q, want it to mention %q", err, want)
+				}
+			}
+			if got := shelly.SetCalls(); len(got) != 0 || live.calls != 0 {
+				t.Errorf("Switch.Set calls = %v, liveness calls = %d; want none", got, live.calls)
+			}
+		})
+	}
+}
+
+// TestPlugOffWithoutAnAPIKeyRefuses: with peers to ask and no key to ask
+// them with there is no job check at all on a laptop, which keeps no job
+// state of its own. Not knowing is not idle: refuse, pointing at the key
+// and --force, without contacting the peer.
+func TestPlugOffWithoutAnAPIKeyRefuses(t *testing.T) {
 	shelly := powertest.NewFakeShelly(t, true)
 	peer := newFakePeer(t, http.StatusOK, nil)
 	cfg := peerConfig(t, shelly, peer)
@@ -227,22 +278,72 @@ func TestPlugOffWithoutAnAPIKeyChecksThisHostOnly(t *testing.T) {
 	cfg.APIKeyFile = filepath.Join(t.TempDir(), "missing")
 
 	_, errOut, err := runCLI(t, cfg, hostsUp(), "fans", "off")
-	if err != nil {
+	if err == nil || errors.Is(err, coordination.ErrJobRunning) {
+		t.Fatalf("fans off without an API key = %v, want a refusal", err)
+	}
+	for _, want := range []string{"no API key", "F3SCTL_KEY", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none", got)
+	}
+	if n := peer.hits.Load(); n != 0 || errOut != "" {
+		t.Errorf("peer asked %d times, stderr %q; want neither", n, errOut)
+	}
+}
+
+// TestPlugOffWithNoPeersConfiguredChecksThisHostOnly: an empty peer_nodes is
+// a deliberate "there are no API nodes to ask", not a missing key, so only
+// this host's job state guards.
+func TestPlugOffWithNoPeersConfiguredChecksThisHostOnly(t *testing.T) {
+	shelly := powertest.NewFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+	t.Setenv("F3SCTL_KEY", "")
+	cfg.APIKeyFile = filepath.Join(t.TempDir(), "missing")
+
+	if _, _, err := runCLI(t, cfg, hostsUp(), "fans", "off"); err != nil {
 		t.Fatalf("fans off: %v", err)
 	}
-	if !strings.Contains(errOut, "checking this host only") {
-		t.Errorf("stderr = %q, want it to say the peers were not asked", errOut)
-	}
-	if n := peer.hits.Load(); n != 0 {
-		t.Errorf("peer asked %d times without a key, want never", n)
-	}
-
 	seedJobState(t, cfg.StateDir, runningJob(time.Now()))
 	if _, _, err := runCLI(t, cfg, hostsUp(), "fans", "off"); !errors.Is(err, coordination.ErrJobRunning) {
 		t.Fatalf("fans off with a local job = %v, want ErrJobRunning", err)
 	}
 	if got := shelly.SetCalls(); len(got) != 1 {
 		t.Errorf("Switch.Set calls = %v, want only the first, idle, switch", got)
+	}
+}
+
+// TestPlugForceAndOnNeverAskAboutJobs: --force skips the job guard and on is
+// never gated, so neither contacts a peer -- here one that would refuse --
+// nor reads the API key, nor prints anything about either.
+func TestPlugForceAndOnNeverAskAboutJobs(t *testing.T) {
+	for _, withKey := range []bool{true, false} {
+		for _, args := range [][]string{{"fans", "off", "--force"}, {"ac", "off", "-f"}, {"fans", "on"}, {"ac", "on"}} {
+			t.Run(fmt.Sprintf("key=%t/%s", withKey, strings.Join(args, " ")), func(t *testing.T) {
+				shelly := powertest.NewFakeShelly(t, args[1] == "off")
+				job := runningJob(time.Now())
+				peer := newFakePeer(t, http.StatusOK, &job)
+				cfg := peerConfig(t, shelly, peer)
+				seedJobState(t, cfg.StateDir, job)
+				if !withKey {
+					t.Setenv("F3SCTL_KEY", "")
+					cfg.APIKeyFile = filepath.Join(t.TempDir(), "missing")
+				}
+
+				_, errOut, err := runCLI(t, cfg, hostsUp("f0"), args...)
+				if err != nil {
+					t.Fatalf("%s: %v", strings.Join(args, " "), err)
+				}
+				if got := shelly.SetCalls(); len(got) != 1 {
+					t.Errorf("Switch.Set calls = %v, want exactly one", got)
+				}
+				if n := peer.hits.Load(); n != 0 || errOut != "" {
+					t.Errorf("peer asked %d times, stderr %q; want neither", n, errOut)
+				}
+			})
+		}
 	}
 }
 
@@ -266,8 +367,7 @@ func TestPlugOffBlocksAJobStartedDuringTheSwitch(t *testing.T) {
 			eng := &fakePlugEngine{on: true, onSet: func() {
 				_, startErr = cgi.Start("all-cycle", []string{"-test.run=^$"})
 			}}
-			var errOut bytes.Buffer
-			jobs := newJobGuard(cfg, &errOut)
+			jobs := newJobGuard(cfg)
 
 			if err := plugOff(context.Background(), eng, tc.plug, false, hostsUp().hosts, jobs, &bytes.Buffer{}); err != nil {
 				t.Fatalf("plugOff: %v", err)
@@ -282,5 +382,39 @@ func TestPlugOffBlocksAJobStartedDuringTheSwitch(t *testing.T) {
 				t.Errorf("calls = %v, want %v", eng.calls, want)
 			}
 		})
+	}
+}
+
+// TestPlugOffRefusesOnAnUnreadableStateDir: this host's job state that this
+// user may not read is not an idle host. The refusal names the state dir and
+// what to do, without assuming which host this is.
+func TestPlugOffRefusesOnAnUnreadableStateDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory regardless")
+	}
+	shelly := powertest.NewFakeShelly(t, true)
+	cfg := testConfig(t, shelly)
+	finished := runningJob(time.Now())
+	finished.State = coordination.JobDone
+	seedJobState(t, cfg.StateDir, finished)
+	if err := os.Chmod(cfg.StateDir, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.StateDir, 0o700) })
+
+	_, _, err := runCLI(t, cfg, hostsUp(), "ac", "off")
+	if err == nil || errors.Is(err, coordination.ErrJobRunning) {
+		t.Fatalf("ac off = %v, want a refusal that is not ErrJobRunning", err)
+	}
+	for _, want := range []string{cfg.StateDir, "run as a user that can read it", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "pi0") {
+		t.Errorf("err = %q, must not assume this host is a Pi", err)
+	}
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none", got)
 	}
 }

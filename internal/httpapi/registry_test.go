@@ -17,13 +17,13 @@ import (
 )
 
 // TestDefaultPeerJobPathIsDerived guards the "derive it" half of
-// resolvePeerJobPath (see server.go): the compiled-in default must stay empty
+// coordination.ResolvePeerJobPath: the compiled-in default must stay empty
 // so newServer always derives PeerJobPath from this node's own SCRIPT_NAME
 // rather than falling back to a stale literal that could silently drift from
 // this package's own job route.
 func TestDefaultPeerJobPathIsDerived(t *testing.T) {
 	if got := config.Default().PeerJobPath; got != "" {
-		t.Errorf("config.Default().PeerJobPath = %q, want \"\" (derived from SCRIPT_NAME by resolvePeerJobPath)", got)
+		t.Errorf("config.Default().PeerJobPath = %q, want \"\" (derived from SCRIPT_NAME by coordination.ResolvePeerJobPath)", got)
 	}
 }
 
