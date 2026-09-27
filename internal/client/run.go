@@ -630,17 +630,17 @@ func (c *Client) showStatus(ctx context.Context) error {
 // PingKnown -- and presenter.Describe -- which has always read it -- means
 // the remote client gets that check by construction rather than by
 // remembering to add it a second time.
-func parseStatus(status Entity) (statuses []status.HostStatus, fans status.FansState, fansErr error, ac status.ACState, acErr error) {
-	for _, e := range status.Entities {
-		if hasClass(e, "fans") {
-			fans, fansErr = parseFans(e)
+func parseStatus(e Entity) (statuses []status.HostStatus, fans status.FansState, fansErr error, ac status.ACState, acErr error) {
+	for _, child := range e.Entities {
+		if hasClass(child, "fans") {
+			fans, fansErr = parseFans(child)
 			continue
 		}
-		if hasClass(e, "ac") {
-			ac, acErr = parseAC(e)
+		if hasClass(child, "ac") {
+			ac, acErr = parseAC(child)
 			continue
 		}
-		if st, ok := parseHost(e); ok {
+		if st, ok := parseHost(child); ok {
 			statuses = append(statuses, st)
 		}
 	}

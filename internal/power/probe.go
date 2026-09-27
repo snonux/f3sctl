@@ -17,8 +17,9 @@ import (
 type HostStatus = status.HostStatus
 
 // livenessOf folds a status's two ping fields back into the tri-state the fan
-// guards decide on. See RackActivityFrom, which is the only caller that
-// matters.
+// guards decide on. Its only caller is snapshotActivity, which both
+// RackActivityFrom (the fan guard) and ACActivityFrom (the AC guard) go
+// through.
 func livenessOf(h HostStatus) hostLiveness {
 	switch {
 	case h.Ping:

@@ -84,14 +84,13 @@ flowchart TD
     COORD --> POWER
     CLI --> POWER["internal/power<br/><b>the engine</b>"]
     POWERAPI -->|"Engine · Jobs · Peers<br/>(slices of the real ones)"| POWER
-    GOGIOSAPI -->|"Monitor slice"| POWER
     POWER --> INV["internal/inventory<br/>hosts, groups, order"]
     POWER --> CFG["internal/config"]
     POWER --> BACK["backends.go<br/>PowerBackend · ProbeBackend<br/>FansBackend · NFSChecker · ZusbChecker"]
     BACK --> SSH["ssh(1) → agent verbs"]
     BACK --> PING["ping(8)"]
     BACK --> HTTP["Shelly HTTP RPC"]
-    GOGIOSAPI --> REPORT["internal/gogios<br/>alert report fetch + cache<br/>gateway mute (Monitor)"]
+    GOGIOSAPI -->|"Monitor slice"| REPORT["internal/gogios<br/>alert report fetch + cache<br/>gateway mute (Monitor)"]
     POWER -->|"mute · un-mute · wait<br/>(gogiosMonitor slice)"| REPORT
 
     CLI --> PRES["internal/presenter<br/>shared status table"]
