@@ -322,7 +322,7 @@ func Default() Inventory {
 		Broadcast:      "192.168.1.255",
 		ShellyIP:       "192.168.1.28",
 		ShellyACIP:     "192.168.1.29",
-		GogiosMuteFile: "/tmp/f3s_taken_down",
+		GogiosMuteFile: "/var/db/f3s/monitoring/f3s_taken_down",
 		Hosts: []Host{
 			{Name: "f0", Role: RoleF, IP: "192.168.1.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl",
 				Storage: StorageMaster},
