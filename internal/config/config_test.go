@@ -199,6 +199,77 @@ func TestFirstReadableErrorNamesEveryCandidateTried(t *testing.T) {
 	}
 }
 
+// --- Shelly HTTPS (p34) ------------------------------------------------------
+
+// TestShellyHTTPSIsOffByDefault pins that upgrading the binary alone changes
+// nothing on the wire: HTTPS and the HTTP fallback both need an explicit
+// opt-in, and the default CA candidates are the packaged and per-user paths.
+func TestShellyHTTPSIsOffByDefault(t *testing.T) {
+	def := Default()
+	if def.ShellyHTTPS || def.ShellyHTTPFallback {
+		t.Errorf("ShellyHTTPS=%t ShellyHTTPFallback=%t, want both off by default",
+			def.ShellyHTTPS, def.ShellyHTTPFallback)
+	}
+	want := []string{"/usr/local/etc/f3sctl/shelly-ca.pem", "~/.config/f3sctl/shelly-ca.pem"}
+	if !reflect.DeepEqual(def.ShellyCAFile, want) {
+		t.Errorf("ShellyCAFile = %v, want %v", def.ShellyCAFile, want)
+	}
+}
+
+// TestLoadOverlaysShellyHTTPSSettings pins the JSON keys a deployed
+// /usr/local/etc/f3sctl.json uses to opt in.
+func TestLoadOverlaysShellyHTTPSSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "f3sctl.json")
+	raw := `{"shelly_https":true,"shelly_http_fallback":true,"shelly_ca_file":["/etc/x/ca.pem"]}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.ShellyHTTPS || !cfg.ShellyHTTPFallback || !reflect.DeepEqual(cfg.ShellyCAFile, []string{"/etc/x/ca.pem"}) {
+		t.Errorf("got https=%t fallback=%t ca=%v, want the overlaid values",
+			cfg.ShellyHTTPS, cfg.ShellyHTTPFallback, cfg.ShellyCAFile)
+	}
+}
+
+// TestResolveShellyCAReturnsTheFirstReadableFile pins the candidate-list
+// resolution for the CA, like the password file.
+func TestResolveShellyCAReturnsTheFirstReadableFile(t *testing.T) {
+	dir := t.TempDir()
+	ca := filepath.Join(dir, "ca.pem")
+	body := "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+	if err := os.WriteFile(ca, []byte(body), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	cfg := Config{ShellyCAFile: []string{filepath.Join(dir, "missing.pem"), ca}}
+	got, err := cfg.ResolveShellyCA()
+	if err != nil {
+		t.Fatalf("ResolveShellyCA: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("ResolveShellyCA = %q, want the file's contents", got)
+	}
+}
+
+// TestResolveShellyCAErrors pins the hard errors: no readable candidate, and
+// a present-but-blank file, both of which must stop an HTTPS call rather than
+// leave it with an empty trust pool.
+func TestResolveShellyCAErrors(t *testing.T) {
+	dir := t.TempDir()
+	blank := filepath.Join(dir, "blank.pem")
+	if err := os.WriteFile(blank, []byte(" \n"), 0o644); err != nil {
+		t.Fatalf("writing fixture: %v", err)
+	}
+	missing := filepath.Join(dir, "missing.pem")
+	for name, cands := range map[string][]string{"missing": {missing}, "blank": {blank}, "none": nil} {
+		if _, err := (Config{ShellyCAFile: cands}).ResolveShellyCA(); err == nil {
+			t.Errorf("%s: ResolveShellyCA succeeded, want an error", name)
+		}
+	}
+}
+
 // --- ResolveShellyPassword --------------------------------------------------
 
 // TestResolveShellyPasswordReturnsTheFirstLine pins the file format the Shelly

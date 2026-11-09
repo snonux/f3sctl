@@ -2,12 +2,14 @@ package power
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/power/infra"
 )
@@ -29,12 +31,33 @@ import (
 // this adapter, not to the Engine that carries the shutdown and fan-guard
 // policy.
 
-// newShellyClient builds the infra.ShellyClient the fans adapter reaches the
-// plug through. A helper rather than an inline struct literal in New so the
-// hand-built-Engine fallback (fansBackend below) can build the same client
-// without duplicating the wiring.
-func newShellyClient(ip string, password func() (string, error)) *infra.ShellyClient {
-	return &infra.ShellyClient{IP: ip, Password: password, Timeout: 5 * time.Second}
+// newShellyClient builds the infra.ShellyClient the fans and AC adapters
+// reach a plug through. A helper rather than an inline struct literal in New
+// so the hand-built-Engine fallbacks (fansBackend/acBackend) build the same
+// client without duplicating the wiring.
+//
+// It takes the whole config because the transport is config-driven: with
+// shelly_https set, calls go over HTTPS trusting only the CA from
+// shelly_ca_file, and shelly_http_fallback decides whether a failed HTTPS
+// dial may retry over HTTP. Both the password and the CA are resolved lazily
+// by the client, so neither file is read until a plug call needs it.
+func newShellyClient(ip string, cfg config.Config) *infra.ShellyClient {
+	c := &infra.ShellyClient{
+		IP:           ip,
+		Password:     cfg.ResolveShellyPassword,
+		HTTPFallback: cfg.ShellyHTTPFallback,
+		Timeout:      5 * time.Second,
+	}
+	if cfg.ShellyHTTPS {
+		c.TLS = func() (*tls.Config, error) {
+			caPEM, err := cfg.ResolveShellyCA()
+			if err != nil {
+				return nil, err
+			}
+			return infra.NewShellyTLSConfig(caPEM)
+		}
+	}
+	return c
 }
 
 // newProbeClient builds the infra.ProbeClient the probe adapter reaches hosts

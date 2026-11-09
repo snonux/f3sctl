@@ -163,8 +163,8 @@ func New(cfg config.Config) (*Engine, error) {
 	e.isUp = e.pingOnce
 	e.power = execPower{e}
 	e.probe = execProbe{client: newProbeClient(cfg.ProbeTimeout.D())}
-	e.fans = execFans{shelly: newShellyClient(cfg.Inventory.ShellyIP, cfg.ResolveShellyPassword)}
-	e.ac = execAC{shelly: newShellyClient(cfg.Inventory.ShellyACIP, cfg.ResolveShellyPassword)}
+	e.fans = execFans{shelly: newShellyClient(cfg.Inventory.ShellyIP, cfg)}
+	e.ac = execAC{shelly: newShellyClient(cfg.Inventory.ShellyACIP, cfg)}
 	e.nfs = execNFS{e}
 	e.zusb = execZusb{e}
 	e.monitor = e.newMonitor()
@@ -269,7 +269,7 @@ func (e *Engine) probeBackend() ProbeBackend {
 // liveness.
 func (e *Engine) fansBackend() FansBackend {
 	if e.fans == nil {
-		return execFans{shelly: newShellyClient(e.cfg.Inventory.ShellyIP, e.cfg.ResolveShellyPassword)}
+		return execFans{shelly: newShellyClient(e.cfg.Inventory.ShellyIP, e.cfg)}
 	}
 	return e.fans
 }
@@ -279,7 +279,7 @@ func (e *Engine) fansBackend() FansBackend {
 // reasoning as fansBackend.
 func (e *Engine) acBackend() ACBackend {
 	if e.ac == nil {
-		return execAC{shelly: newShellyClient(e.cfg.Inventory.ShellyACIP, e.cfg.ResolveShellyPassword)}
+		return execAC{shelly: newShellyClient(e.cfg.Inventory.ShellyACIP, e.cfg)}
 	}
 	return e.ac
 }

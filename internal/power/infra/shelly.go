@@ -1,6 +1,6 @@
 package infra
 
-// This file holds the rack-fan Shelly plug's HTTP RPC mechanism -- the raw
+// This file holds the rack-fan Shelly plug's HTTP(S) RPC mechanism -- the raw
 // http.Client, the hand-rolled HTTP digest auth, and the Switch.GetStatus /
 // Switch.Set calls -- pulled off internal/power's Engine so that changing how
 // the plug is reached (a different firmware, a different auth scheme, a
@@ -20,6 +20,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -32,7 +33,7 @@ import (
 )
 
 // ShellyClient talks to one rack-fan Shelly plug over its authenticated HTTP
-// RPC. It holds only the mechanism: the plug's address, the password it
+// or HTTPS RPC. It holds only the mechanism: the plug's address, the password it
 // resolves lazily (digest auth is mandatory, so the password is not read
 // until the first call that needs it -- status probing on a machine with no
 // f3sctl key file still works for everything but the fans), and the
@@ -47,6 +48,21 @@ type ShellyClient struct {
 	// config on every call so the client is self-contained: the adapter
 	// that holds it does not also need to hold the config.
 	IP string
+	// HTTPSAddr is the "host:port" HTTPS is dialled at. Empty (production)
+	// derives it from IP's host on port 443, where the plug's firmware
+	// listens; tests set it because one fake cannot serve HTTP and HTTPS on
+	// the same port.
+	HTTPSAddr string
+	// TLS, when set, makes every call go over HTTPS with the returned
+	// config (see NewShellyTLSConfig: a pinned CA, never a skipped check).
+	// Nil keeps the plain-HTTP behaviour the plugs had before p34. A
+	// function, like Password, so the CA file is not read until a call
+	// needs it and a missing CA only breaks the plug calls.
+	TLS func() (*tls.Config, error)
+	// HTTPFallback retries a call over plain HTTP when the HTTPS dial
+	// failed, and in no other case; see config.ShellyHTTPFallback for why
+	// a TLS failure must never fall back.
+	HTTPFallback bool
 	// Password resolves the plug's admin password on demand. A function
 	// rather than a string so the file is read at most once per call and
 	// not at all until a call needs it -- mirroring config.ResolveShellyPassword,
@@ -85,18 +101,50 @@ func (c *ShellyClient) Set(ctx context.Context, on bool) error {
 	return err
 }
 
-// RPC performs one authenticated Shelly RPC call.
+// RPC performs one authenticated Shelly RPC call, over HTTPS when TLS is
+// set and plain HTTP otherwise.
 //
-// The plug uses HTTP digest auth (user "admin"), which net/http does not
-// implement, so the challenge-response is done by hand below.
+// The HTTP fallback is decided here, before any byte of the request reached
+// the plug: only a failed HTTPS dial retries over HTTP, so a command is never
+// delivered twice and a certificate the CA does not vouch for is never
+// "fixed" by quietly dropping TLS.
 func (c *ShellyClient) RPC(ctx context.Context, path string) ([]byte, error) {
 	password, err := c.Password()
 	if err != nil {
 		return nil, fmt.Errorf("cannot control the Shelly plug: %w", err)
 	}
+	if c.TLS == nil {
+		return c.rpcVia(ctx, "http://"+c.IP, nil, path, password)
+	}
 
-	url := "http://" + c.IP + path
+	tlsCfg, err := c.TLS()
+	if err != nil {
+		return nil, fmt.Errorf("cannot set up HTTPS to the Shelly plug at %s: %w", c.IP, err)
+	}
+	body, err := c.rpcVia(ctx, "https://"+c.httpsAddr(), tlsCfg, path, password)
+	if err == nil || !c.HTTPFallback || !isDialError(err) {
+		return body, err
+	}
+	return c.rpcVia(ctx, "http://"+c.IP, nil, path, password)
+}
+
+// rpcVia runs the digest challenge-response against base+path. A nil tlsCfg
+// means plain HTTP through the default transport; otherwise a dedicated
+// transport carries the pinned TLS config and is torn down afterwards, so no
+// idle TLS connection outlives the call.
+//
+// The plug uses HTTP digest auth (user "admin"), which net/http does not
+// implement, so the challenge-response is done by hand below. The digest uri
+// is the path alone, the same over HTTP and HTTPS.
+func (c *ShellyClient) rpcVia(ctx context.Context, base string, tlsCfg *tls.Config, path, password string) ([]byte, error) {
 	client := &http.Client{Timeout: c.Timeout}
+	if tlsCfg != nil {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = tlsCfg
+		defer tr.CloseIdleConnections()
+		client.Transport = tr
+	}
+	url := base + path
 
 	// First request draws the digest challenge.
 	resp, err := c.do(ctx, client, url, "")
@@ -134,7 +182,7 @@ func (c *ShellyClient) do(ctx context.Context, cl *http.Client, url, auth string
 	}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("reaching the Shelly plug at %s: %w", c.IP, err)
+		return nil, fmt.Errorf("reaching the Shelly plug at %s: %w", req.URL.Host, err)
 	}
 	return resp, nil
 }

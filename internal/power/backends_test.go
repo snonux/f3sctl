@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/snonux/f3sctl/internal/config"
 	"github.com/snonux/f3sctl/internal/gogios"
 	"github.com/snonux/f3sctl/internal/inventory"
 	"github.com/snonux/f3sctl/internal/powertest"
@@ -901,5 +902,27 @@ func TestOffProceedsWhenNFSWasAlreadyUnmountedByTheRace(t *testing.T) {
 	}
 	if got := power.calls(); len(got) != 1 || got[0] != "f0" {
 		t.Errorf("PowerOff calls = %v, want exactly [f0]: the run must proceed to power off", got)
+	}
+}
+
+// TestNewShellyClientFollowsTheHTTPSConfig pins the wiring from config to the
+// infra client: plain HTTP unless shelly_https is set; with it set, the TLS
+// resolver reads shelly_ca_file lazily and a missing CA is an error, never
+// an unverified connection.
+func TestNewShellyClientFollowsTheHTTPSConfig(t *testing.T) {
+	cfg := config.Default()
+	if c := newShellyClient("10.30.0.28", cfg); c.TLS != nil || c.HTTPFallback {
+		t.Fatalf("default config gave TLS=%v fallback=%t, want plain HTTP", c.TLS != nil, c.HTTPFallback)
+	}
+
+	cfg.ShellyHTTPS = true
+	cfg.ShellyHTTPFallback = true
+	cfg.ShellyCAFile = []string{t.TempDir() + "/missing.pem"}
+	c := newShellyClient("10.30.0.28", cfg)
+	if c.TLS == nil || !c.HTTPFallback {
+		t.Fatalf("shelly_https config gave TLS=%v fallback=%t, want both set", c.TLS != nil, c.HTTPFallback)
+	}
+	if _, err := c.TLS(); err == nil || !strings.Contains(err.Error(), "Shelly CA") {
+		t.Errorf("TLS() with no CA file = %v, want a Shelly CA error", err)
 	}
 }

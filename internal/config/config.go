@@ -47,6 +47,28 @@ type Config struct {
 	// ShellyPasswordFile lists candidate files whose first line is the
 	// Shelly plug's digest password.
 	ShellyPasswordFile []string `json:"shelly_password_file"`
+	// ShellyHTTPS makes the Shelly client speak HTTPS on port 443 instead of
+	// plain HTTP on 80. The plugs' firmware (2.0.0+) serves a native HTTPS
+	// listener once a server certificate and key are uploaded and the plug
+	// rebooted; f3s issues those from a private CA (task p34). Off by default
+	// so an upgraded binary changes nothing until a config opts in.
+	ShellyHTTPS bool `json:"shelly_https"`
+	// ShellyCAFile lists candidate PEM files holding the CA that issued the
+	// plugs' server certificates; the first readable one wins, like the
+	// other path lists. It is the ONLY trust anchor for the plug: the system
+	// roots are not consulted and certificate verification is never skipped,
+	// so a plug presenting any other certificate is refused.
+	ShellyCAFile []string `json:"shelly_ca_file"`
+	// ShellyHTTPFallback lets an HTTPS call retry over plain HTTP when, and
+	// only when, the HTTPS connection could not be established at all (the
+	// dial failed: port 443 refused, filtered or unreachable). A TLS or
+	// certificate failure, or any failure after the connection was made,
+	// never falls back, so a wrong certificate is an error rather than a
+	// silent downgrade, and a Switch.Set is never sent twice. This is a
+	// migration aid while the router and every plug are moved to 443; it is
+	// meant to be switched off once HTTPS is accepted everywhere, because an
+	// on-path attacker can always force a dial failure.
+	ShellyHTTPFallback bool `json:"shelly_http_fallback"`
 	// APIKeyFile is the file holding the accepted API key(s). On the API
 	// nodes (pi0/pi1, CGI mode) it may list several keys, one per line, so
 	// each client can be issued its own key without rotating the rest; blank
@@ -191,6 +213,10 @@ func Default() Config {
 			"/keys/shelly_plug.secret",
 			"~/.shelly_plug",
 		},
+		ShellyCAFile: []string{
+			"/usr/local/etc/f3sctl/shelly-ca.pem",
+			"~/.config/f3sctl/shelly-ca.pem",
+		},
 		APIKeyFile: "/var/db/f3sctl/apikey",
 		StateDir:   "/var/db/f3sctl",
 		PeerNodes:  []string{"192.168.1.125", "192.168.1.126"},
@@ -266,6 +292,24 @@ func (c Config) ResolveShellyPassword() (string, error) {
 		return "", fmt.Errorf("%s is empty", path)
 	}
 	return pw, nil
+}
+
+// ResolveShellyCA returns the PEM bytes of the first readable Shelly CA file.
+// The CA is public material (no key), but a missing one is a hard error when
+// HTTPS is enabled: the alternative would be trusting nothing or everything.
+func (c Config) ResolveShellyCA() ([]byte, error) {
+	path, err := firstReadable(c.ShellyCAFile, "Shelly CA file")
+	if err != nil {
+		return nil, err
+	}
+	pem, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if strings.TrimSpace(string(pem)) == "" {
+		return nil, fmt.Errorf("%s is empty", path)
+	}
+	return pem, nil
 }
 
 // ResolveAPIKey returns the API key for --remote mode.

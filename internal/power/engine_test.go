@@ -213,7 +213,7 @@ func TestClusterOffDoesNotTouchTheACPlug(t *testing.T) {
 	ac := powertest.NewFakeShelly(t, true)
 	eng := testEngine(t, fans)
 	eng.cfg.Inventory.ShellyACIP = ac.Addr()
-	eng.ac = execAC{shelly: newShellyClient(ac.Addr(), eng.cfg.ResolveShellyPassword)}
+	eng.ac = execAC{shelly: newShellyClient(ac.Addr(), eng.cfg)}
 
 	var log bytes.Buffer
 	if err := eng.Off(context.Background(), &log); err != nil {

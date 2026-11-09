@@ -296,3 +296,28 @@ plus its own `/job` route, on the assumption that both peers are mounted the
 same way -- so remounting the CGI script (changing SCRIPT_NAME) keeps every
 href *and* the peer check in sync automatically. Set `peer_job_path`
 explicitly only if the two peers are genuinely mounted differently.
+
+### Shelly HTTPS
+
+The Shelly plugs (firmware 2.0.0+) serve native HTTPS on port 443 once a
+server certificate is installed; f3s issues those from a private CA. HTTPS is
+opt-in:
+
+```json
+{
+  "shelly_https":         true,
+  "shelly_ca_file":       ["/usr/local/etc/f3sctl/shelly-ca.pem", "~/.config/f3sctl/shelly-ca.pem"],
+  "shelly_http_fallback": true
+}
+```
+
+- The CA file (public certificate, no key) is the **only** trust anchor: the
+  system roots are not used, the certificate's IP SAN must match the plug's
+  address, and verification is never skipped. A missing or empty CA file is
+  an error.
+- Digest auth is unchanged and still required over HTTPS.
+- `shelly_http_fallback` retries over plain HTTP **only** when port 443 could
+  not be dialled at all (refused, filtered, unreachable). A certificate, TLS or
+  auth failure never falls back, and nothing reached the plug before a
+  fallback, so a `Switch.Set` is never sent twice. It is a migration aid;
+  turn it off once every path to the plugs allows 443.
