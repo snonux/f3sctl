@@ -41,7 +41,8 @@ func magicPacket(mac string) ([]byte, error) {
 // (earth) is normally on the Wi-Fi 10.30.0.0/24 since the 2026-11-13 router
 // migration, so it wakes hosts through the Pis: the CLI notices that no local
 // interface is on the broadcast's subnet and routes the wake through the API
-// (cli.routeOffLANWake), refusing it when no API key is configured. Nothing
+// (cli.routeOffLANWake), refusing it when no API key is configured or when
+// --local keeps it off the API. Nothing
 // here can tell whether the packet arrived, which is why that check sits in
 // front of this rather than after it.
 func (e *Engine) Wake(h inventory.Host) error {

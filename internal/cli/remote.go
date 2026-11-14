@@ -64,7 +64,9 @@ type globalFlags struct {
 // wake through the API, or refuses it (routeOffLANWake, wakeroute.go).
 //
 // --local overrides all of this and is the escape hatch for running on a Pi,
-// or for debugging without the API in the path.
+// or for debugging without the API in the path. It is not an escape hatch for
+// a wake from off the lab LAN: that is refused under --local too, because the
+// packet would reach nobody (routeOffLANWake).
 func (f globalFlags) useAPI(args []string) bool {
 	if f.local {
 		return false

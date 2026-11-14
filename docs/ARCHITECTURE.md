@@ -52,7 +52,10 @@ which also leaves a way to wake the rack when the API itself is down. It is not
 routed, so the CLI checks the local interfaces first (`cli.routeOffLANWake`):
 with none on the inventory broadcast's subnet (a laptop on the Wi-Fi,
 10.30.0.0/24) the wake goes through the API when its URL and a key are
-configured, and is refused otherwise. The Pis are on 10.20.0.0/24 and wake locally as before.
+configured, and is refused otherwise. Under `--local` it is always refused off
+the lab LAN (no packet is sent), since the API is not an option then. The Pis
+are on 10.20.0.0/24 and wake locally as before, including the API's own job
+child, which runs with `--local`.
 
 The OpenBSD gateways deliberately run **no** f3sctl: they only ever needed to
 set and clear the Gogios mute marker, which a standalone script does behind the

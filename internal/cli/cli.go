@@ -65,7 +65,8 @@ Global flags:
   --local, -l    Act on the homelab directly instead of calling the API. Only
                  works where an authorised SSH key exists, i.e. on pi0/pi1:
                  the key is pinned to those two hosts. Use for debugging or
-                 when running on a Pi.
+                 when running on a Pi. A wake under --local is refused, with
+                 no packet sent, from a host with no interface on the lab LAN.
   --force, -f    Confirm an action the server guards, e.g. switching the rack
                  fans or f-host AC off while hosts are still running or a
                  power job is in flight.
@@ -141,9 +142,10 @@ func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr i
 
 	// A wake stays local by default, but a magic packet only works from the
 	// lab LAN: from anywhere else it goes through the API, or is refused,
-	// instead of reporting success for a packet nobody received. The API's
-	// own job child (RunLocal) runs on a Pi and sets --local, so it never
-	// takes this detour.
+	// instead of reporting success for a packet nobody received. Under
+	// --local it is refused outright off the lab LAN. The API's own job child
+	// (RunLocal) runs on a Pi with --local: it passes the same interface
+	// check, since the Pis are on the lab LAN, and never takes the API detour.
 	if isWake(args) {
 		handled, err := routeOffLANWake(ctx, cfg, args, flags, seams.interfaceAddrs, stdout, stderr)
 		if handled || err != nil {

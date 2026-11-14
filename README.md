@@ -45,8 +45,11 @@ subnet (a laptop on the Wi-Fi, 10.30.0.0/24, even with wg2 up) goes through the
 API automatically when the API is configured (`api_url` or `F3SCTL_URL`, and a
 key in `F3SCTL_KEY` or `api_key_file`), and is refused otherwise, saying to use `--remote` or run from
 the lab LAN; it no longer sends a packet nobody receives and reports success.
-`--local` still sends it, with a warning. The Gogios mute is the exception inside a local
-wake: the gateways only accept the pinned key, so where no such key is readable
+Under `--local` such a wake is refused even when the API is configured, with no
+packet sent (drop `--local` to use the API). The Pis are on the lab
+LAN, so `--local` there, and the API's own job, wake as before.
+
+The Gogios mute is the exception inside a local wake: the gateways only accept the pinned key, so where no such key is readable
 (a laptop) the closing un-mute goes through the API, exactly like
 `f3sctl monitoring unmute`. `--local` overrides the routing (the un-mute then
 uses SSH or fails) and `--remote` forces the API for everything.

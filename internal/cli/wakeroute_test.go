@@ -237,19 +237,137 @@ func TestOffLANWakeWithoutAKeyIsRefused(t *testing.T) {
 	}
 }
 
-// TestLocalFlagKeepsAnOffLANWakeLocal: --local is honoured off the LAN (the
-// fans are switched on, the API is not asked) with a warning on stderr.
-func TestLocalFlagKeepsAnOffLANWakeLocal(t *testing.T) {
+// wakeWithAddrs runs args through run() with the interface list addrsFn, the
+// fan plug faked, and a counting API with a key configured, so a refusal is
+// never down to a missing key. forceLocal is RunLocal's flag, as the API's
+// job child passes it.
+func wakeWithAddrs(t *testing.T, addrsFn interfaceAddrsFunc, forceLocal bool, args ...string) (
+	stdout string, shelly *powertest.FakeShelly, apiHits int32, err error) {
+
+	t.Helper()
 	srv, hits := countingAPI(t)
-	stderr, _, err := wakeFromLaptop(t, srv.URL, true, "--local", "power", "f3", "on")
-	if err != nil {
-		t.Errorf("--local wake: %v, want it sent as asked", err)
+	shelly = powertest.NewFakeShelly(t, false)
+	cfg := powerConfig(t, shelly)
+	lab := labConfig(t, srv.URL, "secret")
+	cfg.APIURL, cfg.APIKeyFile = lab.APIURL, lab.APIKeyFile
+
+	var out, errBuf bytes.Buffer
+	err = run(context.Background(), cfg, args, &out, &errBuf, nil, forceLocal,
+		runSeams{liveHosts: hostsUp().hosts, interfaceAddrs: addrsFn})
+	return out.String(), shelly, hits.Load(), err
+}
+
+// TestLocalFlagRefusesAnOffLANWake: --local from the laptop on the Wi-Fi is
+// refused -- no fans, no packet, no API -- even though an API key is
+// configured: --local means "not through the API", and from here a local
+// packet reaches nobody. Up to v0.11.5 it was sent with a warning.
+func TestLocalFlagRefusesAnOffLANWake(t *testing.T) {
+	broken := func() ([]net.Addr, error) { return nil, errors.New("boom") }
+	laptop := fixedAddrs(laptopAddrs(t))
+	for _, tc := range []struct {
+		name       string
+		addrs      interfaceAddrsFunc
+		forceLocal bool
+		args       []string
+		wantInErr  []string
+	}{
+		{"--local power on", laptop, false, []string{"--local", "power", "on"},
+			[]string{"--local was given", "no packet was sent", "Drop --local", "lab LAN"}},
+		{"-l power all on", laptop, false, []string{"-l", "power", "all", "on"}, []string{"--local was given"}},
+		{"--local power f3 on", laptop, false, []string{"--local", "power", "f3", "on"}, []string{"--local was given"}},
+		{"RunLocal off the LAN", laptop, true, []string{"power", "f3", "on"}, []string{"--local was given"}},
+		{"--local with no interfaces", fixedAddrs(nil), false, []string{"--local", "power", "f3", "on"},
+			[]string{"--local was given"}},
+		{"--local with an unreadable interface list", broken, false, []string{"--local", "power", "f3", "on"},
+			[]string{"boom", "Drop --local"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, shelly, hits, err := wakeWithAddrs(t, tc.addrs, tc.forceLocal, tc.args...)
+			assertWakeRefused(t, err, tc.wantInErr, stdout, shelly, hits)
+		})
 	}
-	if hits.Load() != 0 {
-		t.Errorf("API hits = %d, want none under --local", hits.Load())
+}
+
+// assertWakeRefused checks that a wake was refused with errWakeOffLAN naming
+// every wantInErr, and that nothing ran: no API request, no fan plug switch,
+// no output. Every cluster-wide wake switches the fans on first and every
+// per-host wake prints its host, so silence on both shows the local wake
+// never ran.
+func assertWakeRefused(t *testing.T, err error, wantInErr []string, stdout string,
+	shelly *powertest.FakeShelly, apiHits int32) {
+
+	t.Helper()
+	if !errors.Is(err, errWakeOffLAN) {
+		t.Fatalf("err = %v, want errWakeOffLAN", err)
 	}
-	if !strings.Contains(stderr, "warning: no local interface is on the lab LAN") {
-		t.Errorf("stderr = %q, want the off-LAN warning", stderr)
+	for _, want := range wantInErr {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %q, want it to mention %q", err, want)
+		}
+	}
+	if apiHits != 0 {
+		t.Errorf("API hits = %d, want none under --local", apiHits)
+	}
+	if got := shelly.SetCalls(); len(got) != 0 {
+		t.Errorf("Switch.Set calls = %v, want none on a refused wake", got)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want nothing on a refused wake", stdout)
+	}
+}
+
+// TestLocalFlagWakesOnTheLAN: --local on the lab LAN -- a Pi by hand, or the
+// API's job child via RunLocal -- still wakes locally and leaves the API alone.
+func TestLocalFlagWakesOnTheLAN(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		forceLocal bool
+		args       []string
+	}{
+		{"--local power f3 on", false, []string{"--local", "power", "f3", "on"}},
+		{"RunLocal power f3 on", true, []string{"power", "f3", "on"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, _, hits, err := wakeWithAddrs(t, onLANOf("127.0.0.1"), tc.forceLocal, tc.args...)
+			if err != nil {
+				t.Fatalf("wake on the lab LAN: %v", err)
+			}
+			if hits != 0 {
+				t.Errorf("API hits = %d, want none under --local", hits)
+			}
+			if !strings.Contains(stdout, "f3") {
+				t.Errorf("stdout = %q, want the local wake's output", stdout)
+			}
+		})
+	}
+}
+
+func TestLocalWakeError(t *testing.T) {
+	cfg := config.Default() // broadcast 10.20.0.255, the lab LAN
+	broken := func() ([]net.Addr, error) { return nil, errors.New("boom") }
+	for _, tc := range []struct {
+		name    string
+		addrs   interfaceAddrsFunc
+		wantErr string // "" means the wake may go ahead
+	}{
+		{"pi on the lab LAN", fixedAddrs(piAddrs(t)), ""},
+		{"laptop on the Wi-Fi with wg2 up", fixedAddrs(laptopAddrs(t)), "10.20.0.255"},
+		{"laptop plugged into the lab LAN", fixedAddrs(append(laptopAddrs(t), ipNet(t, "10.20.0.50/24"))), ""},
+		{"same network, other mask", fixedAddrs([]net.Addr{ipNet(t, "10.20.0.50/16")}), "10.20.0.255"},
+		{"unreadable interface list", broken, "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := localWakeError(cfg, tc.addrs)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("localWakeError = %v, want the wake allowed", err)
+				}
+				return
+			}
+			if !errors.Is(err, errWakeOffLAN) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("localWakeError = %v, want errWakeOffLAN mentioning %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
