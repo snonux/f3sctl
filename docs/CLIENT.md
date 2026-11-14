@@ -100,7 +100,15 @@ Each host entity in `/status` carries two independent booleans:
 | `true` | `true` | up | "up" |
 | `true` | `false` | in transition | "starting…" / "stopping…" |
 | `false` | `false` | off, **or hung** | "off" |
-| `false` | `true` | — | should not occur; show "up" |
+| `false` | `true` | up, ICMP filtered | "up" |
+
+The last row is real, not an anomaly: ICMP can be filtered between the prober
+and a host while TCP is admitted (the r-nodes' firewall drops echo requests
+from the laptop's WireGuard source by design). An accepted connection to sshd
+proves the host is powered on and serving, so **a host with `ssh: true` is up,
+whatever `ping` and `pingKnown` say**, and the server treats it that way too:
+it keeps the fans and AC on, is not offered a wake, and is not confirmed
+powered down. The fields are unchanged; only this reading of them is.
 
 There is a third boolean, `pingKnown`, and it overrides the table when it is
 `false`: the server could not carry the ICMP probe out at all — no usable
@@ -133,15 +141,16 @@ are still down, and if they never answer within the un-mute budget it ends
 missing node alerts). The error names k3s nodes while the host map lists
 f-hosts, and "done" there only means "magic packet sent": r0/r1/r2 run on
 f0/f1/f2, so "… : r1" points at f1. So: if a `power-on` job fails that way, or completes and
-a host is still `!ping` a few minutes later, tell the user it may need a
+a host still has neither `ping` nor `ssh` a few minutes later, tell the user it may need a
 physical power cycle rather than letting them press the button again forever. That is the one piece of domain knowledge
 worth putting in a client, and it is about presentation, not about the API.
 
 Overall rack state is best derived as:
 
-- **all off** — no f-host has `ping`
+- **all off** — no f-host has `ping` or `ssh`
 - **partially up** — some do
-- **up** — every f-host and every cluster host has `ping` and `ssh`
+- **up** — every f-host and every cluster host has `ssh` (and `ping`, unless
+  ICMP is filtered on the way)
 
 The `fans` entity carries `on`. If it carries `error`, the plug could not be
 reached: show "unknown", **not** "off". They are different situations, and

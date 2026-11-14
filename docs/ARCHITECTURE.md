@@ -186,7 +186,7 @@ sequenceDiagram
 
     loop until silent or 2 min
         U->>C: GET /job (poll, match id)
-        J->>F: ICMP — 3 consecutive misses = down
+        J->>F: ICMP + sshd — 3 consecutive misses of both = down
     end
 
     J->>J: rack idle? → fans off

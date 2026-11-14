@@ -192,7 +192,10 @@ func (e *Engine) offPreflight(ctx context.Context, log io.Writer, tl *timeline,
 // running. Shutting the rack down in stages, or re-running after a partial
 // run, is ordinary use.
 //
-// Ping decides this, not SSH. A host answering ICMP but not SSH is powered on
+// Either probe answering keeps a host in (Engine.answers): ICMP alone is not
+// enough to call it off, because a host whose ICMP is filtered but whose sshd
+// answers is plainly running and would otherwise be skipped as "already
+// powered off" and left on. A host answering ICMP but not SSH is powered on
 // and unreachable, and that case must still abort: there is no way to tell
 // whether it has the zusb pool imported, and guessing risks cutting USB power
 // to a mounted backup pool.
@@ -204,8 +207,8 @@ func (e *Engine) offPreflight(ctx context.Context, log io.Writer, tl *timeline,
 func (e *Engine) skipAlreadyOff(ctx context.Context, log io.Writer,
 	hosts []inventory.Host) []inventory.Host {
 
-	live, alreadyOff := partitionLive(hosts, func(ip string) bool {
-		return e.isRunning(ctx, ip)
+	live, alreadyOff := partitionLive(hosts, func(h inventory.Host) bool {
+		return e.isRunning(ctx, h)
 	})
 	for _, h := range alreadyOff {
 		fmt.Fprintf(log, "%s is already powered off; skipping it\n", h.Name)
@@ -460,17 +463,17 @@ func fansLeftOnReason(hosts []string) string {
 // known to be off.
 //
 // The split is deliberately not "answered ICMP": its only caller passes
-// Engine.isRunning, so a host whose probe could not be carried out lands in
-// live. Keeping an unprobeable host in the shutdown is the loud outcome; see
+// Engine.isRunning, so a host whose probe could not be carried out, or one
+// that answers SSH with its ICMP filtered, lands in live. Keeping an unprobeable host in the shutdown is the loud outcome; see
 // skipAlreadyOff.
 //
 // Pulled out as a plain function so the rule can be tested without an SSH
 // client, a Shelly plug or a live rack: the predicate is all it touches.
 func partitionLive(hosts []inventory.Host,
-	mayBeRunning func(ip string) bool) (live, off []inventory.Host) {
+	mayBeRunning func(h inventory.Host) bool) (live, off []inventory.Host) {
 
 	for _, h := range hosts {
-		if mayBeRunning(h.IP) {
+		if mayBeRunning(h) {
 			live = append(live, h)
 			continue
 		}

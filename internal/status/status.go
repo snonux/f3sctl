@@ -31,6 +31,9 @@ package status
 //
 //	Ping && SSH    the host is up and serving
 //	Ping && !SSH   the host is booting (or sshd is wedged)
+//	!Ping && SSH   the host is up; ICMP is filtered between the prober and
+//	               the host (the r-nodes admit only TCP from the laptop's
+//	               WireGuard source, by design). See Reachable.
 //	!Ping && !SSH  the host is off -- or hung in single-user after a failed
 //	               shutdown, in which case it is powered on, has no network,
 //	               and Wake-on-LAN will not wake it. Worth knowing before
@@ -54,6 +57,17 @@ type HostStatus struct {
 	SSH       bool    `json:"ssh"`
 	MS        float64 `json:"ms"`
 }
+
+// Reachable reports whether the host answered either probe: ICMP or a TCP
+// connection to sshd.
+//
+// Either answer proves the host is powered on and on the network, so this is
+// the reading every "is it up / may it be off" decision starts from, never
+// Ping alone. Ping on its own was the old reading, and it called a host whose
+// ICMP is filtered (the r-nodes, seen from the laptop over wg2) off while it
+// was serving SSH. A false here is not yet "off": PingKnown says whether the
+// ICMP half reached a conclusion at all.
+func (h HostStatus) Reachable() bool { return h.Ping || h.SSH }
 
 // FansState is the rack-fan plug's reported state.
 type FansState struct {

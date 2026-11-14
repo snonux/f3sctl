@@ -122,7 +122,7 @@ irreversible happens:
    Wake-on-LAN cannot wake a NIC that never powered down. Recovering from that
    needs physical access.
 6. **Confirm they actually went down** — accepting a shutdown is not the same
-   as completing one. Any host still answering ICMP after two minutes is
+   as completing one. Any host still answering ICMP or SSH after two minutes is
    reported as a failure, because it is powered on, off the network, and
    Wake-on-LAN will not wake it.
 7. **Fans off** — only once f0/f1/f2 are genuinely down. The plug does not
@@ -134,7 +134,7 @@ called out — so "why did that take so long" is a question the log answers.
 ## What `power on` does
 
 Fans on, one magic packet per host, then a wait (`unmute_timeout`) for
-r0/r1/r2 to answer ping before Gogios is un-muted. While any node is still
+r0/r1/r2 to answer (ping or SSH) before Gogios is un-muted. While any node is still
 down, the magic packets are re-sent every two minutes: a NIC can ignore the
 first one (f1 did on 2026-09-25 and stayed off for seven hours). If the wait
 runs out, Gogios is un-muted **anyway** and the wake fails naming the missing

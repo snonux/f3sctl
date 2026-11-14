@@ -107,7 +107,8 @@ function entities(entity, cls) {
 // third case is deliberately hedged: an off host and one hung in single-user
 // are indistinguishable from here (CLIENT.md section 4).
 function describe(p) {
-  if (p.ping && p.ssh) return 'up';
+  // sshd answering means up even when ICMP is filtered on the way.
+  if (p.ssh) return 'up';
   if (p.ping) return 'starting…';
   // pingKnown === false means the probe never ran, which is not evidence of
   // anything. An older server omits the field; absent means the probe ran.
@@ -268,7 +269,9 @@ async function selftest() {
 
   // The heart of the design: offered actions must match observed state. A
   // running job (jobRunning, above) withholds all of them.
-  const allUp = hosts.filter((h) => h.powerGroup).every((h) => h.ping);
+  // A host is up when it answers either probe: ICMP may be filtered while
+  // sshd answers.
+  const allUp = hosts.filter((h) => h.powerGroup).every((h) => h.ping || h.ssh);
   check(!!action(power, 'power-on') === (!jobRunning && !allUp),
     'power-on is offered exactly when something is down and no job is running');
   check(!!action(power, 'power-off') === (!jobRunning && hosts.some((h) => h.powerGroup && h.ssh)),
@@ -277,7 +280,7 @@ async function selftest() {
   // "all" covers f3 as well, so it is judged against a different host set than
   // power-on -- with only f3 down, power-on is correctly absent and all-on is
   // not.
-  const everyFUp = hosts.filter((h) => h.fHost).every((h) => h.ping);
+  const everyFUp = hosts.filter((h) => h.fHost).every((h) => h.ping || h.ssh);
   check(!!action(power, 'all-on') === (!jobRunning && !everyFUp),
     'all-on is offered exactly when any f-host is down and no job is running');
   check(!!action(power, 'all-off') === (!jobRunning && hosts.some((h) => h.fHost && h.ssh)),
@@ -296,13 +299,13 @@ async function selftest() {
   // server's rule, so it is the one to check against. Fan guard excludes f3;
   // AC guard includes it.
   const off = action(acControl, 'fans-off');
-  const mayBeUpFans = hosts.some((h) => h.powerGroup && (h.ping || h.pingKnown === false));
+  const mayBeUpFans = hosts.some((h) => h.powerGroup && (h.ping || h.ssh || h.pingKnown === false));
   if (off) {
     check((off.fields?.length > 0) === mayBeUpFans,
       'fans-off carries a confirmation field exactly while an f0-f2 host may be running');
   }
   const acOff = action(acControl, 'ac-off');
-  const mayBeUpAC = hosts.some((h) => h.fHost && (h.ping || h.pingKnown === false));
+  const mayBeUpAC = hosts.some((h) => h.fHost && (h.ping || h.ssh || h.pingKnown === false));
   if (acOff) {
     check((acOff.fields?.length > 0) === mayBeUpAC,
       'ac-off carries a confirmation field exactly while any f-host may be running');

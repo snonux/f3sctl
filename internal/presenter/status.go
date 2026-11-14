@@ -124,12 +124,24 @@ func printAC(out io.Writer, ac status.ACState, err error) {
 // state CLIENT.md's pingKnown paragraph exists to prevent, since the server
 // treats an unmeasured host as possibly still running (keeping the rack fans
 // on) while the table told the operator otherwise.
+//
+// SSH without ping is "up", qualified by why the PING column says "no". An
+// accepted TCP connection to sshd proves the host is powered on and serving,
+// so whatever the ICMP half says it cannot be "off": from the laptop, over
+// wg2, the r-nodes' firewall admits TCP 22/80/443/32200 and no ICMP echo by
+// design, and the table used to report a running cluster as "off (or hung in
+// single-user)". The SSH cases come before the PingKnown one for the same
+// reason: an unmeasured ping does not make a host that answered SSH unknown.
 func Describe(st status.HostStatus) string {
 	switch {
 	case st.Ping && st.SSH:
 		return "up"
 	case st.Ping && !st.SSH:
 		return "in transition"
+	case st.SSH && !st.PingKnown:
+		return "up (ping not measured)"
+	case st.SSH:
+		return "up (ping filtered)"
 	case !st.PingKnown:
 		// The PING column reads "no" here too, and would be read as "off" --
 		// but nothing was measured. Saying so also explains why `fans off`

@@ -176,3 +176,42 @@ func TestGroupActionTitlesNameTheInventorysHosts(t *testing.T) {
 		})
 	}
 }
+
+// TestSSHOnlyHostIsNotOfferedAWake pins that a host answering sshd with its
+// ICMP filtered counts as up for every wake predicate: the group counts, the
+// per-host power-on, and the snapshot guards. Before, `up` counted ping alone,
+// so such a rack was offered power-on while running.
+func TestSSHOnlyHostIsNotOfferedAWake(t *testing.T) {
+	inv := inventory.Inventory{Hosts: []inventory.Host{
+		{Name: "f0", Role: inventory.RoleF},
+		{Name: "f1", Role: inventory.RoleF},
+	}}
+	sf := &Surface{Inv: inv}
+	s := WithSnapshot(contract.State{}, Snapshot{
+		Hosts: []power.HostStatus{
+			{Name: "f0", Role: "f", PingKnown: true, SSH: true},
+			{Name: "f1", Role: "f", PingKnown: true}, // silent on both: off
+		},
+	})
+
+	if up, sshUp, total := sf.clusterHostsUp(s); up != 1 || sshUp != 1 || total != 2 {
+		t.Errorf("clusterHostsUp = (%d, %d, %d), want (1, 1, 2): f0 up over ssh, f1 off", up, sshUp, total)
+	}
+	routes := map[string]contract.Route{}
+	for _, r := range append(sf.hostRoutes("f0"), sf.hostRoutes("f1")...) {
+		routes[r.Name] = r
+	}
+	if routes["f0-on"].Available(s) {
+		t.Error("f0-on offered for a host that answers sshd")
+	}
+	if !routes["f0-off"].Available(s) {
+		t.Error("f0-off not offered for a host that answers sshd")
+	}
+	// Negative: the host silent on both probes is still offered a wake.
+	if !routes["f1-on"].Available(s) {
+		t.Error("f1-on not offered for a host that answers neither probe")
+	}
+	if !sf.rackBusy(s).Busy() || !sf.acBusy(s).Busy() {
+		t.Error("an sshd-answering f-host does not keep the fans/AC guard busy")
+	}
+}

@@ -47,7 +47,7 @@ type GatewayVerb interface {
 
 // NodeProbe reports which of hosts do not answer, by name. It is how
 // UnmuteGogios waits for the k3s nodes: in production an adapter over
-// power.Engine.Probe that lists the hosts whose ping failed.
+// power.Engine.Probe that lists the hosts answering neither ping nor SSH.
 type NodeProbe func(ctx context.Context, hosts []inventory.Host) (down []string)
 
 // GatewaySwitch sets or clears the Gogios mute on every gateway by some route

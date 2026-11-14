@@ -32,9 +32,10 @@ func (e *Engine) ProbeAll(ctx context.Context) []HostStatus {
 // determined is included, because this feeds a cooling guard and an
 // unprobeable host is not a host that is known to be off. See RackActivity.
 //
-// ICMP rather than SSH on purpose: this answers "is anything drawing power in
-// that rack", which is what the fan guards need to know. A host mid-boot has
-// no sshd yet but is very much running and generating heat.
+// ICMP or SSH, either one: this answers "is anything drawing power in that
+// rack", which is what the fan guards need to know. A host mid-boot has no
+// sshd yet but answers ICMP and is very much running and generating heat; a
+// host whose ICMP is filtered from here still answers sshd.
 //
 // This is the CLI's view of the guard (cli.plugOff, for the fans). It is one
 // of three; see RackActivity for the rule they share and for what separates
@@ -228,9 +229,10 @@ func (a RackActivity) Why() string {
 // f3 is not probed here: the plug does not cool it, so its liveness cannot
 // change the answer. See RackActivity's doc comment.
 //
-// It pings directly instead of going through Probe because Probe also dials
-// port 22 on every host, and a host that is off makes that dial wait out the
-// full timeout for an answer nothing here looks at.
+// Each host is probed with ICMP and an sshd dial together (Engine.answers),
+// so a host whose ICMP is filtered but whose sshd answers counts as running.
+// The two run concurrently, so a host that is off costs one ProbeTimeout per
+// round, not two.
 //
 // Concurrently, because a host that is off costs several ProbeTimeouts (see
 // confirmLiveness) and the caller is usually a person waiting at a terminal or
@@ -258,10 +260,10 @@ func (e *Engine) activityOf(ctx context.Context, hosts []inventory.Host) RackAct
 	var wg sync.WaitGroup
 	for i, h := range hosts {
 		wg.Add(1)
-		go func(i int, ip string) {
+		go func(i int, h inventory.Host) {
 			defer wg.Done()
-			state[i] = e.confirmLiveness(ctx, ip)
-		}(i, h.IP)
+			state[i] = e.confirmLiveness(ctx, h)
+		}(i, h)
 	}
 	wg.Wait()
 
@@ -298,9 +300,13 @@ const (
 // that it is idle. The hosts are probed in parallel and a busy rack answers on
 // the first round, so what this actually slows down is switching the fans off
 // -- the one operation worth being sure about.
-func (e *Engine) confirmLiveness(ctx context.Context, ip string) hostLiveness {
+//
+// Each probe is Engine.answers, ICMP and sshd together: a host whose sshd
+// answers is up even with its ICMP filtered, so the guard never reads a
+// running host as cold just because ping cannot reach it from here.
+func (e *Engine) confirmLiveness(ctx context.Context, h inventory.Host) hostLiveness {
 	for misses := 0; ; {
-		up, known := e.liveness()(ctx, ip)
+		up, known := e.answers(ctx, h)
 		switch {
 		case up:
 			return livenessUp

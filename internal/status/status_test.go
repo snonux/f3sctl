@@ -65,3 +65,25 @@ func TestJSONShape(t *testing.T) {
 		})
 	}
 }
+
+// TestReachable pins that either probe answering makes a host reachable, and
+// that an unmeasured ping on its own does not.
+func TestReachable(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		h    HostStatus
+		want bool
+	}{
+		{"ping and ssh", HostStatus{Ping: true, PingKnown: true, SSH: true}, true},
+		{"ping only", HostStatus{Ping: true, PingKnown: true}, true},
+		{"ssh only (icmp filtered)", HostStatus{PingKnown: true, SSH: true}, true},
+		{"silent", HostStatus{PingKnown: true}, false},
+		{"unmeasured, no ssh", HostStatus{}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.h.Reachable(); got != tc.want {
+				t.Errorf("Reachable(%+v) = %v, want %v", tc.h, got, tc.want)
+			}
+		})
+	}
+}

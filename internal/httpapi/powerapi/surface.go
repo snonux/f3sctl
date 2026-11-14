@@ -189,11 +189,11 @@ func Host(s contract.State, name string) (power.HostStatus, bool) {
 }
 
 // clusterHostsUp reports how many hosts of the power group (f0/f1/f2,
-// power.PowerGroupStatuses) answer ICMP, and how many are additionally
+// power.PowerGroupStatuses) are up (answer ICMP or SSH), and how many are
 // reachable over SSH.
 //
 // The two counts answer different questions. Waking is about power, so it uses
-// ping. Shutting down runs entirely over SSH -- the zusb pre-flight, the guest
+// either probe: anything that answers is powered on. Shutting down runs entirely over SSH -- the zusb pre-flight, the guest
 // stop, the poweroff itself -- so it needs sshUp: offering "power off" to a
 // host that is merely mid-boot produces a job that can only fail. That is
 // exactly what happened on 2026-08-08, when f3 was shut down 48 seconds after
@@ -214,11 +214,15 @@ func (sf *Surface) everyFHostUp(s contract.State) (up, sshUp, total int) {
 	return hostsUp(power.EveryFHostStatuses(sf.Inv, SnapshotOf(s).Hosts))
 }
 
-// hostsUp counts statuses: all of them, those answering ICMP, and those
-// reachable over SSH.
+// hostsUp counts statuses: all of them, those that are up (answering ICMP or
+// SSH, HostStatus.Reachable), and those reachable over SSH.
+//
+// up is Reachable rather than Ping because a host whose ICMP is filtered but
+// whose sshd answers is running: counting it as down would offer a wake for a
+// rack that is already up.
 func hostsUp(statuses []power.HostStatus) (up, sshUp, total int) {
 	for _, h := range statuses {
-		if h.Ping {
+		if h.Reachable() {
 			up++
 		}
 		if h.SSH {

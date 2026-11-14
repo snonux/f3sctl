@@ -35,8 +35,8 @@ func TestPartitionLiveSkipsHostsThatAreAlreadyOff(t *testing.T) {
 	}
 
 	// f0 is powered off; the other two answer.
-	live, off := partitionLive(hosts, func(ip string) bool {
-		return ip != "10.20.0.130"
+	live, off := partitionLive(hosts, func(h inventory.Host) bool {
+		return h.IP != "10.20.0.130"
 	})
 
 	if got := names(live); len(got) != 2 || got[0] != "f1" || got[1] != "f2" {
@@ -55,7 +55,7 @@ func TestPartitionLiveSkipsHostsThatAreAlreadyOff(t *testing.T) {
 // on 2026-08-08. A filter that reordered would silently reintroduce it.
 func TestPartitionLivePreservesOrder(t *testing.T) {
 	hosts := inventory.Default().ShutdownOrder()
-	live, _ := partitionLive(hosts, func(string) bool { return true })
+	live, _ := partitionLive(hosts, func(inventory.Host) bool { return true })
 
 	if len(live) != len(hosts) {
 		t.Fatalf("live has %d hosts, want %d", len(live), len(hosts))
@@ -74,7 +74,7 @@ func TestPartitionLivePreservesOrder(t *testing.T) {
 // an error: there is simply nothing left to shut down.
 func TestPartitionLiveWithEverythingOff(t *testing.T) {
 	hosts := inventory.Default().ShutdownOrder()
-	live, off := partitionLive(hosts, func(string) bool { return false })
+	live, off := partitionLive(hosts, func(inventory.Host) bool { return false })
 
 	if len(live) != 0 {
 		t.Errorf("live = %v, want none", names(live))
@@ -166,6 +166,11 @@ func buildTestEngine(t *testing.T, shelly *powertest.FakeShelly, fHostsOnly bool
 	// Injected liveness is always *known*: these tests answer "is it up", and
 	// the unknown case has tests of its own.
 	e.isUp = func(_ context.Context, ip string) (bool, bool) { return liveIPs[ip], true }
+	// The strict probes (Engine.answers) dial sshd as well as pinging, so the
+	// SSH half is faked too: a real dial would reach whichever of these
+	// addresses happen to be up on the machine running the tests. noSSH never
+	// answers, so isUp alone decides, as these tests intend.
+	e.probe = noSSH{}
 	e.nfsMounts = func(context.Context) ([]string, error) { return nil, nil }
 	e.downProbeInterval = time.Millisecond
 	return e
@@ -905,10 +910,13 @@ func TestAHandBuiltEngineFallsBackToTheRealProbes(t *testing.T) {
 		t.Errorf("zusbBackend() = %v, want %v", got, want)
 	}
 
-	// And the path the whole fallback exists for, driven for real. The probe
-	// is the only seam substituted, because the point is that nothing else had
-	// to be: this must run on an Engine somebody built with a struct literal.
+	// And the path the whole fallback exists for, driven for real. The probes
+	// are the only seams substituted (ICMP answering, sshd silent, so the
+	// answer cannot depend on which real hosts this machine can reach),
+	// because the point is that nothing else had to be: this must run on an
+	// Engine somebody built with a struct literal.
 	e.isUp = func(context.Context, string) (bool, bool) { return true, true }
+	e.probe = noSSH{}
 	e.downProbeInterval = time.Millisecond
 	leftOn, err := e.fansOffOnceTheRackIsIdle(context.Background(), io.Discard)
 	if err != nil {

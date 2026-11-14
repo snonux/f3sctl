@@ -40,11 +40,16 @@ func (e *Engine) newMonitor() *gogios.Monitor {
 }
 
 // downNodes is the gogios.NodeProbe over Engine.Probe: the names of the hosts
-// whose ping did not answer.
+// that answered neither ping nor SSH (HostStatus.Reachable).
+//
+// SSH counts as an answer because a local wake from the laptop sees the
+// r-nodes through wg2, where their firewall drops ICMP echo by design: on
+// ping alone the wait never ended, the magic packets were re-sent to a
+// running rack, and the un-mute fired only after the timeout as a failure.
 func (e *Engine) downNodes(ctx context.Context, hosts []inventory.Host) []string {
 	var down []string
 	for _, st := range e.Probe(ctx, hosts) {
-		if !st.Ping {
+		if !st.Reachable() {
 			down = append(down, st.Name)
 		}
 	}

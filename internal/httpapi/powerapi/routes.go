@@ -381,9 +381,11 @@ func (sf *Surface) hostRoutes(name string) []contract.Route {
 			Name: name + "-on", Title: "Power on " + name,
 			Method: http.MethodPost, Path: "/power/" + name + "/on", Action: true,
 			CLIVerb: "power " + name + " on",
+			// Offered only while the host answers neither probe: one whose
+			// sshd answers is up even with its ICMP filtered.
 			Available: func(s contract.State) bool {
 				h, ok := Host(s, name)
-				return ok && !JobRunning(s) && !h.Ping
+				return ok && !JobRunning(s) && !h.Reachable()
 			},
 		},
 		{

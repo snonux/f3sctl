@@ -84,7 +84,8 @@ const confirmedDownProbes = 3
 // so a test can shorten it; nothing else should.
 const downProbeInterval = 10 * time.Second
 
-// awaitPowerDown waits for each host to stop answering ICMP, and returns the
+// awaitPowerDown waits for each host to stop answering ICMP and SSH
+// (Engine.answers), and returns the
 // names of any whose power-down was never confirmed.
 //
 // A host still answering after the timeout is the dangerous case: it is
@@ -129,7 +130,9 @@ func (e *Engine) awaitPowerDown(ctx context.Context, log io.Writer, hosts []inve
 		}
 
 		for name, h := range pending {
-			up, known := e.liveness()(ctx, h.IP)
+			// answers, not ping alone: a host whose sshd still accepts
+			// connections has not powered down, whatever ICMP says.
+			up, known := e.answers(ctx, h)
 			if up || !known {
 				// Still answering, or nothing could be learned. A probe that
 				// could not be carried out is not evidence that a host powered

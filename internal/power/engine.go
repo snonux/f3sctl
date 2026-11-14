@@ -35,6 +35,10 @@ type Engine struct {
 	// isUp probes one host: whether it answered ICMP, and -- separately --
 	// whether the probe reached any conclusion at all.
 	//
+	// The strict decisions below do not read it on its own: they go through
+	// Engine.answers, which pairs it with an sshd dial so that a host whose
+	// ICMP is filtered but whose sshd answers is never taken for off.
+	//
 	// A field rather than a direct pingOnce call because four things read it:
 	// which hosts to skip as already off (Engine.off), whether a host that
 	// accepted a shutdown actually went silent (awaitPowerDown), whether the
@@ -185,17 +189,19 @@ func (e *Engine) liveness() func(ctx context.Context, ip string) (up, known bool
 	return e.isUp
 }
 
-// isRunning reports whether the host at ip may still be drawing power.
+// isRunning reports whether host h may still be drawing power.
 //
-// A host that could not be probed counts as running, and that direction is the
+// It reads Engine.answers, so a host whose sshd accepts a connection counts
+// as running even while its ICMP is filtered. A host that could not be probed
+// counts as running, and that direction is the
 // entire point of the probe's second result. Every question asked here is
 // really "is it safe to treat this host as off": safe to skip its shutdown,
 // safe to call it powered down, safe to cut its cooling. Unknown is never a
 // safe yes, and the cost of the two mistakes is not symmetric -- a host wrongly
 // believed to be running costs a retry or some idle fan noise, one wrongly
 // believed to be off can lose its cooling while it runs.
-func (e *Engine) isRunning(ctx context.Context, ip string) bool {
-	up, known := e.liveness()(ctx, ip)
+func (e *Engine) isRunning(ctx context.Context, h inventory.Host) bool {
+	up, known := e.answers(ctx, h)
 	return up || !known
 }
 

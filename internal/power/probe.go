@@ -16,13 +16,16 @@ import (
 // name, so nothing that already speaks power.HostStatus has to change.
 type HostStatus = status.HostStatus
 
-// livenessOf folds a status's two ping fields back into the tri-state the fan
+// livenessOf folds a status's probe fields back into the tri-state the fan
 // guards decide on. Its only caller is snapshotActivity, which both
 // RackActivityFrom (the fan guard) and ACActivityFrom (the AC guard) go
 // through.
+//
+// Up is HostStatus.Reachable, not Ping: a host whose sshd answers is running
+// even when ICMP to it is filtered, and must keep its cooling and its mains.
 func livenessOf(h HostStatus) hostLiveness {
 	switch {
-	case h.Ping:
+	case h.Reachable():
 		return livenessUp
 	case !h.PingKnown:
 		return livenessUnknown
@@ -82,6 +85,33 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 
 	wg.Wait()
 	return st
+}
+
+// answers probes h with ICMP and an sshd dial at once, and folds the two into
+// the (up, known) pair the strict decisions read: up when either answered,
+// known when either reached a conclusion.
+//
+// This is what every "may this host be off" decision that probes on demand
+// goes through -- skipAlreadyOff (via isRunning), confirmLiveness (the fan and
+// AC guards) and awaitPowerDown -- so that a host whose ICMP is filtered but
+// whose sshd accepts a connection is never treated as off, silent or cold.
+// probeOne keeps the two signals apart instead, because it describes what was
+// observed rather than acting on it.
+//
+// The two probes run concurrently, as in probeOne: on a silent host both wait
+// out ProbeTimeout, and running them one after the other would double the
+// cost of every confirmation round.
+func (e *Engine) answers(ctx context.Context, h inventory.Host) (up, known bool) {
+	var wg sync.WaitGroup
+	var sshUp bool
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sshUp = e.probeBackend().SSH(ctx, h)
+	}()
+	pingUp, pingKnown := e.liveness()(ctx, h.IP)
+	wg.Wait()
+	return pingUp || sshUp, pingKnown || sshUp
 }
 
 // pingOnce sends a single ICMP echo and reports whether it was answered, and

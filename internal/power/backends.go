@@ -69,7 +69,9 @@ type PowerBackend interface {
 // real-world default) is defined in terms of it, so this is one mechanism
 // reachable two ways, not two mechanisms that could disagree. SSH has no such
 // legacy seam -- probeOne dialled it directly until this refactor -- so it is
-// wired through this interface from the start.
+// wired through this interface from the start. The strict decisions read it
+// too, through Engine.answers: an sshd that answers means the host is up
+// whatever ICMP says.
 type ProbeBackend interface {
 	Ping(ctx context.Context, ip string) (up, known bool)
 	SSH(ctx context.Context, h inventory.Host) bool
