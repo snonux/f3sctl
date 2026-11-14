@@ -535,14 +535,14 @@ func TestDefaultAddresses(t *testing.T) {
 			t.Errorf("%s: IP/MAC = %q/%q, want %q/%q", h.Name, h.IP, h.MAC, w.ip, w.mac)
 		}
 	}
-	plugs := map[string][2]string{
+	scalars := map[string][2]string{ // key -> {got, want}
 		"broadcast":    {inv.Broadcast, "10.20.0.255"},
 		"shelly_ip":    {inv.ShellyIP, "10.30.0.28"},
 		"shelly_ac_ip": {inv.ShellyACIP, "10.30.0.29"},
 	}
-	for key, gw := range plugs {
-		if gw[0] != gw[1] {
-			t.Errorf("%s = %q, want %q", key, gw[0], gw[1])
+	for key, v := range scalars {
+		if v[0] != v[1] {
+			t.Errorf("%s = %q, want %q", key, v[0], v[1])
 		}
 	}
 }
@@ -565,16 +565,19 @@ func TestDefaultBroadcastReachesEveryFHost(t *testing.T) {
 func TestIsBroadcastOf(t *testing.T) {
 	cases := []struct {
 		bcast, ip string
+		bits      int
 		want      bool
 	}{
-		{"10.20.0.255", "10.20.0.130", true},
-		{"192.168.1.255", "10.20.0.130", false}, // retired household LAN
-		{"10.20.0.255", "192.168.1.130", false},
-		{"10.20.0.0", "10.20.0.130", false}, // network address, not broadcast
-		{"10.30.0.255", "10.20.0.130", false},
+		{"10.20.0.255", "10.20.0.130", 24, true},
+		{"192.168.1.255", "10.20.0.130", 24, false}, // retired household LAN
+		{"10.20.0.255", "192.168.1.130", 24, false},
+		{"10.20.0.0", "10.20.0.130", 24, false}, // network address, not broadcast
+		{"10.30.0.255", "10.20.0.130", 24, false},
+		{"10.20.15.255", "10.20.0.130", 20, true}, // partial-byte mask
+		{"10.20.0.255", "10.20.0.130", 20, false}, // a /24 broadcast inside a /20
 	}
 	for _, c := range cases {
-		if got := isBroadcastOf(t, c.bcast, c.ip, 24); got != c.want {
+		if got := isBroadcastOf(t, c.bcast, c.ip, c.bits); got != c.want {
 			t.Errorf("isBroadcastOf(%s, %s) = %v, want %v", c.bcast, c.ip, got, c.want)
 		}
 	}
@@ -590,9 +593,6 @@ func isBroadcastOf(t *testing.T, bcast, ip string, bits int) bool {
 		t.Fatalf("parsing %q / %q: %v / %v", bcast, ip, errB, errA)
 	}
 	prefix := netip.PrefixFrom(a, bits).Masked()
-	if !prefix.Contains(b) {
-		return false
-	}
 	last := prefix.Addr().As4()
 	for i := range last {
 		last[i] |= ^byte(0) >> min(8, max(0, bits-8*i))

@@ -57,10 +57,10 @@ Usage:
 
 Global flags:
   --remote, -r   Drive the command through the HTTP API on pi0/pi1 instead of
-                 acting locally. Required when off the LAN: a Wake-on-LAN
-                 magic packet is not routed, so only a host on the homelab
-                 broadcast domain can send one. Needs api_url and an API key
-                 (config, or F3SCTL_URL / F3SCTL_KEY).
+                 acting locally. Required when off the lab LAN
+                 (10.20.0.0/24): a Wake-on-LAN magic packet is not routed, so
+                 only a host on that broadcast domain can send one. Needs
+                 api_url and an API key (config, or F3SCTL_URL / F3SCTL_KEY).
   --local, -l    Act on the homelab directly instead of calling the API. Only
                  works where an authorised SSH key exists, i.e. on pi0/pi1:
                  the key is pinned to those two hosts. Use for debugging or

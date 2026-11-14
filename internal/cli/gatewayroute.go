@@ -15,8 +15,8 @@ import (
 //
 // The gateways accept only the restricted f3sctl key, and that key is pinned
 // to pi0/pi1 (README "Security model"). A wake, though, runs locally by
-// default -- a magic packet is an unprivileged LAN broadcast -- so on a laptop
-// the wake itself works while the un-mute at its end has no key to SSH with.
+// default -- a magic packet is an unprivileged broadcast on the lab LAN
+// (10.20.0.0/24) -- so on a laptop on that LAN the wake itself works while the un-mute at its end has no key to SSH with.
 // `monitoring unmute` never had that problem because globalFlags.useAPI
 // routes every monitoring verb through the API, where pi0/pi1 make the SSH
 // call with their key. This makes the wake's un-mute take the same route in
