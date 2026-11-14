@@ -31,7 +31,7 @@ const (
 )
 
 // StorageRole is a host's part in the CARP storage pair that holds the
-// storage VIP (f3s-storage-ha, 192.168.1.138) and serves NFS from it. Most
+// storage VIP (f3s-storage-ha, 10.20.0.138) and serves NFS from it. Most
 // hosts have none. See ShutdownOrder and CARPMembers for what it decides.
 type StorageRole string
 
@@ -50,7 +50,9 @@ type Host struct {
 	Role Role   `json:"role"`
 	// IP is the LAN address f3sctl connects and probes on. The WireGuard
 	// addresses are deliberately not used: f3sctl runs on pi0/pi1, which sit
-	// on the same flat 192.168.1.0/24 as everything it talks to.
+	// on the lab network 10.20.0.0/24 with the f-hosts and r-nodes. (Until
+	// the router migration finished on 2026-11-13 that was the flat
+	// household LAN 192.168.1.0/24; those addresses are retired.)
 	IP string `json:"ip"`
 	// MAC is the Wake-on-LAN target. Empty for hosts that cannot be woken.
 	MAC string `json:"mac,omitempty"`
@@ -86,12 +88,17 @@ func (h Host) Wakeable() bool { return h.MAC != "" }
 // to reach them.
 type Inventory struct {
 	Hosts []Host `json:"hosts"`
-	// Broadcast is where Wake-on-LAN magic packets are sent. It must be the
-	// broadcast address of the LAN the f-hosts are on, and f3sctl must be
-	// running on that LAN — a magic packet is not routed.
+	// Broadcast is where Wake-on-LAN magic packets are sent. It is set
+	// explicitly, not derived from the host IPs, and must be the broadcast
+	// address of the LAN the f-hosts are on (10.20.0.255 for the lab
+	// 10.20.0.0/24). f3sctl must be running on that LAN: a magic packet is
+	// not routed, and the router (OpenBSD, net.inet.ip.directed-broadcast=0
+	// by default) does not forward directed broadcasts.
 	Broadcast string `json:"broadcast"`
 	// ShellyIP is the Shelly Plug M Gen 3 that powers the rack fans
 	// (shelly1). Driven automatically by power on/off and by `f3sctl fans`.
+	// Both plugs sit on the Wi-Fi network 10.30.0.0/24 and, unlike the
+	// hosts, are reached through the router.
 	ShellyIP string `json:"shelly_ip"`
 	// ShellyACIP is the Shelly Plug M Gen 3 that switches mains AC for the
 	// f-hosts (shelly2: f0–f3 plus their JetKVM switches). Exposed only via
@@ -316,24 +323,29 @@ func ValidateHostName(name string) error {
 // Default returns the compiled-in inventory.
 //
 // MAC addresses were read off the hosts with `ifconfig re0 | grep ether`; if a
-// Beelink's board is ever replaced, this is the one place to update.
+// Beelink's board is ever replaced, this is the one place to update. They are
+// hardware addresses and did not change in the router migration.
+//
+// The addresses mirror the deployed /usr/local/etc/f3sctl.json on pi0/pi1
+// (lab 10.20.0.0/24, Shellys on Wi-Fi 10.30.0.0/24); the canonical table is
+// IQ's f3s host-addresses inventory. TestDefaultAddresses pins them.
 func Default() Inventory {
 	return Inventory{
-		Broadcast:      "192.168.1.255",
-		ShellyIP:       "192.168.1.28",
-		ShellyACIP:     "192.168.1.29",
+		Broadcast:      "10.20.0.255",
+		ShellyIP:       "10.30.0.28",
+		ShellyACIP:     "10.30.0.29",
 		GogiosMuteFile: "/var/db/f3s/monitoring/f3s_taken_down",
 		Hosts: []Host{
-			{Name: "f0", Role: RoleF, IP: "192.168.1.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl",
+			{Name: "f0", Role: RoleF, IP: "10.20.0.130", MAC: "e8:ff:1e:d7:1c:ac", SSHPort: 22, SSHUser: "f3sctl",
 				Storage: StorageMaster},
-			{Name: "f1", Role: RoleF, IP: "192.168.1.131", MAC: "e8:ff:1e:d7:1e:44", SSHPort: 22, SSHUser: "f3sctl",
+			{Name: "f1", Role: RoleF, IP: "10.20.0.131", MAC: "e8:ff:1e:d7:1e:44", SSHPort: 22, SSHUser: "f3sctl",
 				Storage: StorageBackup},
-			{Name: "f2", Role: RoleF, IP: "192.168.1.132", MAC: "e8:ff:1e:d7:1c:a0", SSHPort: 22, SSHUser: "f3sctl"},
-			{Name: "f3", Role: RoleF, IP: "192.168.1.133", MAC: "e8:ff:1e:d7:f3:d7", SSHPort: 22, SSHUser: "f3sctl", Standalone: true},
+			{Name: "f2", Role: RoleF, IP: "10.20.0.132", MAC: "e8:ff:1e:d7:1c:a0", SSHPort: 22, SSHUser: "f3sctl"},
+			{Name: "f3", Role: RoleF, IP: "10.20.0.133", MAC: "e8:ff:1e:d7:f3:d7", SSHPort: 22, SSHUser: "f3sctl", Standalone: true},
 
-			{Name: "r0", Role: RoleCluster, IP: "192.168.1.120", SSHPort: 22, SSHUser: "f3sctl"},
-			{Name: "r1", Role: RoleCluster, IP: "192.168.1.121", SSHPort: 22, SSHUser: "f3sctl"},
-			{Name: "r2", Role: RoleCluster, IP: "192.168.1.122", SSHPort: 22, SSHUser: "f3sctl"},
+			{Name: "r0", Role: RoleCluster, IP: "10.20.0.120", SSHPort: 22, SSHUser: "f3sctl"},
+			{Name: "r1", Role: RoleCluster, IP: "10.20.0.121", SSHPort: 22, SSHUser: "f3sctl"},
+			{Name: "r2", Role: RoleCluster, IP: "10.20.0.122", SSHPort: 22, SSHUser: "f3sctl"},
 
 			// The gateways are reached over the WireGuard mesh, not by their
 			// public names. Two reasons, and the first is not optional:

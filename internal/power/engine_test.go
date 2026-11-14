@@ -24,18 +24,19 @@ import (
 //
 // Every step of a shutdown speaks SSH, which a powered-off host cannot answer.
 // On 2026-08-09, f0 being off made the zusb pre-flight fail with "connect to
-// host 192.168.1.130 port 22: Operation timed out" and the whole sequence
-// stopped, leaving f1 and f2 up.
+// host 192.168.1.130 port 22: Operation timed out" (f0's address before the
+// 2026-11-13 router migration) and the whole sequence stopped, leaving f1 and
+// f2 up.
 func TestPartitionLiveSkipsHostsThatAreAlreadyOff(t *testing.T) {
 	hosts := []inventory.Host{
-		{Name: "f1", IP: "192.168.1.131"},
-		{Name: "f2", IP: "192.168.1.132"},
-		{Name: "f0", IP: "192.168.1.130"},
+		{Name: "f1", IP: "10.20.0.131"},
+		{Name: "f2", IP: "10.20.0.132"},
+		{Name: "f0", IP: "10.20.0.130"},
 	}
 
 	// f0 is powered off; the other two answer.
 	live, off := partitionLive(hosts, func(ip string) bool {
-		return ip != "192.168.1.130"
+		return ip != "10.20.0.130"
 	})
 
 	if got := names(live); len(got) != 2 || got[0] != "f1" || got[1] != "f2" {
@@ -171,7 +172,7 @@ func buildTestEngine(t *testing.T, shelly *powertest.FakeShelly, fHostsOnly bool
 }
 
 // hostIP returns a host's address from the engine's own inventory, so a test
-// can talk about "f3" without hard-coding 192.168.1.133.
+// can talk about "f3" without hard-coding its address.
 func hostIP(t *testing.T, e *Engine, name string) string {
 	t.Helper()
 	h, ok := e.cfg.Inventory.ByName(name)

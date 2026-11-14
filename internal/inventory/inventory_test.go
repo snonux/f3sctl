@@ -3,6 +3,7 @@ package inventory
 import (
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"reflect"
 	"slices"
 	"strings"
@@ -504,4 +505,97 @@ func names(hosts []Host) []string {
 		out = append(out, h.Name)
 	}
 	return out
+}
+
+// TestDefaultAddresses pins the compiled-in addresses to the lab network the
+// router migration (finished 2026-11-13) moved the rack onto. The values
+// mirror the deployed /usr/local/etc/f3sctl.json on pi0/pi1; the retired
+// household LAN 192.168.1.0/24 must not come back, since nothing answers on it
+// and a bare f3sctl would then probe and wake into the void.
+func TestDefaultAddresses(t *testing.T) {
+	inv := Default()
+	want := map[string]struct{ ip, mac string }{
+		"f0": {"10.20.0.130", "e8:ff:1e:d7:1c:ac"},
+		"f1": {"10.20.0.131", "e8:ff:1e:d7:1e:44"},
+		"f2": {"10.20.0.132", "e8:ff:1e:d7:1c:a0"},
+		"f3": {"10.20.0.133", "e8:ff:1e:d7:f3:d7"},
+		"r0": {"10.20.0.120", ""}, "r1": {"10.20.0.121", ""}, "r2": {"10.20.0.122", ""},
+		"blowfish": {"192.168.2.110", ""}, "fishfinger": {"192.168.2.111", ""},
+	}
+	if len(inv.Hosts) != len(want) {
+		t.Fatalf("Default() has %d hosts, want %d", len(inv.Hosts), len(want))
+	}
+	for _, h := range inv.Hosts {
+		w, ok := want[h.Name]
+		if !ok {
+			t.Errorf("unexpected host %q", h.Name)
+			continue
+		}
+		if h.IP != w.ip || h.MAC != w.mac {
+			t.Errorf("%s: IP/MAC = %q/%q, want %q/%q", h.Name, h.IP, h.MAC, w.ip, w.mac)
+		}
+	}
+	plugs := map[string][2]string{
+		"broadcast":    {inv.Broadcast, "10.20.0.255"},
+		"shelly_ip":    {inv.ShellyIP, "10.30.0.28"},
+		"shelly_ac_ip": {inv.ShellyACIP, "10.30.0.29"},
+	}
+	for key, gw := range plugs {
+		if gw[0] != gw[1] {
+			t.Errorf("%s = %q, want %q", key, gw[0], gw[1])
+		}
+	}
+}
+
+// TestDefaultBroadcastReachesEveryFHost checks that the Wake-on-LAN broadcast
+// is the directed broadcast of the /24 every f-host sits on. A magic packet
+// sent anywhere else (the old 192.168.1.255, say) leaves the Pis without
+// error and wakes nothing, so this is the only place the mistake shows up.
+func TestDefaultBroadcastReachesEveryFHost(t *testing.T) {
+	inv := Default()
+	for _, h := range inv.EveryFHost() {
+		if !isBroadcastOf(t, inv.Broadcast, h.IP, 24) {
+			t.Errorf("%s (%s) is not on the broadcast domain of %s", h.Name, h.IP, inv.Broadcast)
+		}
+	}
+}
+
+// TestIsBroadcastOf keeps the helper above honest, including the stale
+// pre-migration broadcast that must be rejected.
+func TestIsBroadcastOf(t *testing.T) {
+	cases := []struct {
+		bcast, ip string
+		want      bool
+	}{
+		{"10.20.0.255", "10.20.0.130", true},
+		{"192.168.1.255", "10.20.0.130", false}, // retired household LAN
+		{"10.20.0.255", "192.168.1.130", false},
+		{"10.20.0.0", "10.20.0.130", false}, // network address, not broadcast
+		{"10.30.0.255", "10.20.0.130", false},
+	}
+	for _, c := range cases {
+		if got := isBroadcastOf(t, c.bcast, c.ip, 24); got != c.want {
+			t.Errorf("isBroadcastOf(%s, %s) = %v, want %v", c.bcast, c.ip, got, c.want)
+		}
+	}
+}
+
+// isBroadcastOf reports whether bcast is the last address of ip's /bits
+// prefix. Unparseable input fails the test.
+func isBroadcastOf(t *testing.T, bcast, ip string, bits int) bool {
+	t.Helper()
+	b, errB := netip.ParseAddr(bcast)
+	a, errA := netip.ParseAddr(ip)
+	if errB != nil || errA != nil {
+		t.Fatalf("parsing %q / %q: %v / %v", bcast, ip, errB, errA)
+	}
+	prefix := netip.PrefixFrom(a, bits).Masked()
+	if !prefix.Contains(b) {
+		return false
+	}
+	last := prefix.Addr().As4()
+	for i := range last {
+		last[i] |= ^byte(0) >> min(8, max(0, bits-8*i))
+	}
+	return netip.AddrFrom4(last) == b
 }

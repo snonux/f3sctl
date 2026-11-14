@@ -19,7 +19,7 @@ It is the counterpart to [`CLIENT.md`](CLIENT.md), which is normative for
 | Default path | `/var/db/f3sctl/apikey` |
 | Format | one accepted key per line |
 | Permissions | `0600`, owned by the user the CGI runs as |
-| Nodes | **both** pi0 (`192.168.1.125`) and pi1 (`192.168.1.126`) |
+| Nodes | **both** pi0 (`10.20.0.125`) and pi1 (`10.20.0.126`) |
 
 The file is plain text. Each non-blank, non-comment line is one accepted key,
 with surrounding whitespace trimmed. A line beginning with `#` is a comment and

@@ -41,9 +41,9 @@ func TestPeerSetBusyDetectsPeerRunning(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {job: &Job{State: JobRunning, Node: "pi1"}},
+		"10.20.0.126": {job: &Job{State: JobRunning, Node: "pi1"}},
 	})
-	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/cgi-bin/f3sctl/job", fetch: fetch}
+	ps := &PeerSet{Nodes: []string{"10.20.0.126"}, JobPath: "/cgi-bin/f3sctl/job", fetch: fetch}
 
 	busy, node := ps.Busy(context.Background(), "pi0", "sekrit")
 	if !busy {
@@ -64,9 +64,9 @@ func TestPeerSetBusyReturnsFalseWhenPeerIsIdle(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {job: &Job{State: JobDone, Node: "pi1"}},
+		"10.20.0.126": {job: &Job{State: JobDone, Node: "pi1"}},
 	})
-	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
+	ps := &PeerSet{Nodes: []string{"10.20.0.126"}, JobPath: "/job", fetch: fetch}
 
 	if busy, node := ps.Busy(context.Background(), "pi0", "k"); busy {
 		t.Errorf("Busy() = (true, %q), want false: the peer's job is done, not running", node)
@@ -82,9 +82,9 @@ func TestPeerSetBusyTreatsAnUnreachablePeerAsIdle(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {err: errors.New("connection refused")},
+		"10.20.0.126": {err: errors.New("connection refused")},
 	})
-	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
+	ps := &PeerSet{Nodes: []string{"10.20.0.126"}, JobPath: "/job", fetch: fetch}
 
 	busy, _ := ps.Busy(context.Background(), "pi0", "k")
 	if busy {
@@ -160,15 +160,15 @@ func TestPeerSetBusySkipsItselfByHostnameLookup(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {job: &Job{State: JobRunning, Node: "pi1"}},
+		"10.20.0.126": {job: &Job{State: JobRunning, Node: "pi1"}},
 	})
 	ps := &PeerSet{
-		Nodes:   []string{"192.168.1.125", "192.168.1.126"},
+		Nodes:   []string{"10.20.0.125", "10.20.0.126"},
 		JobPath: "/job",
 		fetch:   fetch,
 		lookupHost: func(host string) ([]string, error) {
 			if host == "pi0" {
-				return []string{"192.168.1.125"}, nil
+				return []string{"10.20.0.125"}, nil
 			}
 			return nil, errors.New("no such host")
 		},
@@ -180,7 +180,7 @@ func TestPeerSetBusySkipsItselfByHostnameLookup(t *testing.T) {
 		t.Fatalf("Busy() = (%v, %q), want (true, \"pi1\")", busy, node)
 	}
 	for _, c := range *calls {
-		if c.addr == "192.168.1.125" {
+		if c.addr == "10.20.0.125" {
 			t.Error("fetch was called for pi0's own address, which self-lookup should have skipped")
 		}
 	}
@@ -214,7 +214,7 @@ func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {err: wantErr},
+		"10.20.0.126": {err: wantErr},
 	})
 
 	type warnCall struct {
@@ -223,7 +223,7 @@ func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
 	}
 	var warns []warnCall
 	ps := &PeerSet{
-		Nodes:   []string{"192.168.1.126"},
+		Nodes:   []string{"10.20.0.126"},
 		JobPath: "/job",
 		fetch:   fetch,
 		warn:    func(addr string, err error) { warns = append(warns, warnCall{addr, err}) },
@@ -234,8 +234,8 @@ func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
 	if len(warns) != 1 {
 		t.Fatalf("warn called %d times, want exactly 1", len(warns))
 	}
-	if warns[0].addr != "192.168.1.126" {
-		t.Errorf("warn addr = %q, want %q", warns[0].addr, "192.168.1.126")
+	if warns[0].addr != "10.20.0.126" {
+		t.Errorf("warn addr = %q, want %q", warns[0].addr, "10.20.0.126")
 	}
 	if warns[0].err != wantErr {
 		t.Errorf("warn err = %v, want %v", warns[0].err, wantErr)
@@ -251,12 +251,12 @@ func TestPeerSetBusyWarnsOnFetchFailure(t *testing.T) {
 // exactly this distinction: the former points at this node's own
 // configuration, the latter at the peer actually being down.
 func TestPeerFetchFailureKindDistinguishesHTTPStatusFromConnectionFailure(t *testing.T) {
-	httpErr := &peerHTTPStatusError{addr: "192.168.1.126", status: "404 Not Found"}
+	httpErr := &peerHTTPStatusError{addr: "10.20.0.126", status: "404 Not Found"}
 	if got := peerFetchFailureKind(httpErr); got != "HTTP error" {
 		t.Errorf("peerFetchFailureKind(%v) = %q, want %q", httpErr, got, "HTTP error")
 	}
 
-	connErr := errors.New("dial tcp 192.168.1.126:80: connect: connection refused")
+	connErr := errors.New("dial tcp 10.20.0.126:80: connect: connection refused")
 	if got := peerFetchFailureKind(connErr); got != "connection failure" {
 		t.Errorf("peerFetchFailureKind(%v) = %q, want %q", connErr, got, "connection failure")
 	}
@@ -270,9 +270,9 @@ func TestPeerSetFetchJobReturnsThePeersJob(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {job: &Job{ID: "abc", State: JobDone, Node: "pi1"}},
+		"10.20.0.126": {job: &Job{ID: "abc", State: JobDone, Node: "pi1"}},
 	})
-	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
+	ps := &PeerSet{Nodes: []string{"10.20.0.126"}, JobPath: "/job", fetch: fetch}
 
 	got := ps.FetchJob(context.Background(), "pi0", "k")
 	if got == nil || got.ID != "abc" {
@@ -292,9 +292,9 @@ func TestPeerSetFetchJobReturnsNilWhenUnreachable(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.126": {err: errors.New("connection refused")},
+		"10.20.0.126": {err: errors.New("connection refused")},
 	})
-	ps := &PeerSet{Nodes: []string{"192.168.1.126"}, JobPath: "/job", fetch: fetch}
+	ps := &PeerSet{Nodes: []string{"10.20.0.126"}, JobPath: "/job", fetch: fetch}
 
 	if got := ps.FetchJob(context.Background(), "pi0", "k"); got != nil {
 		t.Errorf("FetchJob() = %v, want nil for an unreachable peer", got)

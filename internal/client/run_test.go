@@ -65,14 +65,14 @@ func TestJobWaitTimeoutTracksConfiguredUnmuteTimeout(t *testing.T) {
 // pingKnown property actually reaches the status.HostStatus it builds.
 func TestParseHostReadsPingKnown(t *testing.T) {
 	measured, ok := parseHost(Entity{Properties: map[string]any{
-		"name": "f3", "ip": "192.168.1.13", "ping": false, "pingKnown": true, "ssh": false,
+		"name": "f3", "ip": "10.20.0.13", "ping": false, "pingKnown": true, "ssh": false,
 	}})
 	if !ok || measured.PingKnown != true {
 		t.Errorf("parseHost(pingKnown=true) = %+v, ok=%v, want PingKnown true", measured, ok)
 	}
 
 	unmeasured, ok := parseHost(Entity{Properties: map[string]any{
-		"name": "f3", "ip": "192.168.1.13", "ping": false, "pingKnown": false, "ssh": false,
+		"name": "f3", "ip": "10.20.0.13", "ping": false, "pingKnown": false, "ssh": false,
 	}})
 	if !ok || unmeasured.PingKnown != false {
 		t.Errorf("parseHost(pingKnown=false) = %+v, ok=%v, want PingKnown false", unmeasured, ok)
@@ -86,7 +86,7 @@ func TestParseHostReadsPingKnown(t *testing.T) {
 // property, which is false, must not be read as PingKnown=false here.
 func TestParseHostDefaultsPingKnownWhenAbsent(t *testing.T) {
 	st, ok := parseHost(Entity{Properties: map[string]any{
-		"name": "f3", "ip": "192.168.1.13", "ping": false, "ssh": false,
+		"name": "f3", "ip": "10.20.0.13", "ping": false, "ssh": false,
 	}})
 	if !ok || !st.PingKnown {
 		t.Errorf("parseHost with pingKnown absent = %+v, ok=%v, want PingKnown true (older-server default)", st, ok)
@@ -103,12 +103,12 @@ func TestParseFansReportsAnErrorPropertyAsAnError(t *testing.T) {
 		t.Errorf("parseFans with an error property = %v, want it surfaced as an error", err)
 	}
 
-	fans, err := parseFans(Entity{Properties: map[string]any{"on": true, "ip": "192.168.1.99"}})
+	fans, err := parseFans(Entity{Properties: map[string]any{"on": true, "ip": "10.30.0.99"}})
 	if err != nil {
 		t.Fatalf("parseFans with no error property: %v", err)
 	}
-	if !fans.On || fans.IP != "192.168.1.99" {
-		t.Errorf("parseFans(on=true) = %+v, want On=true IP=192.168.1.99", fans)
+	if !fans.On || fans.IP != "10.30.0.99" {
+		t.Errorf("parseFans(on=true) = %+v, want On=true IP=10.30.0.99", fans)
 	}
 }
 

@@ -184,7 +184,7 @@ func (f *fakeAPI) fansOffAction() Action {
 func fansEntity(on bool, action Action) Entity {
 	return Entity{
 		Class:      []string{"fans"},
-		Properties: map[string]any{"on": on, "ip": "192.168.1.99"},
+		Properties: map[string]any{"on": on, "ip": "10.30.0.99"},
 		Links:      []Link{{Rel: []string{"self"}, Href: "/fans"}},
 		Actions:    []Action{action},
 	}

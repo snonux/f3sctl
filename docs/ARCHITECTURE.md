@@ -47,8 +47,9 @@ flowchart LR
 **Shutdowns always go through the API**, from anywhere — only pi0/pi1 hold the
 restricted SSH key, so routing through the API is what makes the same command
 work from a laptop. Waking, status and the fan plug stay local: a magic packet
-is an unprivileged broadcast any LAN host may send, which also leaves a way to
-wake the rack when the API itself is down.
+is an unprivileged broadcast any host on the lab LAN (10.20.0.0/24) may send,
+which also leaves a way to wake the rack when the API itself is down. It is not
+routed, so a laptop on the Wi-Fi (10.30.0.0/24) wakes through the API.
 
 The OpenBSD gateways deliberately run **no** f3sctl: they only ever needed to
 set and clear the Gogios mute marker, which a standalone script does behind the

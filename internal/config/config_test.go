@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -466,6 +467,17 @@ func TestDefaultGogiosValues(t *testing.T) {
 	}
 	if def.GogiosCacheTTL != Duration(60*time.Second) {
 		t.Errorf("GogiosCacheTTL = %v, want 60s", def.GogiosCacheTTL)
+	}
+}
+
+// TestDefaultPeerNodes pins the compiled-in peer nodes to pi0/pi1's lab
+// addresses. The old 192.168.1.125/.126 were retired in the 2026-11-13 router
+// migration; a peer list naming them would count both Pis as unreachable,
+// and so idle, and the job-overlap guard would wave everything through.
+func TestDefaultPeerNodes(t *testing.T) {
+	want := []string{"10.20.0.125", "10.20.0.126"}
+	if got := Default().PeerNodes; !slices.Equal(got, want) {
+		t.Errorf("PeerNodes = %v, want %v", got, want)
 	}
 }
 

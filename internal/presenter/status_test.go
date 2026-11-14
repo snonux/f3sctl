@@ -39,11 +39,11 @@ func TestDescribeSeparatesOffFromUnmeasured(t *testing.T) {
 // that actually reaches an operator's terminal.
 func TestStatusRendersUnknownForUnmeasuredHost(t *testing.T) {
 	statuses := []status.HostStatus{
-		{Name: "f3", IP: "192.168.1.13", Ping: false, PingKnown: false, SSH: false},
+		{Name: "f3", IP: "10.20.0.13", Ping: false, PingKnown: false, SSH: false},
 	}
 
 	var buf bytes.Buffer
-	if err := Status(&buf, statuses, Options{ShowRole: false}, status.FansState{On: true, IP: "192.168.1.99"}, nil, status.ACState{On: true, IP: "192.168.1.29"}, nil); err != nil {
+	if err := Status(&buf, statuses, Options{ShowRole: false}, status.FansState{On: true, IP: "10.30.0.99"}, nil, status.ACState{On: true, IP: "10.30.0.29"}, nil); err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	out := buf.String()
@@ -63,7 +63,7 @@ func TestStatusRendersUnknownForUnmeasuredHost(t *testing.T) {
 // host properties (docs/CLIENT.md section 11) do not include role.
 func TestStatusShowsRoleColumnOnlyWhenAsked(t *testing.T) {
 	statuses := []status.HostStatus{
-		{Name: "f0", Role: "power", IP: "192.168.1.10", Ping: true, PingKnown: true, SSH: true},
+		{Name: "f0", Role: "power", IP: "10.20.0.10", Ping: true, PingKnown: true, SSH: true},
 	}
 
 	var withRole bytes.Buffer

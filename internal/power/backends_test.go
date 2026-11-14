@@ -464,7 +464,7 @@ func TestOffReportsPowerOffFailureAndLeavesFansOn(t *testing.T) {
 	eng := testEngine(t, shelly, "f0")
 	eng.zusb = &fakeZusb{}
 	eng.power = &fakePower{
-		powerOffErr: map[string]error{"f0": errors.New("ssh: connect to host 192.168.1.130 port 22: Operation timed out")},
+		powerOffErr: map[string]error{"f0": errors.New("ssh: connect to host 10.20.0.130 port 22: Operation timed out")},
 	}
 
 	var log bytes.Buffer

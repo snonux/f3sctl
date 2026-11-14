@@ -3,7 +3,7 @@
 // It is what `f3sctl --remote ...` uses, so this laptop can control the
 // homelab from anywhere rather than only from the LAN. That matters for more
 // than convenience: Wake-on-LAN magic packets are not routed, so a machine off
-// the 192.168.1.0/24 broadcast domain physically cannot wake an f-host. Asking
+// the lab 10.20.0.0/24 broadcast domain physically cannot wake an f-host. Asking
 // pi0/pi1 to send the packet is the only way to do it remotely.
 //
 // This package follows exactly the contract documented in docs/CLIENT.md and

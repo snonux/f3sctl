@@ -188,8 +188,9 @@ func (e *Engine) offPreflight(ctx context.Context, log io.Writer, tl *timeline,
 //
 // This is not hypothetical. On 2026-08-09 a `power off` run with f0 already
 // down failed at the zusb pre-flight with "connect to host 192.168.1.130 port
-// 22: Operation timed out" and left f1 and f2 running. Shutting the rack down
-// in stages, or re-running after a partial run, is ordinary use.
+// 22: Operation timed out" (f0's pre-migration address) and left f1 and f2
+// running. Shutting the rack down in stages, or re-running after a partial
+// run, is ordinary use.
 //
 // Ping decides this, not SSH. A host answering ICMP but not SSH is powered on
 // and unreachable, and that case must still abort: there is no way to tell

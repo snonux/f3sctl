@@ -219,7 +219,7 @@ func Default() Config {
 		},
 		APIKeyFile: "/var/db/f3sctl/apikey",
 		StateDir:   "/var/db/f3sctl",
-		PeerNodes:  []string{"192.168.1.125", "192.168.1.126"},
+		PeerNodes:  []string{"10.20.0.125", "10.20.0.126"}, // pi0, pi1 on the lab LAN
 		// PeerJobPath is left empty so it is derived from this node's own
 		// SCRIPT_NAME at request time -- see the field's doc comment.
 		PeerJobPath:        "",

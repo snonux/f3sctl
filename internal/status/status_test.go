@@ -20,9 +20,9 @@ func TestJSONShape(t *testing.T) {
 	}{
 		{
 			name: "host, full",
-			v: HostStatus{Name: "f0", Role: "f", IP: "192.168.1.130", Ping: true,
+			v: HostStatus{Name: "f0", Role: "f", IP: "10.20.0.130", Ping: true,
 				PingKnown: true, SSH: true, MS: 1.5},
-			want: `{"name":"f0","role":"f","ip":"192.168.1.130","ping":true,"pingKnown":true,"ssh":true,"ms":1.5}`,
+			want: `{"name":"f0","role":"f","ip":"10.20.0.130","ping":true,"pingKnown":true,"ssh":true,"ms":1.5}`,
 		},
 		{
 			// Zero values are encoded, not omitted: a missing pingKnown reads
@@ -34,8 +34,8 @@ func TestJSONShape(t *testing.T) {
 		},
 		{
 			name: "fans",
-			v:    FansState{On: true, IP: "192.168.1.99"},
-			want: `{"on":true,"ip":"192.168.1.99"}`,
+			v:    FansState{On: true, IP: "10.30.0.99"},
+			want: `{"on":true,"ip":"10.30.0.99"}`,
 		},
 		{
 			name: "fans, zero",
@@ -44,8 +44,8 @@ func TestJSONShape(t *testing.T) {
 		},
 		{
 			name: "ac",
-			v:    ACState{On: true, IP: "192.168.1.29"},
-			want: `{"on":true,"ip":"192.168.1.29"}`,
+			v:    ACState{On: true, IP: "10.30.0.29"},
+			want: `{"on":true,"ip":"10.30.0.29"}`,
 		},
 		{
 			name: "ac, zero",

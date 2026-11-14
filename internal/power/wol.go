@@ -36,9 +36,10 @@ func magicPacket(mac string) ([]byte, error) {
 // port, so nothing needs to be listening.
 //
 // A magic packet is not routed, so this only works from a host on the same
-// broadcast domain as the target — pi0/pi1 and earth all sit on
-// 192.168.1.0/24 with f0-f3, which is what makes the Pis viable as the API
-// hosts.
+// broadcast domain as the target — pi0/pi1 sit on the lab 10.20.0.0/24 with
+// f0-f3, which is what makes the Pis viable as the API hosts. The laptop
+// (earth) is normally on the Wi-Fi 10.30.0.0/24 since the 2026-11-13 router
+// migration, so it wakes hosts through the Pis (`f3sctl -r`), not locally.
 func (e *Engine) Wake(h inventory.Host) error {
 	if !h.Wakeable() {
 		return fmt.Errorf("%s has no MAC address configured; cannot wake it", h.Name)

@@ -139,10 +139,10 @@ func TestRunningJobKeepsAskingPastAnUnreachablePeer(t *testing.T) {
 		job *Job
 		err error
 	}{
-		"192.168.1.125": {err: &peerUnreachableError{addr: "192.168.1.125", err: errors.New("refused")}},
-		"192.168.1.126": {job: &Job{ID: "x", State: JobRunning, Node: "pi1"}},
+		"10.20.0.125": {err: &peerUnreachableError{addr: "10.20.0.125", err: errors.New("refused")}},
+		"10.20.0.126": {job: &Job{ID: "x", State: JobRunning, Node: "pi1"}},
 	})
-	ps := &PeerSet{Nodes: []string{"192.168.1.125", "192.168.1.126"}, JobPath: "/job", fetch: fetch,
+	ps := &PeerSet{Nodes: []string{"10.20.0.125", "10.20.0.126"}, JobPath: "/job", fetch: fetch,
 		warn: func(string, error) {}}
 
 	job, err := ps.RunningJob(context.Background(), "earth", "k")

@@ -21,8 +21,8 @@ import (
 func TestParseProcMounts(t *testing.T) {
 	const sample = `sysfs /sys sysfs rw,nosuid,nodev,noexec 0 0
 proc /proc proc rw,nosuid,nodev,noexec 0 0
-192.168.1.138:/tank/media /mnt/media nfs4 rw,relatime 0 0
-192.168.1.138:/tank/backup /mnt/backup nfs rw,relatime 0 0
+10.20.0.138:/tank/media /mnt/media nfs4 rw,relatime 0 0
+10.20.0.138:/tank/backup /mnt/backup nfs rw,relatime 0 0
 tmpfs /run tmpfs rw,nosuid 0 0
 `
 	got, err := parseProcMounts(strings.NewReader(sample))
@@ -49,8 +49,8 @@ func TestParseProcMountsWithNoNFS(t *testing.T) {
 // TestParseBSDMountOutput pins the "server:/export on /mountpoint (nfs, ...)"
 // shape every BSD here prints for `mount -t nfs`.
 func TestParseBSDMountOutput(t *testing.T) {
-	const sample = "192.168.1.138:/tank/media on /mnt/media (nfs, nfsv3, tcp)\n" +
-		"192.168.1.138:/tank/backup on /mnt/backup (nfs, nfsv3, tcp)\n"
+	const sample = "10.20.0.138:/tank/media on /mnt/media (nfs, nfsv3, tcp)\n" +
+		"10.20.0.138:/tank/backup on /mnt/backup (nfs, nfsv3, tcp)\n"
 
 	got := parseBSDMountOutput(sample)
 	want := []string{"/mnt/media", "/mnt/backup"}
@@ -90,7 +90,7 @@ func TestBSDNFSMountsToldApartFromAnUnrunnableMount(t *testing.T) {
 	})
 
 	t.Run("mount ran and printed a mount: parsed", func(t *testing.T) {
-		bin := writeStubMount(t, "#!/bin/sh\necho '192.168.1.138:/tank/media on /mnt/media (nfs)'\n")
+		bin := writeStubMount(t, "#!/bin/sh\necho '10.20.0.138:/tank/media on /mnt/media (nfs)'\n")
 		got, err := bsdNFSMounts(context.Background(), bin)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)

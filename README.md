@@ -38,8 +38,10 @@ job's process died and its state still reads "running".
 pi0/pi1 can actually perform one — the restricted SSH key is pinned to them —
 so routing through the API is what makes the same command work on a laptop.
 Waking, status and the fan/AC plugs stay local: a magic packet is an unprivileged
-broadcast any LAN host may send, which also leaves a way to wake the rack when
-the API itself is unreachable. The Gogios mute is the exception inside a local
+broadcast any host on the lab LAN (10.20.0.0/24) may send, which also leaves a
+way to wake the rack when the API itself is unreachable. A magic packet is not
+routed, so a laptop on the Wi-Fi (10.30.0.0/24) must wake through the API
+(`--remote`). The Gogios mute is the exception inside a local
 wake: the gateways only accept the pinned key, so where no such key is readable
 (a laptop) the closing un-mute goes through the API, exactly like
 `f3sctl monitoring unmute`. `--local` overrides the routing (the un-mute then
@@ -251,7 +253,7 @@ first readable entry wins, which lets one shipped config serve both the
   "shelly_password_file": ["/var/db/f3sctl/shelly_plug", "~/.shelly_plug"],
   "api_key_file":         "/var/db/f3sctl/apikey",
   "state_dir":            "/var/db/f3sctl",
-  "peer_nodes":           ["192.168.1.125", "192.168.1.126"]
+  "peer_nodes":           ["10.20.0.125", "10.20.0.126"]
 }
 ```
 
