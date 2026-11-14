@@ -84,8 +84,8 @@ func hostsUp(names ...string) *fakeLiveness { return &fakeLiveness{up: names} }
 // inventory's broadcast LAN, so a wake stays local wherever the tests run
 // (wakeroute_test.go covers the off-LAN routing).
 //
-// It calls run rather than the exported Run because Run's only job is to pass a
-// nil liveness, meaning "ask the engine over ICMP". Everything under test --
+// It calls run rather than the exported Run because Run's only job is to pass
+// zero runSeams, meaning the real probes. Everything under test --
 // global flag parsing, dispatch, the guard, the plug -- is the same code path
 // main takes.
 func runCLI(t *testing.T, cfg config.Config, live *fakeLiveness, args ...string) (stdout, stderr string, err error) {

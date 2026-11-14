@@ -198,9 +198,14 @@ func TestOffLANWakeGoesThroughTheAPI(t *testing.T) {
 	for _, args := range [][]string{{"power", "on"}, {"power", "all", "on"}, {"power", "f3", "on"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			srv, hits := countingAPI(t)
-			stderr, shelly, _ := wakeFromLaptop(t, srv.URL, true, args...)
+			stderr, shelly, err := wakeFromLaptop(t, srv.URL, true, args...)
 			if hits.Load() == 0 {
 				t.Error("the API was never asked")
+			}
+			// The test API answers 503 to everything; that answer, not a
+			// local outcome, must be what the command reports.
+			if err == nil || !strings.Contains(err.Error(), "503") {
+				t.Errorf("err = %v, want the test API's 503 surfaced", err)
 			}
 			if !strings.Contains(stderr, "waking through the API") {
 				t.Errorf("stderr = %q, want it to say the wake went through the API", stderr)
@@ -215,16 +220,20 @@ func TestOffLANWakeGoesThroughTheAPI(t *testing.T) {
 // TestOffLANWakeWithoutAKeyIsRefused: no API to fall back on, so the wake
 // fails loudly instead of sending a packet nobody receives and succeeding.
 func TestOffLANWakeWithoutAKeyIsRefused(t *testing.T) {
-	srv, hits := countingAPI(t)
-	_, shelly, err := wakeFromLaptop(t, srv.URL, false, "power", "on")
-	if !errors.Is(err, errWakeOffLAN) {
-		t.Fatalf("err = %v, want errWakeOffLAN", err)
-	}
-	if hits.Load() != 0 {
-		t.Errorf("API hits = %d, want none without a key", hits.Load())
-	}
-	if got := shelly.SetCalls(); len(got) != 0 {
-		t.Errorf("Switch.Set calls = %v, want none on a refused wake", got)
+	for _, args := range [][]string{{"power", "on"}, {"power", "all", "on"}, {"power", "f3", "on"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			srv, hits := countingAPI(t)
+			_, shelly, err := wakeFromLaptop(t, srv.URL, false, args...)
+			if !errors.Is(err, errWakeOffLAN) {
+				t.Fatalf("err = %v, want errWakeOffLAN", err)
+			}
+			if hits.Load() != 0 {
+				t.Errorf("API hits = %d, want none without a key", hits.Load())
+			}
+			if got := shelly.SetCalls(); len(got) != 0 {
+				t.Errorf("Switch.Set calls = %v, want none on a refused wake", got)
+			}
+		})
 	}
 }
 
@@ -254,8 +263,11 @@ func TestOnLANWakeStaysLocal(t *testing.T) {
 	cfg.APIURL, cfg.APIKeyFile = lab.APIURL, lab.APIKeyFile
 
 	var out, errBuf bytes.Buffer
-	_ = run(context.Background(), cfg, []string{"power", "f3", "on"}, &out, &errBuf, nil, false,
+	err := run(context.Background(), cfg, []string{"power", "f3", "on"}, &out, &errBuf, nil, false,
 		runSeams{liveHosts: hostsUp().hosts, interfaceAddrs: onLANOf(cfg.Inventory.Broadcast)})
+	if err != nil {
+		t.Errorf("local wake on the lab LAN: %v", err)
+	}
 	if hits.Load() != 0 {
 		t.Errorf("API hits = %d, want none on the lab LAN", hits.Load())
 	}

@@ -42,8 +42,8 @@ broadcast any host on the lab LAN (10.20.0.0/24) may send, which also leaves a
 way to wake the rack when the API itself is unreachable. A magic packet is not
 routed, so a wake from a host with no interface on the inventory broadcast's
 subnet (a laptop on the Wi-Fi, 10.30.0.0/24, even with wg2 up) goes through the
-API automatically when an API key is configured (`F3SCTL_KEY` or
-`api_key_file`), and is refused otherwise, saying to use `--remote` or run from
+API automatically when the API is configured (`api_url` or `F3SCTL_URL`, and a
+key in `F3SCTL_KEY` or `api_key_file`), and is refused otherwise, saying to use `--remote` or run from
 the lab LAN; it no longer sends a packet nobody receives and reports success.
 `--local` still sends it, with a warning. The Gogios mute is the exception inside a local
 wake: the gateways only accept the pinned key, so where no such key is readable

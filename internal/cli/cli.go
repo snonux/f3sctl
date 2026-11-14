@@ -60,8 +60,8 @@ Global flags:
                  acting locally. Needs api_url and an API key (config, or
                  F3SCTL_URL / F3SCTL_KEY). A Wake-on-LAN magic packet is not
                  routed, so a wake from a host with no interface on the lab
-                 LAN (10.20.0.0/24) uses the API by itself when a key is
-                 configured, and is refused when none is.
+                 LAN (10.20.0.0/24) uses the API by itself when api_url and
+                 a key are configured, and is refused when they are not.
   --local, -l    Act on the homelab directly instead of calling the API. Only
                  works where an authorised SSH key exists, i.e. on pi0/pi1:
                  the key is pinned to those two hosts. Use for debugging or
