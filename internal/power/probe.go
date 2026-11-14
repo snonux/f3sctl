@@ -100,16 +100,24 @@ func (e *Engine) probeOne(ctx context.Context, h inventory.Host) HostStatus {
 //
 // The two probes run concurrently, as in probeOne: on a silent host both wait
 // out ProbeTimeout, and running them one after the other would double the
-// cost of every confirmation round.
+// cost of every confirmation round. An echo reply settles the question, so
+// it cancels the dial rather than waiting out a filtered or not-yet-started
+// sshd (a host mid-boot or mid-shutdown answers ping long before or after
+// sshd).
 func (e *Engine) answers(ctx context.Context, h inventory.Host) (up, known bool) {
+	sshCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	var wg sync.WaitGroup
 	var sshUp bool
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		sshUp = e.probeBackend().SSH(ctx, h)
+		sshUp = e.probeBackend().SSH(sshCtx, h)
 	}()
 	pingUp, pingKnown := e.liveness()(ctx, h.IP)
+	if pingUp {
+		cancel()
+	}
 	wg.Wait()
 	return pingUp || sshUp, pingKnown || sshUp
 }

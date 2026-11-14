@@ -154,3 +154,33 @@ func TestDownNodesTreatsSSHOnlyNodeAsUp(t *testing.T) {
 		t.Errorf("downNodes = %v, want [r1]", got)
 	}
 }
+
+// blockingSSH is a ProbeBackend whose sshd dial hangs until its context is
+// cancelled, like a filtered port waiting out its timeout.
+type blockingSSH struct{}
+
+func (blockingSSH) Ping(context.Context, string) (up, known bool) { return false, true }
+func (blockingSSH) SSH(ctx context.Context, _ inventory.Host) bool {
+	<-ctx.Done()
+	return false
+}
+
+// TestAnswersStopsTheDialOnceICMPAnswers: an echo reply settles the question,
+// so answers must not wait out a dial that cannot connect. Without the
+// cancel this blocks until the test's deadline.
+func TestAnswersStopsTheDialOnceICMPAnswers(t *testing.T) {
+	e := &Engine{
+		isUp:  func(context.Context, string) (bool, bool) { return true, true },
+		probe: blockingSSH{},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	up, known := e.answers(ctx, inventory.Host{Name: "f0", IP: "192.0.2.60", SSHPort: 22})
+	if !up || !known {
+		t.Errorf("answers = (%v, %v), want (true, true)", up, known)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("answers waited %s for a dial after ping had answered", waited)
+	}
+}

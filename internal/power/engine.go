@@ -35,17 +35,15 @@ type Engine struct {
 	// isUp probes one host: whether it answered ICMP, and -- separately --
 	// whether the probe reached any conclusion at all.
 	//
-	// The strict decisions below do not read it on its own: they go through
-	// Engine.answers, which pairs it with an sshd dial so that a host whose
-	// ICMP is filtered but whose sshd answers is never taken for off.
-	//
 	// A field rather than a direct pingOnce call because four things read it:
-	// which hosts to skip as already off (Engine.off), whether a host that
+	// which hosts to skip as already off (skipAlreadyOff), whether a host that
 	// accepted a shutdown actually went silent (awaitPowerDown), whether the
 	// rack is idle enough to cut the fans (RackActivity, for all three fan
-	// guards -- see that type),
-	// and the ping column of `power status` (probeOne, and through it ProbeAll
-	// and gogios.waitForCluster). None of them can be tested against real
+	// guards -- see that type), and the ping column of `power status`
+	// (probeOne, and through it ProbeAll and gogios.waitForCluster). The first
+	// three read it through Engine.answers, which pairs it with an sshd dial so
+	// that a host whose ICMP is filtered but whose sshd answers is never taken
+	// for off; probeOne reads it directly and reports both signals apart. None of them can be tested against real
 	// ping(8) without depending on the machine's network stack and on packets
 	// leaving the box. New wires it to pingOnce; only tests substitute
 	// anything else. Same reasoning as cli.liveHostsFunc.
