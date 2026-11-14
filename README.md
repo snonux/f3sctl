@@ -40,8 +40,12 @@ so routing through the API is what makes the same command work on a laptop.
 Waking, status and the fan/AC plugs stay local: a magic packet is an unprivileged
 broadcast any host on the lab LAN (10.20.0.0/24) may send, which also leaves a
 way to wake the rack when the API itself is unreachable. A magic packet is not
-routed, so a laptop on the Wi-Fi (10.30.0.0/24) must wake through the API
-(`--remote`). The Gogios mute is the exception inside a local
+routed, so a wake from a host with no interface on the inventory broadcast's
+subnet (a laptop on the Wi-Fi, 10.30.0.0/24, even with wg2 up) goes through the
+API automatically when an API key is configured (`F3SCTL_KEY` or
+`api_key_file`), and is refused otherwise, saying to use `--remote` or run from
+the lab LAN; it no longer sends a packet nobody receives and reports success.
+`--local` still sends it, with a warning. The Gogios mute is the exception inside a local
 wake: the gateways only accept the pinned key, so where no such key is readable
 (a laptop) the closing un-mute goes through the API, exactly like
 `f3sctl monitoring unmute`. `--local` overrides the routing (the un-mute then

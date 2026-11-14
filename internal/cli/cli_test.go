@@ -79,7 +79,10 @@ func (f *fakeLiveness) hosts(context.Context) []string {
 // With no names it reports an idle rack.
 func hostsUp(names ...string) *fakeLiveness { return &fakeLiveness{up: names} }
 
-// runCLI drives one invocation with the fan guard's liveness probe replaced.
+// runCLI drives one invocation with the fan guard's liveness probe replaced,
+// and with the local interface list reporting this machine on the
+// inventory's broadcast LAN, so a wake stays local wherever the tests run
+// (wakeroute_test.go covers the off-LAN routing).
 //
 // It calls run rather than the exported Run because Run's only job is to pass a
 // nil liveness, meaning "ask the engine over ICMP". Everything under test --
@@ -97,7 +100,8 @@ func runCLICtx(t *testing.T, ctx context.Context, cfg config.Config, live *fakeL
 
 	t.Helper()
 	var outBuf, errBuf bytes.Buffer
-	err = run(ctx, cfg, args, &outBuf, &errBuf, nil, false, live.hosts)
+	err = run(ctx, cfg, args, &outBuf, &errBuf, nil, false,
+		runSeams{liveHosts: live.hosts, interfaceAddrs: onLANOf(cfg.Inventory.Broadcast)})
 	return outBuf.String(), errBuf.String(), err
 }
 
@@ -155,7 +159,7 @@ func TestPlugOffGuardInterruptedIsNotARefusal(t *testing.T) {
 			probe := func(c context.Context) []string { cancel(); return live.hosts(c) }
 
 			var outBuf, errBuf bytes.Buffer
-			err := run(ctx, cfg, []string{noun, "off"}, &outBuf, &errBuf, nil, false, probe)
+			err := run(ctx, cfg, []string{noun, "off"}, &outBuf, &errBuf, nil, false, runSeams{liveHosts: probe})
 			if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "--force") {
 				t.Fatalf("err = %v, want a wrapped context.Canceled, not a refusal", err)
 			}

@@ -39,7 +39,11 @@ func magicPacket(mac string) ([]byte, error) {
 // broadcast domain as the target — pi0/pi1 sit on the lab 10.20.0.0/24 with
 // f0-f3, which is what makes the Pis viable as the API hosts. The laptop
 // (earth) is normally on the Wi-Fi 10.30.0.0/24 since the 2026-11-13 router
-// migration, so it wakes hosts through the Pis (`f3sctl -r`), not locally.
+// migration, so it wakes hosts through the Pis: the CLI notices that no local
+// interface is on the broadcast's subnet and routes the wake through the API
+// (cli.routeOffLANWake), refusing it when no API key is configured. Nothing
+// here can tell whether the packet arrived, which is why that check sits in
+// front of this rather than after it.
 func (e *Engine) Wake(h inventory.Host) error {
 	if !h.Wakeable() {
 		return fmt.Errorf("%s has no MAC address configured; cannot wake it", h.Name)

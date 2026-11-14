@@ -57,10 +57,11 @@ Usage:
 
 Global flags:
   --remote, -r   Drive the command through the HTTP API on pi0/pi1 instead of
-                 acting locally. Required when off the lab LAN
-                 (10.20.0.0/24): a Wake-on-LAN magic packet is not routed, so
-                 only a host on that broadcast domain can send one. Needs
-                 api_url and an API key (config, or F3SCTL_URL / F3SCTL_KEY).
+                 acting locally. Needs api_url and an API key (config, or
+                 F3SCTL_URL / F3SCTL_KEY). A Wake-on-LAN magic packet is not
+                 routed, so a wake from a host with no interface on the lab
+                 LAN (10.20.0.0/24) uses the API by itself when a key is
+                 configured, and is refused when none is.
   --local, -l    Act on the homelab directly instead of calling the API. Only
                  works where an authorised SSH key exists, i.e. on pi0/pi1:
                  the key is pinned to those two hosts. Use for debugging or
@@ -85,7 +86,7 @@ way to power anything back on.
 // -- restoring f-host AC after an interrupted `power all cycle` -- run on a
 // context detached from it.
 func Run(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer) error {
-	return run(ctx, cfg, args, stdout, stderr, nil, false, nil)
+	return run(ctx, cfg, args, stdout, stderr, nil, false, runSeams{})
 }
 
 // RunLocal executes an invocation that must act on the homelab directly,
@@ -98,16 +99,27 @@ func Run(ctx context.Context, cfg config.Config, args []string, stdout, stderr i
 func RunLocal(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer,
 	reporter power.Reporter) error {
 
-	return run(ctx, cfg, args, stdout, stderr, reporter, true, nil)
+	return run(ctx, cfg, args, stdout, stderr, reporter, true, runSeams{})
+}
+
+// runSeams are the probes run consults that tests replace. The zero value is
+// production: each nil field means the real mechanism.
+type runSeams struct {
+	// liveHosts is what the fans/AC off guard consults; nil means the plug's
+	// real ICMP-and-SSH probe on the engine runPlug builds.
+	liveHosts liveHostsFunc
+	// interfaceAddrs lists the local interface addresses a default-routed
+	// wake checks against the inventory broadcast; nil means
+	// net.InterfaceAddrs. See routeOffLANWake.
+	interfaceAddrs interfaceAddrsFunc
 }
 
 // run executes one invocation.
 //
-// liveHosts is the seam the fans/AC off guard consults; a nil one means the
-// plug's real ICMP probe on the engine runPlug builds, which is what both
-// exported entry points pass. Only the tests substitute anything else.
+// seams are the probes tests substitute (see runSeams); both exported entry
+// points pass the zero value, the real mechanisms.
 func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr io.Writer,
-	reporter power.Reporter, forceLocal bool, liveHosts liveHostsFunc) error {
+	reporter power.Reporter, forceLocal bool, seams runSeams) error {
 
 	args, flags := parseGlobalFlags(args)
 	if forceLocal {
@@ -127,6 +139,26 @@ func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr i
 		return runRemote(ctx, cfg, args, flags, stdout, stderr)
 	}
 
+	// A wake stays local by default, but a magic packet only works from the
+	// lab LAN: from anywhere else it goes through the API, or is refused,
+	// instead of reporting success for a packet nobody received. The API's
+	// own job child (RunLocal) runs on a Pi and sets --local, so it never
+	// takes this detour.
+	if isWake(args) {
+		handled, err := routeOffLANWake(ctx, cfg, args, flags, seams.interfaceAddrs, stdout, stderr)
+		if handled || err != nil {
+			return err
+		}
+	}
+
+	return dispatchLocal(ctx, cfg, args, flags, stdout, stderr, reporter, seams)
+}
+
+// dispatchLocal runs a command that run has decided to perform here rather
+// than through the API.
+func dispatchLocal(ctx context.Context, cfg config.Config, args []string, flags globalFlags,
+	stdout, stderr io.Writer, reporter power.Reporter, seams runSeams) error {
+
 	switch args[0] {
 	case "version":
 		fmt.Fprintf(stdout, "f3sctl %s\n", internal.Version)
@@ -137,9 +169,9 @@ func run(ctx context.Context, cfg config.Config, args []string, stdout, stderr i
 	case "power":
 		return runPower(ctx, cfg, args[1:], flags.local, stdout, stderr, reporter)
 	case "fans":
-		return runPlug(ctx, cfg, fansPlug, args[1:], flags.force, liveHosts, stdout, stderr)
+		return runPlug(ctx, cfg, fansPlug, args[1:], flags.force, seams.liveHosts, stdout, stderr)
 	case "ac":
-		return runPlug(ctx, cfg, acPlug, args[1:], flags.force, liveHosts, stdout, stderr)
+		return runPlug(ctx, cfg, acPlug, args[1:], flags.force, seams.liveHosts, stdout, stderr)
 	case "monitoring":
 		return runMonitoring(ctx, cfg, args[1:], stdout, stderr)
 	case "gogios":

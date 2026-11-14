@@ -59,8 +59,9 @@ type globalFlags struct {
 // unprivileged broadcast any host on the lab LAN (10.20.0.0/24) may send, and
 // the other two need no authorisation at all. Keeping them local also leaves a
 // way to wake the rack when the API itself is unreachable. A local wake from
-// off the lab LAN (the laptop on the Wi-Fi) sends a packet nobody receives, so
-// there --remote is needed.
+// off the lab LAN (the laptop on the Wi-Fi) would send a packet nobody
+// receives, so run checks the local interfaces after this and routes such a
+// wake through the API, or refuses it (routeOffLANWake, wakeroute.go).
 //
 // --local overrides all of this and is the escape hatch for running on a Pi,
 // or for debugging without the API in the path.
